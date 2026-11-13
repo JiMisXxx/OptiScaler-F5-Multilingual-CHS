@@ -1118,6 +1118,7 @@ CODE
 #include "imgui.h"
 #ifndef IMGUI_DISABLE
 #include "imgui_internal.h"
+#include "../../i18n/OptiI18n.h"
 
 // System includes
 #include <stdio.h>      // vsnprintf, sscanf, printf
@@ -5434,6 +5435,7 @@ static void PushDefaultFont();
 
 void ImGui::NewFrame()
 {
+    OptiI18n::BeginFrame();
     IM_ASSERT(GImGui != NULL && "No current context. Did you call ImGui::CreateContext() and ImGui::SetCurrentContext() ?");
     ImGuiContext& g = *GImGui;
 

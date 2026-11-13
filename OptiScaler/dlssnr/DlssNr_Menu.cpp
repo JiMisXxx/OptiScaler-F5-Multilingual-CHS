@@ -45,6 +45,7 @@
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 #include <shaders/dlssnr/DlssNr_DepthFade.h>
 #include "DlssNr_ColourEncodingStatus.h"
+#include "../i18n/OptiI18n.h"
 #include "DlssNr_SteadyValue.h"
 #include "DlssNr_GameDefaults.h"
 #include "DlssNr_NativeMode.h"
@@ -77,6 +78,33 @@ static bool HaveGameExposure()
 {
     return DlssNr::IsRunningVk() ? DlssNr::ExposureOfferedVk()
                                   : DlssNr::GameExposureStatus().everOffered;
+}
+
+// "Bottleneck reuse: <status>": VitStatus() assembles its counts at run time, so
+// its two shapes are translated here by shape rather than by exact lookup. In
+// English the original string is returned untouched.
+static std::string VitStatusText()
+{
+    const std::string status = DlssNrNative::VitStatus();
+    if (OptiI18n::IsEnglish())
+        return status;
+
+    unsigned long long computed = 0;
+    unsigned long long reused = 0;
+    unsigned long long copied = 0;
+    if (std::sscanf(status.c_str(), "computed %llu, reused %llu (%llu from a copy)", &computed, &reused, &copied) == 3)
+    {
+        char buffer[160];
+        std::snprintf(buffer, sizeof(buffer), "已计算 %llu，已复用 %llu（其中 %llu 来自副本）", computed, reused, copied);
+        return buffer;
+    }
+
+    static const std::string prefix = "off for this session (";
+    if (status.size() > prefix.size() && status.compare(0, prefix.size(), prefix) == 0 && status.back() == ')')
+        return std::string("本次会话已关闭（") +
+               OptiI18n::Text(status.substr(prefix.size(), status.size() - prefix.size() - 1).c_str()) + "）";
+
+    return status;
 }
 
 static void HelpMarker(const char* tip);
@@ -277,15 +305,16 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         char text[96];
 
         if (cal.starting)
-            snprintf(text, sizeof(text), "Starting...");
+            snprintf(text, sizeof(text), "%s", OptiI18n::Text("Starting..."));
         else if (cal.stepIndex < cal.stepCount && cal.passes > 1)
-            snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u, pass %u of %u): hold the camera still", cal.stepEv,
+            snprintf(text, sizeof(text),
+                     OptiI18n::Text("Tuning %+.1f EV (%u of %u, pass %u of %u): hold the camera still"), cal.stepEv,
                      cal.stepIndex + 1, cal.stepCount, cal.pass + 1, cal.passes);
         else if (cal.stepIndex < cal.stepCount)
-            snprintf(text, sizeof(text), "Tuning %+.1f EV (%u of %u): hold the camera still", cal.stepEv,
-                     cal.stepIndex + 1, cal.stepCount);
+            snprintf(text, sizeof(text), OptiI18n::Text("Tuning %+.1f EV (%u of %u): hold the camera still"),
+                     cal.stepEv, cal.stepIndex + 1, cal.stepCount);
         else
-            snprintf(text, sizeof(text), "Reading the results...");
+            snprintf(text, sizeof(text), "%s", OptiI18n::Text("Reading the results..."));
 
         ImGui::ProgressBar(cal.progress, ImVec2(-FLT_MIN, 0.0f), text);
 
@@ -313,8 +342,9 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
         else if (cal.unrepeated)
         {
             char text[192];
-            snprintf(text, sizeof(text), "The two passes disagreed (%+.1f EV, then %+.1f EV), so neither is reliable. "
-                                         "Your current value is kept. Hold the camera still and try again.",
+            snprintf(text, sizeof(text),
+                     OptiI18n::Text("The two passes disagreed (%+.1f EV, then %+.1f EV), so neither is reliable. "
+                                    "Your current value is kept. Hold the camera still and try again."),
                      cal.firstPassEv, cal.lastPassEv);
             warning(text);
             ownLine = true;
@@ -353,8 +383,8 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
             }
 
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", "Keeps this result for scenes about this bright. Automatic blends between "
-                                        "saved points.");
+                ImGui::SetTooltip(OptiI18n::Text("Keeps this result for scenes about this bright. Automatic blends between "
+                                        "saved points."));
         }
         else
         {
@@ -1339,7 +1369,7 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
             // On the finished picture (Optical F5Low's NR only among them) there is no upscaler to wait for: what NR
             // says about the picture is the reason it has not started (only the log had it).
             const std::string status = DlssNr::FinishedPictureStatus();
-            ImGui::TextWrapped("%s", status.empty() ? "Waiting for a finished picture." : status.c_str());
+            ImGui::TextWrapped("%s", OptiI18n::Text(status.empty() ? "Waiting for a finished picture." : status.c_str()));
         }
         else if (enabled)
             ImGui::TextUnformatted("Waiting for the upscaler to run.");
@@ -1357,7 +1387,7 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         // a frozen frame) -- it only outputs the clean frame.
         // Enable Neural Rendering off stops the work.
         const char* runSuffix =
-            !config->DlssNrApplyModel.value_or_default() ? "  (model running, edit hidden)" : "";
+            !config->DlssNrApplyModel.value_or_default() ? OptiI18n::Text("  (model running, edit hidden)") : "";
 
         // With Reuse detail between frames, full and reused frames alternate, so one reading is either the heavy or
         // the light one; the average over the recent frames is the real per-frame cost.
@@ -1385,8 +1415,8 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", "NR's GPU time per frame, including waits for other GPU work. Check FPS for the "
-                                    "real cost.");
+            ImGui::SetTooltip(OptiI18n::Text("NR's GPU time per frame, including waits for other GPU work. Check FPS for the "
+                                    "real cost."));
         if (finishedPicture)
             ImGui::TextDisabled("Includes time shared with other GPU work.");
 
@@ -1500,7 +1530,7 @@ static EdgeCompressionLine EdgeCompressionText(const Config* config, const NrCom
 
     if (!nr.enabled)
     {
-        line.text = "NR is off.";
+        line.text = OptiI18n::Text("NR is off.");
         return line;
     }
 
@@ -1519,8 +1549,9 @@ static EdgeCompressionLine EdgeCompressionText(const Config* config, const NrCom
     {
         const double share = 100.0 * published.modelW * published.modelH /
                              std::max(1.0, (double) published.ordinaryW * (double) published.ordinaryH);
-        std::snprintf(buffer, sizeof(buffer), "NR works on %ux%u instead of %ux%u (%.0f%% of the pixels).",
-                      published.modelW, published.modelH, published.ordinaryW, published.ordinaryH, share);
+        std::snprintf(buffer, sizeof(buffer),
+                      OptiI18n::Text("NR works on %ux%u instead of %ux%u (%.0f%% of the pixels)."), published.modelW,
+                      published.modelH, published.ordinaryW, published.ordinaryH, share);
         line.tone = EdgeCompressionLine::Tone::Green;
         line.text = buffer;
         break;
@@ -1566,6 +1597,7 @@ static EdgeCompressionLine EdgeCompressionText(const Config* config, const NrCom
         line.text = "Off.";
     }
 
+    line.text = OptiI18n::Text(line.text.c_str());
     return line;
 }
 
@@ -1610,8 +1642,8 @@ static bool RenderDetailReuseToggle(Config* config)
         int spread = (int) std::min(config->DlssNrDetailReuseSpread.value_or_default(), every);
         char autoLabel[48];
         const unsigned int autoSpread = DlssNrDetailReuse::SpreadFor(every, 0);
-        std::snprintf(autoLabel, sizeof(autoLabel), autoSpread > 1 ? "Auto (over %u frames)" : "Auto (off)",
-                      autoSpread);
+        std::snprintf(autoLabel, sizeof(autoLabel),
+                      OptiI18n::Text(autoSpread > 1 ? "Auto (over %u frames)" : "Auto (off)"), autoSpread);
         const char* spreads[] = { autoLabel, "Off", "Over 2 frames", "Over 3 frames" };
         if (ImGui::Combo("Smooth the model's frames", &spread, spreads, (int) every + 1))
             config->DlssNrDetailReuseSpread = (uint32_t) spread;
@@ -1679,8 +1711,8 @@ static void RenderLowLatencySection()
 {
     const auto status = native::lowlatency::GetStatus();
 
-    ImGui::TextWrapped("Low latency: %s, %s", native::lowlatency::StatusLabel(status.decision),
-                       native::lowlatency::ReasonText(status));
+    ImGui::TextWrapped("Low latency: %s, %s", OptiI18n::Text(native::lowlatency::StatusLabel(status.decision)),
+                       OptiI18n::Text(native::lowlatency::ReasonText(status)));
     HelpMarker("Keeps the game's render queue short. Which method and who makes the calls is set on the Framerate page.");
 
     if (ImGui::SmallButton("Set on the Framerate page##f5lowlatency"))
@@ -1735,8 +1767,8 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
         {
             const bool compress = config->DlssNrSpatialCompression.value_or_default();
             const EdgeCompressionLine line = EdgeCompressionText(config, nr);
-            const std::string text =
-                std::string("Compress screen edges: ") + (compress ? line.text : std::string("Off"));
+            const std::string text = std::string(OptiI18n::Text("Compress screen edges: ")) +
+                                     (compress ? line.text : std::string(OptiI18n::Text("Off")));
             EdgeCompressionDrawText({ compress ? line.tone : EdgeCompressionLine::Tone::Grey, text });
             HelpMarker(
                 "NR works on fewer pixels: the middle stays sharp, the edges are squeezed. Saves GPU time; edges "
@@ -1755,10 +1787,10 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
             config->DlssNrNativeDebugView = pictures;
 
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Shows the debug views (motion arrows, depth, final flow, confidence, history "
+            ImGui::SetTooltip(OptiI18n::Text("Shows the debug views (motion arrows, depth, final flow, confidence, history "
                                     "rejection, still age) on this page, on D3D12, D3D11 and Vulkan; on D3D12 also the "
                                     "trust mask and the picked depth (which needs \"Show the picked depth here\" and "
-                                    "a restart). Small GPU cost while shown.");
+                                    "a restart). Small GPU cost while shown."));
 
         switch (CurrentNativeApi())
         {
@@ -1937,11 +1969,11 @@ static void RenderProfilesSection(Config* config)
         if (config->SaveDlssNrProfile(path, error))
         {
             rescan(name);
-            say("Saved " + name + ".", false);
+            say(std::string(OptiI18n::Text("Saved ")) + name + OptiI18n::Text("."), false);
         }
         else
         {
-            say("Could not save " + name + ": " + error, true);
+            say(std::string(OptiI18n::Text("Could not save ")) + name + OptiI18n::Text(": ") + error, true);
         }
         refresh();
     };
@@ -2001,11 +2033,11 @@ static void RenderProfilesSection(Config* config)
         {
             afterApply(finishedBefore);
             const bool native = NativeChanged(before, config->DlssNrSnapshot());
-            say("Loaded " + pick->name + "." + (lutNote.empty() ? "" : " " + lutNote), !lutNote.empty(), native);
+            say(std::string(OptiI18n::Text("Loaded ")) + pick->name + OptiI18n::Text(".") + (lutNote.empty() ? "" : " " + lutNote), !lutNote.empty(), native);
         }
         else
         {
-            say("Could not load " + pick->name + ": " + error, true);
+            say(std::string(OptiI18n::Text("Could not load ")) + pick->name + OptiI18n::Text(": ") + error, true);
         }
         ask = Ask::None;
     }
@@ -2079,11 +2111,11 @@ static void RenderProfilesSection(Config* config)
                 if (std::filesystem::remove(askPath, ec))
                 {
                     rescan(std::string());
-                    say("Deleted " + askName + ".", false);
+                    say(std::string(OptiI18n::Text("Deleted ")) + askName + ".", false);
                 }
                 else
                 {
-                    say("Could not delete " + askName + (ec ? ": " + ec.message() : "."), true);
+                    say(std::string(OptiI18n::Text("Could not delete ")) + askName + (ec ? ": " + ec.message() : "."), true);
                 }
             }
             ask = Ask::None;
@@ -2153,7 +2185,8 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     {
         RenderRunningStatus(config, nr);
 
-        ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s", NativeModeName(shown));
+        ImGui::Text("Optical F5Low (NR for a game with no upscaler call): %s",
+                    OptiI18n::Text(NativeModeName(shown)));
         ImGui::SameLine();
 
         if (ImGui::SmallButton("Open Optical F5Low##statuslink"))
@@ -2502,9 +2535,9 @@ static void RenderExposureControls(Config* config, float menuResScale)
         const float anchorNow = DlssNr::ExposureScan::BestValue();
         const bool haveAnchor = !DlssNr::ExposureScan::Anchors().empty();
 
-        static const char* sourceNames[] = { "Manual paper white", "Game exposure",
-                                             "Scanned exposure (experimental)",
-                                             "Automatic exposure from HDR frame" };
+        const char* sourceNames[] = { OptiI18n::Text("Manual paper white"), OptiI18n::Text("Game exposure"),
+                                      OptiI18n::Text("Scanned exposure (experimental)"),
+                                      OptiI18n::Text("Automatic exposure from HDR frame") };
 
         // Auto first, naming what it is now; the other entries are the values 0-3
         const uint32_t configuredSource = config->DlssNrWhitePointSource.value_or_default();
@@ -2514,8 +2547,8 @@ static void RenderExposureControls(Config* config, float menuResScale)
                                DlssNr::WhitePointSourceEffective(*config) == DlssNrExposureDefault::kSourceAutomatic &&
                                (vk ? DlssNr::FollowGameExposureStatusVk() : DlssNr::FollowGameExposureStatus())
                                    .foundInForce;
-        const std::string autoSource = std::string("Auto (") +
-                                       (autoFound ? "Game's exposure, found in the game"
+        const std::string autoSource = std::string(OptiI18n::Text("Auto (")) +
+                                       (autoFound ? OptiI18n::Text("Game's exposure, found in the game")
                                                   : sourceNames[DlssNr::WhitePointSourceEffective(*config)]) +
                                        ")";
         const char* sourceItems[] = { autoSource.c_str(), sourceNames[0], sourceNames[1], sourceNames[2],
@@ -2551,7 +2584,7 @@ static void RenderExposureControls(Config* config, float menuResScale)
             const std::string search = DlssNr::ExposureScan::AutoStatus();
 
             if (!search.empty())
-                ImGui::TextDisabled("Exposure search: %s", search.c_str());
+                ImGui::TextDisabled("Exposure search: %s", OptiI18n::Text(search.c_str()));
         }
 
         // Availability, in colour, for the option currently chosen. Two lines at most, whichever source.
@@ -2737,9 +2770,9 @@ static void RenderExposureControls(Config* config, float menuResScale)
 
             char lbl[48];
             if (editingRow)
-                snprintf(lbl, sizeof(lbl), "Paper white (editing point %d)", selectedAnchor + 1);
+                snprintf(lbl, sizeof(lbl), OptiI18n::Text("Paper white (editing point %d)"), selectedAnchor + 1);
             else
-                snprintf(lbl, sizeof(lbl), "Paper white");
+                snprintf(lbl, sizeof(lbl), "%s", OptiI18n::Text("Paper white"));
 
             if (ImGui::SliderFloat(lbl, &pw, 0.25f, 2000.0f, "%.2fx", ImGuiSliderFlags_Logarithmic))
             {
@@ -2782,11 +2815,11 @@ static void RenderExposureControls(Config* config, float menuResScale)
         // (Marvel's Spider-Man Remastered with XeSS swapped to DLSS is one), so 4x was too tight. Shown as
         // stops around 1x, which is why the slider runs further towards darker than towards brighter.
         // Index = DlssNrGameScale value: 0 with the game's exposure, 1 as is.
-        static const char* scaleNames[] = { "Game's setting", "Native look" };
+        const char* scaleNames[] = { OptiI18n::Text("Game's setting"), OptiI18n::Text("Native look") };
         // Auto first, naming what it is for this game; the other entries are the values 0-1
         const uint32_t configuredScale = config->DlssNrGameExposureScale.value_or_default();
         const std::string autoScale =
-            std::string("Auto (") + scaleNames[DlssNr::GameExposureScaleEffective(*config)] + ")";
+            std::string(OptiI18n::Text("Auto (")) + scaleNames[DlssNr::GameExposureScaleEffective(*config)] + ")";
         const char* scaleItems[] = { autoScale.c_str(), scaleNames[0], scaleNames[1] };
         int scale = configuredScale == DlssNrExposureDefault::kScaleAuto
                         ? 0
@@ -3144,9 +3177,9 @@ static void RenderExposureControls(Config* config, float menuResScale)
 
                     const bool sel = (int) i == selectedAnchor;
                     char row[96];
-                    snprintf(row, sizeof(row), "%s scan %.4f  ->  white %.2f%s",
+                    snprintf(row, sizeof(row), OptiI18n::Text("%s scan %.4f  ->  white %.2f%s"),
                              ((int) i == active && isSource) ? ">" : "  ", anchors[i].scan,
-                             anchors[i].white, sel ? "   [editing]" : "");
+                             anchors[i].white, sel ? OptiI18n::Text("   [editing]") : "");
 
                     // Click selects the row (slider edits it); click again deselects (slider
                     // returns to the live unanchored point).
@@ -3317,7 +3350,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                 ImGui::PopStyleColor();
             }
             else
-                ImGui::TextWrapped("%s", DlssNr::FinishedPictureStatus().c_str());
+                ImGui::TextWrapped("%s", OptiI18n::Text(DlssNr::FinishedPictureStatus().c_str()));
         }
 
         // Nested under Finished Picture: a second, independent axis (generate the changes at the
@@ -3346,10 +3379,10 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                 ImGui::TextWrapped("Generate before / apply after is unavailable with RR. Apply before SR "
                                    "controls NR placement.");
             else if (deferredDlss)
-                ImGui::TextWrapped("Residual DLSS: %s", DlssNr::DeferredDlssStatus().c_str());
+                ImGui::TextWrapped("Residual DLSS: %s", OptiI18n::Text(DlssNr::DeferredDlssStatus().c_str()));
         }
         else if (beforeSr)
-            ImGui::TextWrapped("Pre-SR changes: %s", DlssNr::DeferredDlssStatus().c_str());
+            ImGui::TextWrapped("Pre-SR changes: %s", OptiI18n::Text(DlssNr::DeferredDlssStatus().c_str()));
     }
 
     // Keep failure details in the log without displaying changing kernel counters in the menu.
@@ -3368,7 +3401,8 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
     if (auto card = ScopedCollapsingHeader("Model and speed", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         int precisionChoice = config->DlssNrPrecision.value_or_default() == 4 ? 1 : 0;
-        const char* precisions[] = { "NVIDIA (FP8)", "Experimental (FP8+NVFP4 hybrid)" };
+        const char* precisions[] = { OptiI18n::Text("NVIDIA (FP8)"),
+                                     OptiI18n::Text("Experimental (FP8+NVFP4 hybrid)") };
         if (ImGui::Combo("Model precision", &precisionChoice, precisions, IM_ARRAYSIZE(precisions)))
             config->DlssNrPrecision = precisionChoice == 1 ? 4u : 0u;
         HelpMarker("NVIDIA: the original FP8 model. Default.\n"
@@ -3386,7 +3420,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
             config->DlssNrVitEveryPlain = vitReusePlain ? 2u : 1u;
         HelpMarker("The same as above, used when the model runs the plain FP16 kernels (used by some modified DLSS-NR "
                    "DLLs).\nOn by default.");
-        ImGui::Text("Kernel set in use: %s", kernelSet);
+        ImGui::Text("Kernel set in use: %s", OptiI18n::Text(kernelSet));
         if (precisionChoice > 0 && DlssNr::IsRunningVk())
         {
             // The hybrid rewrites the model's kernels through NvAPI's D3D12 entry points; on Vulkan the model runs
@@ -3401,7 +3435,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         if (detailReuseRunning)
             ImGui::TextDisabled("Bottleneck reuse: off while Reuse detail between frames runs");
         else if (DlssNrNative::VitPlainKernels() ? vitReusePlain : vitReuse)
-            ImGui::TextUnformatted(("Bottleneck reuse: " + DlssNrNative::VitStatus()).c_str());
+            ImGui::TextUnformatted((std::string(OptiI18n::Text("Bottleneck reuse: ")) + VitStatusText()).c_str());
         if (ImGui::Checkbox("Lift model pass limit (up to 30; expensive)", &unlockPasses))
             config->DlssNrUnlockPasses = unlockPasses;
         HelpMarker("Allow up to 30 passes instead of 3. More passes use more GPU time and VRAM; high values may crash "
@@ -3622,24 +3656,41 @@ static std::string LookInputPreview(int setting, const DlssNr::LayerInput* found
 {
     using DlssNr::LutSpace;
     const bool automatic = setting == DlssNr::kLookInputAuto;
-    std::string text = automatic                            ? "Auto"
-                       : setting == (int) LutSpace::Display ? "None (the picture)"
+    // The preview is a combo value, not a label, so BeginCombo only translates it as one whole
+    // string: each fixed piece is translated here and the space/gamut names stay as they are.
+    std::string text = automatic                            ? OptiI18n::Text("Auto")
+                       : setting == (int) LutSpace::Display ? OptiI18n::Text("None (the picture)")
                                                             : DlssNr::LutSpaceName((LutSpace) setting);
     if (found == nullptr)
         return text;
 
     if (automatic)
-        text += found->space == LutSpace::Display
-                    ? std::string(": the picture")
-                    : std::string(": ") + DlssNr::LutSpaceName(found->space) +
-                          (found->gamut != found->space ? std::string(" in ") + DlssNr::LutGamutName(found->gamut)
-                                                        : std::string()) +
-                          (*found->from ? std::string(" (") + found->from + ")" : "");
+    {
+        if (found->space == LutSpace::Display)
+        {
+            text += OptiI18n::Text(": the picture");
+        }
+        else
+        {
+            text += OptiI18n::Text(": ");
+            text += DlssNr::LutSpaceName(found->space);
+            if (found->gamut != found->space)
+            {
+                text += OptiI18n::Text(" in ");
+                text += DlssNr::LutGamutName(found->gamut);
+            }
+            if (*found->from)
+            {
+                const std::string fromText = std::string(" (") + found->from + ")";
+                text += OptiI18n::Text(fromText.c_str());
+            }
+        }
+    }
     if (found->space != LutSpace::Display && !found->converted)
-        text += found->given == found->space ? ", from the LUT above"
-                                             : std::string(", but gets ") + DlssNr::LutSpaceName(found->given);
+        text += found->given == found->space ? OptiI18n::Text(", from the LUT above")
+                                             : std::string(OptiI18n::Text(", but gets ")) + DlssNr::LutSpaceName(found->given);
     else if (found->space == LutSpace::Display && found->given != LutSpace::Display)
-        text += std::string(", but gets ") + DlssNr::LutSpaceName(found->given);
+        text += std::string(OptiI18n::Text(", but gets ")) + DlssNr::LutSpaceName(found->given);
     return text;
 }
 
@@ -3712,7 +3763,9 @@ static void RenderPostLutSection(Config* config)
         const std::string current = filled ? layers[row].file : std::string();
         const std::string preview = current.empty() ? "(none)" : std::filesystem::path(current).filename().string();
         // "###": the ID stays the row's when its label gains a number.
-        const std::string label = (rows > 1 ? "Post LUT " + id : std::string("Post LUT")) + "###postlut" + id;
+        const std::string label =
+            (rows > 1 ? std::string(OptiI18n::Text("Post LUT")) + " " + id : std::string(OptiI18n::Text("Post LUT"))) +
+            "###postlut" + id;
 
         if (ImGui::BeginCombo(label.c_str(), preview.c_str()))
         {
@@ -3749,8 +3802,8 @@ static void RenderPostLutSection(Config* config)
                 store();
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(enabled ? "On: this LUT is applied. Untick to skip it and keep its settings."
-                                          : "Off: this LUT is skipped; its settings are kept. Tick to apply it.");
+                ImGui::SetTooltip("%s", enabled ? OptiI18n::Text("On: this LUT is applied. Untick to skip it and keep its settings.")
+                                                : OptiI18n::Text("Off: this LUT is skipped; its settings are kept. Tick to apply it."));
 
             ImGui::SameLine();
             ImGui::BeginDisabled(row == 0);
@@ -3789,7 +3842,8 @@ static void RenderPostLutSection(Config* config)
             const std::string inputPreview =
                 LookInputPreview(layers[row].input, reported ? &status.inputs[row] : nullptr);
             const std::string inputLabel =
-                (rows > 1 ? "Look input " + id : std::string("Look input")) + "###postlutinput" + id;
+                (rows > 1 ? std::string(OptiI18n::Text("Look input")) + " " + id
+                          : std::string(OptiI18n::Text("Look input"))) + "###postlutinput" + id;
             if (ImGui::BeginCombo(inputLabel.c_str(), inputPreview.c_str()))
             {
                 for (int choice = DlssNr::kLookInputAuto; choice < (int) DlssNr::LutSpace::Count; ++choice)
@@ -3809,7 +3863,8 @@ static void RenderPostLutSection(Config* config)
 
             float strength = layers[row].strength;
             const std::string sliderLabel =
-                (rows > 1 ? "LUT strength " + id : std::string("LUT strength")) + "###postlutstrength" + id;
+                (rows > 1 ? std::string(OptiI18n::Text("LUT strength")) + " " + id
+                          : std::string(OptiI18n::Text("LUT strength"))) + "###postlutstrength" + id;
             if (ImGui::SliderFloat(sliderLabel.c_str(), &strength, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
             {
                 layers[row].strength = strength;
@@ -3817,7 +3872,7 @@ static void RenderPostLutSection(Config* config)
             }
 
             ImGui::SameLine(buttonsX);
-            if (ImGui::SmallButton(("Reset##postlutstrengthreset" + id).c_str()))
+            if (ImGui::SmallButton((std::string(OptiI18n::Text("Reset")) + "##postlutstrengthreset" + id).c_str()))
             {
                 layers[row].strength = 1.0f;
                 store();
@@ -3896,7 +3951,7 @@ static void RenderPostLutSection(Config* config)
 
         // The backend's reason (a mode or device that does not run it), or how it runs in this mode.
         if (stackOn && !layers.empty() && status.wanted && !status.note.empty())
-            ImGui::TextWrapped("%s", status.note.c_str());
+            ImGui::TextWrapped("%s", OptiI18n::Text(status.note.c_str()));
         ImGui::PopStyleColor();
 
         if (!stackOn)
@@ -3908,9 +3963,9 @@ static void RenderPostLutSection(Config* config)
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
             if (!status.failedPath.empty())
                 ImGui::TextWrapped("%s: %s", std::filesystem::path(status.failedPath).filename().string().c_str(),
-                                   status.error.c_str());
+                                   OptiI18n::Text(status.error.c_str()));
             else
-                ImGui::TextWrapped("%s", status.error.c_str());
+                ImGui::TextWrapped("%s", OptiI18n::Text(status.error.c_str()));
             ImGui::PopStyleColor();
         }
         else if (status.loaded && status.endsIn != DlssNr::LutSpace::Display)
@@ -4131,7 +4186,7 @@ static std::string ViewName(const DlssNr::Views::ViewInfo& v, size_t screens)
         return v.slot == 0 ? "Left screen" : v.slot == 1 ? "Middle screen" : "Right screen";
     if (screens == 2)
         return v.slot == 0 ? "Left screen" : "Right screen";
-    return "Screen " + std::to_string(v.slot + 1);
+    return std::string(OptiI18n::Text("Screen ")) + std::to_string(v.slot + 1);
 }
 
 // "Several views": shown only while the game draws several views into one picture (a triple-screen rig), so it is not a
@@ -4556,7 +4611,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                                    "to retry.",
                                    unavailable.c_str());
             else if (const auto status = DlssNr::SuperiorScaling::Status(); !status.empty())
-                ImGui::TextWrapped("%s", status.c_str());
+                ImGui::TextWrapped("%s", OptiI18n::Text(status.c_str()));
         }
 
         if (!reduced || superior)
@@ -4601,13 +4656,13 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         {
             const float encodingSlot = StatusSlotBegin();
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", status.line.c_str());
+            ImGui::TextWrapped("%s", OptiI18n::Text(status.line.c_str()));
             ImGui::PopStyleColor();
             if (!status.warning.empty())
             {
                 // Wrapped: the sentence is longer than the menu is wide.
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
-                ImGui::TextWrapped("%s", status.warning.c_str());
+                ImGui::TextWrapped("%s", OptiI18n::Text(status.warning.c_str()));
                 ImGui::PopStyleColor();
             }
             StatusSlotEnd(encodingSlot, 5);
@@ -4861,7 +4916,9 @@ static void RenderPassesPage(Config* config, float menuResScale)
     for (unsigned int pass = 3; pass < visiblePasses; ++pass)
     {
         auto& settings = config->DlssNrExtraPasses[pass - 3];
-        const std::string passLabel = std::format("Pass {}", pass + 1);
+        char passLabelBuffer[64];
+        snprintf(passLabelBuffer, sizeof(passLabelBuffer), OptiI18n::Text("Pass %u"), pass + 1);
+        const std::string passLabel = passLabelBuffer;
         NrCard card(passLabel.c_str(), menuResScale, false);
 
         if (!card.IsOpen())
@@ -5323,8 +5380,8 @@ void UpdateF5LowHint(Config* config)
 
     shown = true;
     ImGui::InsertNotification({ ImGuiToastType::Info, 15000,
-                                "No upscaler call from this game so far.\nOptical F5Low can run NR without one: open "
-                                "the menu, Neural Rendering, Optical F5Low." });
+                                OptiI18n::Text("No upscaler call from this game so far.\nOptical F5Low can run NR "
+                                               "without one: open the menu, Neural Rendering, Optical F5Low.") });
 }
 
 void UpdateMultiViewHint(Config* config)

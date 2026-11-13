@@ -11,6 +11,8 @@
 #include <Config.h>
 #include <State.h>
 
+#include "../i18n/OptiI18n.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -517,9 +519,9 @@ std::string AutoStatus()
     // Searching with nothing held does not move on by itself: say what it waits for
     if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Searching &&
         std::none_of(tracked.begin(), tracked.end(), [](const Tracked& t) { return t.alive; }))
-        line += ": nothing to search yet, the game makes its buffers at a loading screen";
+        line += OptiI18n::Text(": nothing to search yet, the game makes its buffers at a loading screen");
     else if (g_auto.life.Now() == DlssNrExposureAuto::Phase::Searching && Core::WaitingLocked() > 0)
-        line += " (" + std::to_string(Core::WaitingLocked()) + " more waiting their turn)";
+        line += " (" + std::to_string(Core::WaitingLocked()) + OptiI18n::Text(" more waiting their turn)");
 
     return line;
 }

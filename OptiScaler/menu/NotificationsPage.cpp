@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "NotificationsPage.h"
+#include "../i18n/OptiI18n.h"
 
 #include "menu_common.h"
 #include <imgui/ImGuiNotify.hpp>
@@ -111,16 +112,24 @@ void NotificationsPage::Render()
             ImGui::TextUnformatted(first.c_str());
 
         ImGui::TableNextColumn();
-        ImGui::TextColored(ColorOf(entry.type), "%s", LabelOf(entry.type));
+        ImGui::TextColored(ColorOf(entry.type), "%s", OptiI18n::Text(LabelOf(entry.type)));
 
         ImGui::TableNextColumn();
 
         if (!entry.title.empty())
-            ImGui::TextColored(ColorOf(entry.type), "%s%s", entry.title.c_str(),
-                               entry.count > 1 ? std::format("  (x{})", entry.count).c_str() : "");
+        {
+            std::string repeated;
+            if (entry.count > 1)
+            {
+                repeated = OptiI18n::IsEnglish() ? "  (x" : "  （x";
+                repeated += std::to_string(entry.count);
+                repeated += OptiI18n::IsEnglish() ? ")" : "）";
+            }
+            ImGui::TextColored(ColorOf(entry.type), "%s%s", OptiI18n::Text(entry.title.c_str()), repeated.c_str());
+        }
 
         if (!entry.content.empty())
-            ImGui::TextWrapped("%s", entry.content.c_str());
+            ImGui::TextWrapped("%s", OptiI18n::Text(entry.content.c_str()));
     }
 
     ImGui::EndTable();

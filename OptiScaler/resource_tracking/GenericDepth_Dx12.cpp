@@ -15,6 +15,7 @@
 #include <menu/menu_overlay_dx.h>
 
 #include <imgui/imgui.h>
+#include "../i18n/OptiI18n.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1493,13 +1494,13 @@ void DrawAdvancedUi()
         config->DlssNrNativeDepthFinder = finder;
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "%s", "Watches the game's depth buffers (DirectX 12) and picks the scene's, so NR and the\n"
+        ImGui::SetTooltip(OptiI18n::Text(
+            "Watches the game's depth buffers (DirectX 12) and picks the scene's, so NR and the\n"
                   "stabiliser get depth as well as motion. Optional: without it they run on motion only. It\n"
                   "only observes, and it stands down for good if the game makes an upscaler call of its own.\n"
                   "It is also what notices that call: without it, nothing here stands aside for the game's own\n"
                   "upscaler. The log lists the candidates. Choosing a mode above turns it on, Off turns it off.\n"
-                  "Applies at the next start: save the settings and restart the game.");
+                  "Applies at the next start: save the settings and restart the game."));
 
     const bool debugView = config->DlssNrNativeDebugView.value_or_default();
 
@@ -1511,9 +1512,9 @@ void DrawAdvancedUi()
         config->DlssNrNativeDepthOverlay = overlay;
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
+        ImGui::SetTooltip(OptiI18n::Text("Debug. Copies the picked depth buffer at its busiest clear, recorded into the game's own\n"
                                 "command list, and shows it below. Needs \"Show the motion and trust pictures\" on too.\n"
-                                "Leave it off unless you are checking the pick. Applies at the next start.");
+                                "Leave it off unless you are checking the pick. Applies at the next start."));
 
     if (finder != g_installed)
         ImGui::TextDisabled("Takes effect after saving and restarting the game.");

@@ -9,6 +9,11 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstdio>
+#include <fstream>
+
+#include "font/ChineseGlyphRanges.h"
+#include "../i18n/OptiI18n.h"
 
 #include <dlssnr/DlssNr.h>
 #include <native/VirtualUpscalerDriver.h>
@@ -313,6 +318,10 @@ struct FlagDefinition
 
 inline std::string StrFmt(const char* fmt, ...)
 {
+    // Composition helper for UI text: translate the format before the arguments
+    // are substituted, otherwise a table keyed on "... %7.2f ms" can never match.
+    fmt = OptiI18n::Text(fmt);
+
     va_list args;
     va_start(args, fmt);
     int len = std::vsnprintf(nullptr, 0, fmt, args);
@@ -456,8 +465,12 @@ inline void MenuCommon::ReInitUpscaler()
 
 void MenuCommon::SeparatorWithHelpMarker(const char* label, const char* tip)
 {
+    // Translate before laying out: SeparatorTextEx measures through CalcTextSize,
+    // which is already localised, so passing the English label here measured one
+    // string and drew another -- the "(?)" then landed on top of the text.
+    const char* shown = OptiI18n::Label(label);
     auto marker = "(?) ";
-    ImGui::SeparatorTextEx(0, label, ImGui::FindRenderedTextEnd(label),
+    ImGui::SeparatorTextEx(0, shown, ImGui::FindRenderedTextEnd(shown),
                            ImGui::CalcTextSize(marker, ImGui::FindRenderedTextEnd(marker)).x);
     ShowHelpMarker(tip);
 }
@@ -962,7 +975,7 @@ void MenuCommon::PopulateCombo(const std::string& name, TStorage& currentValue,
 
             // Show tooltip for the individual item if it exists
             if (!opt.tooltip.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("%s", opt.tooltip.c_str());
+                ImGui::SetTooltip("%s", OptiI18n::Text(opt.tooltip.c_str()));
 
             if (opt.disabled)
                 ImGui::EndDisabled();
@@ -2294,10 +2307,11 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             auto formatFg = [&](std::string_view name, int maxFakeFrames)
             {
                 if (fakeFramesCount > maxFakeFrames)
-                    return std::format(" ({} Doesn't support more than {}x)", name, maxFakeFrames);
+                    return StrFmt(OptiI18n::Text(" (%s Doesn't support more than %dx)"),
+                                  std::string(name).c_str(), maxFakeFrames);
 
                 else if (fakeFramesCount == 0)
-                    return std::format(" ({} off)", name);
+                    return StrFmt(OptiI18n::Text(" (%s off)"), std::string(name).c_str());
 
                 return std::format(" ({} x{})", name, fakeFramesCount + 1);
             };
@@ -2338,7 +2352,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 featurePart = StrFmt(" | %s -> %s %u.%u.%u%s", ApiUpscalerInputName(state.currentInputApiName).c_str(),
                                      currentFeature->ShortName().c_str(), currentFeature->Version().major,
                                      currentFeature->Version().minor, currentFeature->Version().patch,
-                                     usesDx12CompatLayer ? " w/Dx12" : "");
+                                     usesDx12CompatLayer ? OptiI18n::Text(" w/Dx12") : "");
             }
 
             if (fg != nullptr && fg->IsGenerating())
@@ -2352,11 +2366,11 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                     break;
 
                 case FpsOverlay_Simple:
-                    fpsPart = StrFmt("FPS: %6.1f/%5.1f, %7.2f ms", frameRate, baseFps, frameTime);
+                    fpsPart = StrFmt(OptiI18n::Text("FPS: %6.1f/%5.1f, %7.2f ms"), frameRate, baseFps, frameTime);
                     break;
 
                 default:
-                    fpsPart = StrFmt("FPS: %6.1f/%5.1f, Avg: %6.1f", frameRate, baseFps, 1000.0f / averageFrameTime);
+                    fpsPart = StrFmt(OptiI18n::Text("FPS: %6.1f/%5.1f, Avg: %6.1f"), frameRate, baseFps, 1000.0f / averageFrameTime);
                     break;
                 }
             }
@@ -2369,11 +2383,11 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                     break;
 
                 case FpsOverlay_Simple:
-                    fpsPart = StrFmt("FPS: %6.1f, %7.2f ms", frameRate, frameTime);
+                    fpsPart = StrFmt(OptiI18n::Text("FPS: %6.1f, %7.2f ms"), frameRate, frameTime);
                     break;
 
                 default:
-                    fpsPart = StrFmt("FPS: %6.1f, Avg: %6.1f", frameRate, 1000.0f / averageFrameTime);
+                    fpsPart = StrFmt(OptiI18n::Text("FPS: %6.1f, Avg: %6.1f"), frameRate, 1000.0f / averageFrameTime);
                     break;
                 }
             }
@@ -2399,14 +2413,14 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             {
                 const float ratio = (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth();
 
-                lines.push_back({ StrFmt("Upscale: %ux%u -> %ux%u (%.2fx)", currentFeature->RenderWidth(),
+                lines.push_back({ StrFmt(OptiI18n::Text("Upscale: %ux%u -> %ux%u (%.2fx)"), currentFeature->RenderWidth(),
                                          currentFeature->RenderHeight(), currentFeature->TargetWidth(),
                                          currentFeature->TargetHeight(), ratio) });
             }
 
             if (overlayType >= FpsOverlay_Detailed)
             {
-                OverlayLine line { StrFmt("Frame Time: %7.2f ms, Avg: %7.2f ms", state.frameTimes.back(),
+                OverlayLine line { StrFmt(OptiI18n::Text("Frame Time: %7.2f ms, Avg: %7.2f ms"), state.frameTimes.back(),
                                           averageFrameTime) };
 
                 if (overlayType >= FpsOverlay_DetailedGraph)
@@ -2421,7 +2435,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 
             if (overlayType >= FpsOverlay_Full)
             {
-                OverlayLine line { StrFmt("Upscaler Time: %7.2f ms, Avg: %7.2f ms", state.upscaleTimes.back(),
+                OverlayLine line { StrFmt(OptiI18n::Text("Upscaler Time: %7.2f ms, Avg: %7.2f ms"), state.upscaleTimes.back(),
                                           averageUpscalerFT) };
 
                 if (overlayType >= FpsOverlay_FullGraph)
@@ -2900,7 +2914,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
             ImGui::SameLine(0.0f, 6.0f);
             spoofingText = config->DxgiSpoofing.value_or_default() ? "On" : "Off";
-            ImGui::Text("| Spoof: %s", spoofingText.c_str());
+            ImGui::Text("| Spoof: %s", OptiI18n::Text(spoofingText.c_str()));
 
             if (!usesDlssd)
                 AddDx11Backends(currentBackend);
@@ -2918,7 +2932,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
             ImGui::SameLine(0.0f, 6.0f);
             spoofingText = config->DxgiSpoofing.value_or_default() ? "On" : "Off";
-            ImGui::Text("| Spoof: %s", spoofingText.c_str());
+            ImGui::Text("| Spoof: %s", OptiI18n::Text(spoofingText.c_str()));
 
             if (!usesDlssd)
                 AddDx12Backends(currentBackend);
@@ -2948,7 +2962,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                 spoofingText = "Off";
 
             ImGui::SameLine(0.0f, 6.0f);
-            ImGui::Text("| Spoof: %s", spoofingText.c_str());
+            ImGui::Text("| Spoof: %s", OptiI18n::Text(spoofingText.c_str()));
 
             if (!usesDlssd)
                 AddVulkanBackends(currentBackend);
@@ -4256,13 +4270,13 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
     switch (status.tone)
     {
     case fgstatus::Tone::Good:
-        ImGui::TextColored(toneMapColor({ 0.45f, 0.9f, 0.45f, 1.0f }), "%s", status.text.c_str());
+        ImGui::TextColored(toneMapColor({ 0.45f, 0.9f, 0.45f, 1.0f }), "%s", OptiI18n::Text(status.text.c_str()));
         break;
     case fgstatus::Tone::Waiting:
-        ImGui::TextColored(toneMapColor({ 1.0f, 0.75f, 0.25f, 1.0f }), "%s", status.text.c_str());
+        ImGui::TextColored(toneMapColor({ 1.0f, 0.75f, 0.25f, 1.0f }), "%s", OptiI18n::Text(status.text.c_str()));
         break;
     default:
-        ImGui::TextDisabled("%s", status.text.c_str());
+        ImGui::TextDisabled("%s", OptiI18n::Text(status.text.c_str()));
         break;
     }
 }
@@ -4416,10 +4430,23 @@ void MenuCommon::RenderFrameGenerationFooter(RenderMenuContext& ctx)
         {
             const auto family = static_cast<MfgUnlock::Family>(index);
             const auto status = MfgUnlock::StatusRegistry::Get(family);
-            const std::string text = unlockModes[index] == MfgUnlockMode::Off      ? "off"
-                                     : status.state == MfgUnlock::FamilyState::Off ? "waiting for a provider"
-                                                                                   : MfgUnlock::FormatStatus(status);
+            std::string text = unlockModes[index] == MfgUnlockMode::Off      ? "off"
+                               : status.state == MfgUnlock::FamilyState::Off ? "waiting for a provider"
+                                                                             : MfgUnlock::FormatStatus(status);
+            // FormatStatus assembles "active: N of M patches" / "stood aside: ..."
+            // at run time, so the two shapes are translated by shape here.
+            if (!OptiI18n::IsEnglish())
+            {
+                unsigned found = 0, total = 0;
+                if (std::sscanf(text.c_str(), "active: %u of %u patches", &found, &total) == 2)
+                    text = StrFmt(OptiI18n::Text("active: %u of %u patches"), found, total);
+                else if (text.rfind("stood aside: ", 0) == 0)
+                    text = std::string(OptiI18n::Text("stood aside: ")) + text.substr(13);
+                else
+                    text = OptiI18n::Text(text.c_str());
+            }
             const auto name = MfgUnlock::kFamilyNames[index];
+            // Family names (XeFG / RTX 40 / RTX 20-30) are product names, left as is.
             ImGui::Text("%.*s: %s", static_cast<int>(name.size()), name.data(), text.c_str());
         }
         if (ImGui::SmallButton("Change on the Plugins page"))
@@ -5048,7 +5075,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                                                         : ImVec4(1.0f, 0.8f, 0.0f, 1.0f)),
                                        "%s",
                                        f5lowStatus.state == F5Low::RunState::Undecided && !f5lowStatus.reason.empty()
-                                           ? ("starting: " + f5lowStatus.reason).c_str()
+                                           ? (std::string(OptiI18n::Text("starting: ")) +
+                                              OptiI18n::Text(f5lowStatus.reason.c_str())).c_str()
                                            : F5Low::RunStateLabel(f5lowStatus.state, runningGenerator));
                     if (!f5lowStatus.reason.empty())
                         ShowTooltip(f5lowStatus.reason.c_str());
@@ -5238,7 +5266,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::Spacing();
                 ImGui::TextDisabled("%s", shortText.c_str());
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", joined(xefgLine, xellLine, "\n").c_str());
+                    ImGui::SetTooltip("%s", OptiI18n::Text(joined(xefgLine, xellLine, "\n").c_str()));
             }
         }
     }
@@ -5262,7 +5290,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ImGui::SameLine();
         if (auto count = DlssgInterpolationCount(state); count > 0)
         {
-            ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)), std::format("ON {}x", count + 1).c_str());
+            ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)), StrFmt(OptiI18n::Text("ON %ux"), count + 1).c_str());
         }
         else
         {
@@ -5790,7 +5818,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 if (auto count = state.dlssgDetectedInterpolationCount; count > 0)
                 {
                     ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)),
-                                       std::format("ON {}x", count + 1).c_str());
+                                       StrFmt(OptiI18n::Text("ON %ux"), count + 1).c_str());
                 }
                 else
                 {
@@ -5891,7 +5919,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
                             if (ImGui::IsItemHovered() && !flag.description.empty())
                             {
-                                ImGui::SetTooltip("%s", flag.description.c_str());
+                                ImGui::SetTooltip("%s", OptiI18n::Text(flag.description.c_str()));
                             }
                         }
                     };
@@ -6257,7 +6285,9 @@ void MenuCommon::RenderFramerateLowLatency(RenderMenuContext& ctx)
         const Output shownBefore = shown;
 
         const char* autoName = AutoEntryName(outputInputs);
-        const std::string autoLabel = autoName != nullptr ? autoName : std::string("Auto (") + status.output + ")";
+        const std::string autoLabel =
+            autoName != nullptr ? autoName
+                                : std::string(OptiI18n::Text("Auto (")) + OptiI18n::Text(status.output) + ")";
         const bool xefgOutput = outputInputs.xefgOutput;
 
         // With XeFG the choices are the ones that pair with it (XeLL it always needs, Reflex or Anti-Lag 2 beside it);
@@ -7574,6 +7604,23 @@ void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
 {
     auto config = ctx.config;
 
+    // LANGUAGE -----------------------------
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader("Language"); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        ImGui::Spacing();
+
+        const bool english = OptiI18n::GetLanguage() == OptiI18n::Language::English;
+        if (ImGui::RadioButton("Simplified Chinese", !english))
+            OptiI18n::SetLanguage(OptiI18n::Language::Chinese);
+        ImGui::SameLine(0.0f, 12.0f);
+        if (ImGui::RadioButton("English", english))
+            OptiI18n::SetLanguage(OptiI18n::Language::English);
+
+        ImGui::TextDisabled("Takes effect immediately, no restart needed.");
+    }
+
     // THEME -----------------------------
     ImGui::Spacing();
     if (auto ch = ScopedCollapsingHeader("Menu Theme and Color"); ch.IsHeaderOpen())
@@ -8764,7 +8811,7 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                             continue;
                         }
 
-                        auto formattedTime = StrFmt("%7.2f ms", time);
+                        auto formattedTime = StrFmt(OptiI18n::Text("%7.2f ms"), time);
 
                         ImGui::TableNextColumn();
                         ImGui::Text(name.c_str());
@@ -8788,7 +8835,7 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                             if (includedInUpscalerTime)
                                 continue;
 
-                            auto formattedTime = StrFmt("%7.2f ms", time);
+                            auto formattedTime = StrFmt(OptiI18n::Text("%7.2f ms"), time);
 
                             ImGui::TableNextColumn();
                             ImGui::Text(name.c_str());
@@ -8802,7 +8849,7 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                             ImGui::TableNextColumn();
                             ImGui::Text("Neural Rendering (elapsed)");
                             ImGui::TableNextColumn();
-                            ImGui::Text(StrFmt("%.2f ms", nrTime.value()).c_str());
+                            ImGui::Text(StrFmt(OptiI18n::Text("%.2f ms"), nrTime.value()).c_str());
                         }
                     }
 
@@ -8813,7 +8860,7 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                 ImGui::EndTooltip();
             }
 
-            auto ups = StrFmt("%7.2f ms", state.upscaleTimes.back());
+            auto ups = StrFmt(OptiI18n::Text("%7.2f ms"), state.upscaleTimes.back());
             {
                 ScopedMonoFont monoFont {};
                 ImGui::PlotLines(
@@ -8886,7 +8933,7 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
 
     ImGui::PushItemWidth(100.0f * menuResScale);
 
-    auto autoText = config->MenuScale.has_value() ? "Auto" : StrFmt("Auto (%3.1f)", menuResScale);
+    auto autoText = config->MenuScale.has_value() ? OptiI18n::Text("Auto") : StrFmt(OptiI18n::Text("Auto (%3.1f)"), menuResScale);
     // clang-format off
     const char* uiScales[] = { autoText.c_str(), "0.5", "0.6", "0.7", "0.8", "0.9", "1.0", "1.1",
                                "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "1.9", "2.0" };
@@ -8940,7 +8987,7 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
 
     ImGui::SameLine();
 
-    auto textSize = ImGui::CalcTextSize("Open Wiki (?)");
+    auto textSize = ImGui::CalcTextSize(OptiI18n::Text("Open Wiki (?)"));
     auto& style = ImGui::GetStyle();
     textSize.x += style.FramePadding.x * 2.0f;
     textSize.x += style.ItemSpacing.x;
@@ -9197,7 +9244,7 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
                     ImGui::Text("%08x, %s->%s, Count: %llu, %s", (size_t) it->first,
                                 GetSourceString(it->second.captureInfo & 0xFF).c_str(),
                                 GetDispatchString(it->second.captureInfo & 0xFF00).c_str(), it->second.usageCount,
-                                it->second.enabled ? "Active" : "Passive");
+                                OptiI18n::Text(it->second.enabled ? "Active" : "Passive"));
 
                     ImGui::TableSetColumnIndex(1);
 
@@ -9205,9 +9252,9 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
                     std::string text;
 
                     if (it->second.enabled)
-                        text = StrFmt("Disable##%d", btnCount);
+                        text = StrFmt("%s##%d", OptiI18n::Text("Disable"), btnCount);
                     else
-                        text = StrFmt("Enable##%d", btnCount);
+                        text = StrFmt("%s##%d", OptiI18n::Text("Enable"), btnCount);
 
                     if (ImGui::Button(text.c_str()))
                     {
@@ -9581,21 +9628,92 @@ void MenuCommon::Init(HWND InHwnd, bool isUWP)
             if (Config::Instance()->FontSize.has_value())
                 fontSize = Config::Instance()->FontSize.value();
 
+            // Chinese localization: the built-in Hack/Inter faces carry no CJK glyphs, so a
+            // CJK face is merged into the fonts created above (MergeMode) instead of
+            // replacing them. The English interface therefore keeps the exact upstream
+            // fonts and metrics, while Chinese strings still get their glyphs.
+            const ImWchar* glyphRanges = OptiScalerLocalization::ChineseGlyphRanges();
+
+            // Candidate chain: font shipped beside OptiScaler -> common Windows CJK fonts.
+            std::vector<std::filesystem::path> cjkFontCandidates;
+            auto dllDir = Util::DllPath().parent_path();
+            cjkFontCandidates.emplace_back(dllDir / L"font" / L"wqy-microhei.ttc");
+            cjkFontCandidates.emplace_back(dllDir / L"wqy-microhei.ttc");
+            cjkFontCandidates.emplace_back("font\\wqy-microhei.ttc");
+            cjkFontCandidates.emplace_back(L"C:/Windows/Fonts/msyh.ttc");
+            cjkFontCandidates.emplace_back(L"C:/Windows/Fonts/msyh.ttf");
+            cjkFontCandidates.emplace_back(L"C:/Windows/Fonts/simhei.ttf");
+            cjkFontCandidates.emplace_back(L"C:/Windows/Fonts/Deng.ttf");
+            cjkFontCandidates.emplace_back(L"C:/Windows/Fonts/simsun.ttc");
+
+            // MergeMode merges into the font added last, so this has to run right after the
+            // matching AddFont call and before the next one.
+            auto mergeCjkInto = [&](ImFont* target)
+            {
+                if (target == nullptr)
+                    return;
+
+                std::error_code fontFsError;
+                for (const auto& candidate : cjkFontCandidates)
+                {
+                    if (candidate.empty() || !std::filesystem::exists(candidate, fontFsError) ||
+                        !std::filesystem::is_regular_file(candidate, fontFsError))
+                        continue;
+
+                    std::ifstream fontStream(candidate, std::ios::binary | std::ios::ate);
+                    if (!fontStream)
+                        continue;
+
+                    const auto fontByteCount = static_cast<std::streamsize>(fontStream.tellg());
+                    if (fontByteCount <= 0)
+                        continue;
+
+                    void* fontData = IM_ALLOC(static_cast<size_t>(fontByteCount));
+                    fontStream.seekg(0, std::ios::beg);
+
+                    if (!fontStream.read(static_cast<char*>(fontData), fontByteCount))
+                    {
+                        IM_FREE(fontData);
+                        continue;
+                    }
+
+                    fontStream.close();
+
+                    ImFontConfig cjkConfig = fontConfig;
+                    cjkConfig.MergeMode = true;
+                    cjkConfig.FontDataOwnedByAtlas = true;
+
+                    if (atlas->AddFontFromMemoryTTF(fontData, static_cast<int>(fontByteCount), fontSize, &cjkConfig,
+                                                    glyphRanges) != nullptr)
+                    {
+                        LOG_INFO("Merged CJK font: {0}", wstring_to_string(candidate.wstring()));
+                        return;
+                    }
+
+                    IM_FREE(fontData);
+                }
+
+                LOG_WARN("No CJK font found, Chinese interface text will not render");
+            };
+
             if (Config::Instance()->TTFFontPath.has_value())
             {
                 gClassicFont =
                     atlas->AddFontFromFileTTF(wstring_to_string(Config::Instance()->TTFFontPath.value()).c_str(),
                                               fontSize, &fontConfig, io.Fonts->GetGlyphRangesDefault());
+                mergeCjkInto(gClassicFont);
             }
             else
             {
                 gHackFont = atlas->AddFontFromMemoryCompressedBase85TTF(hack_compressed_compressed_data_base85,
                                                                         fontSize, &fontConfig);
                 gClassicFont = gHackFont;
+                mergeCjkInto(gHackFont);
 
                 // Modern style text; Hack stays loaded for the live numbers.
                 gInterFont = atlas->AddFontFromMemoryCompressedBase85TTF(inter_compressed_compressed_data_base85,
                                                                          fontSize, &fontConfig);
+                mergeCjkInto(gInterFont);
             }
 
             io.FontDefault = gClassicFont;

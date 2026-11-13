@@ -8,6 +8,7 @@
 #include <dlssnr/DlssNr_NativeMode.h>
 
 #include <imgui/imgui.h>
+#include "../i18n/OptiI18n.h"
 
 #include <cmath>
 
@@ -346,7 +347,8 @@ void NativeDriver::DrawStatus()
             {
                 // NR is on but did not run on this frame: say why, as NR Only mode does.
                 const std::string reason = DlssNr::FinishedPictureStatus();
-                ImGui::TextDisabled("NR is not running: %s", reason.empty() ? "waiting." : reason.c_str());
+                ImGui::TextDisabled("NR is not running: %s",
+                                    OptiI18n::Text(reason.empty() ? "waiting." : reason.c_str()));
             }
         }
         else if (_virtualUpscaler != nullptr && !_virtualUpscaler->Error().empty())
@@ -363,7 +365,8 @@ void NativeDriver::DrawStatus()
     else
     {
         const std::string reason = DlssNr::FinishedPictureStatus();
-        ImGui::TextDisabled("%s", reason.empty() ? "NR: waiting for the motion estimate." : reason.c_str());
+        ImGui::TextDisabled("%s",
+                            OptiI18n::Text(reason.empty() ? "NR: waiting for the motion estimate." : reason.c_str()));
     }
 }
 
@@ -408,8 +411,8 @@ void NativeDriver::DrawFlowTuning()
     }
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Settings of the motion estimate for a kind of game. Default suits most games. "
-                                "Moving a control under Flow tuning saves your values as Custom, kept for this game.");
+        ImGui::SetTooltip(OptiI18n::Text("Settings of the motion estimate for a kind of game. Default suits most games. "
+                                "Moving a control under Flow tuning saves your values as Custom, kept for this game."));
 
     // The depth finder's size and the alignment: for a game whose depth is not found, or does not line up.
     if (ImGui::TreeNode("Depth selection and alignment##nativedepthalign"))
@@ -425,8 +428,8 @@ void NativeDriver::DrawFlowTuning()
         }
 
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", "Only a depth buffer of this size is picked (0 = any width or height). For a game "
-                                    "whose scene depth is not found; pick the scene's, not a shadow map's.");
+            ImGui::SetTooltip(OptiI18n::Text("Only a depth buffer of this size is picked (0 = any width or height). For a game "
+                                    "whose scene depth is not found; pick the scene's, not a shadow map's."));
 
         float scale[2] = { config->DlssNrNativeDepthScaleX.value_or_default(),
                            config->DlssNrNativeDepthScaleY.value_or_default() };
@@ -508,30 +511,30 @@ void NativeDriver::DrawFlowTuning()
     ImGui::Checkbox("Sharp motion at outlines (uses depth)##flowguidesurface", &guides.guideSurface);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Each pixel at the outline of a character or object takes its own surface's motion, "
-                                "not a blend with what's behind it. Frame generation draws fewer see-through edges.");
+        ImGui::SetTooltip(OptiI18n::Text("Each pixel at the outline of a character or object takes its own surface's motion, "
+                                "not a blend with what's behind it. Frame generation draws fewer see-through edges."));
     ImGui::Checkbox("Background motion behind moving things (uses depth)##flowuncover", &guides.uncoverBackground);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Background that comes out from behind a character (on a camera turn, or as it "
+        ImGui::SetTooltip(OptiI18n::Text("Background that comes out from behind a character (on a camera turn, or as it "
                                 "walks) moves with the background, instead of a guess. Frame generation smears less "
-                                "behind it.");
+                                "behind it."));
     ImGui::Checkbox("Match within what looks alike##flowlook", &tune.lookWeights);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Matches motion only against neighbours of similar brightness, so a moving edge "
-                                "doesn't drag its motion onto what's beside it.");
+        ImGui::SetTooltip(OptiI18n::Text("Matches motion only against neighbours of similar brightness, so a moving edge "
+                                "doesn't drag its motion onto what's beside it."));
     ImGui::Checkbox("Camera motion where the picture is flat##flowglobal", &tune.globalCandidate);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Gives flat areas (walls, sky) the whole picture's motion. Off: they get none.");
+        ImGui::SetTooltip(OptiI18n::Text("Gives flat areas (walls, sky) the whole picture's motion. Off: they get none."));
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderInt("Frames unchanged before it counts as still (0 = off)##flowstill", &tune.stillFrames, 0, 60, "%d",
                      clampTyped);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "After this many unchanged frames, an area (a HUD panel) stays still while the "
-                                "picture pans. Higher: waits longer. 0: off.");
+        ImGui::SetTooltip(OptiI18n::Text("After this many unchanged frames, an area (a HUD panel) stays still while the "
+                                "picture pans. Higher: waits longer. 0: off."));
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Still: largest change allowed##flowstilleps", &tune.stillEpsilon, 0.0005f, 0.05f, "%.4f",
                        ImGuiSliderFlags_Logarithmic | clampTyped);
@@ -541,25 +544,25 @@ void NativeDriver::DrawFlowTuning()
     ImGui::Checkbox("Cheaper sub-pixel refinement##flowinverse", &tune.inverseRefinement);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Faster motion refinement; less exact on thin lines and grain.");
+        ImGui::SetTooltip(OptiI18n::Text("Faster motion refinement; less exact on thin lines and grain."));
     ImGui::Checkbox("Perceptual luma (HDR and SDR)##flowluma", &tune.perceptualLuma);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Matches motion on perceived lightness, so dark detail counts like bright (HDR and "
-                                "SDR). Off: the older method.");
+        ImGui::SetTooltip(OptiI18n::Text("Matches motion on perceived lightness, so dark detail counts like bright (HDR and "
+                                "SDR). Off: the older method."));
     bool preferStill = tune.zeroMargin > 0.0f;
 
     if (ImGui::Checkbox("Prefer no motion in flat ground (experimental)##flowzero", &preferStill))
         tune.zeroMargin = preferStill ? 0.001f : 0.0f;
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Keeps flat areas still when no motion fits almost as well. Holds HUD panels still, "
-                                "but plain walls may not follow the camera. Off by default.");
+        ImGui::SetTooltip(OptiI18n::Text("Keeps flat areas still when no motion fits almost as well. Holds HUD panels still, "
+                                "but plain walls may not follow the camera. Off by default."));
     ImGui::Checkbox("Find a hard cut on its own frame##flowscene", &tune.sceneCutDetector);
 
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", "Detects camera cuts on the frame they happen, so old motion isn't trusted across "
-                                "them. Fades and exposure changes don't count.");
+        ImGui::SetTooltip(OptiI18n::Text("Detects camera cuts on the frame they happen, so old motion isn't trusted across "
+                                "them. Fades and exposure changes don't count."));
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Confidence knee##flowknee", &tune.confidenceKnee, 0.0005f, 0.05f, "%.4f",
                        ImGuiSliderFlags_Logarithmic);

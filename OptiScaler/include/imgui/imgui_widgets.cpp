@@ -43,6 +43,7 @@ Index of this file:
 #include "imgui.h"
 #ifndef IMGUI_DISABLE
 #include "imgui_internal.h"
+#include "../../i18n/OptiI18n.h"
 
 // System includes
 #include <stdint.h>     // intptr_t
@@ -167,6 +168,17 @@ void ImGui::TextEx(const char* text, const char* text_end, ImGuiTextFlags flags)
     // Accept null ranges
     if (text == text_end)
         text = text_end = "";
+    {
+        // Only widen the range when the lookup actually replaced the text: when
+        // there is no entry, text_end is a caller-supplied end (a label's
+        // "##"/"###" boundary) and dropping it would render the hidden ID.
+        const char* localized_text = OptiI18n::Text(text, text_end);
+        if (localized_text != text)
+        {
+            text = localized_text;
+            text_end = nullptr;
+        }
+    }
 
     // Calculate length
     const char* text_begin = text;
@@ -280,6 +292,11 @@ void ImGui::Text(const char* fmt, ...)
 
 void ImGui::TextV(const char* fmt, va_list args)
 {
+    // Translate the format itself: after ImFormatStringToTempBufferV the
+    // arguments are already substituted, so a table keyed on "Foo: %s" can no
+    // longer match the rendered "Foo: value".
+    fmt = OptiI18n::Text(fmt);
+
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return;
@@ -352,6 +369,8 @@ void ImGui::TextAligned(float align_x, float size_x, const char* fmt, ...)
 // FIXME-WIP: Works but API is likely to be reworked. This is designed for 1 item on the line. (#7024)
 void ImGui::TextAlignedV(float align_x, float size_x, const char* fmt, va_list args)
 {
+    fmt = OptiI18n::Text(fmt);
+
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return;
@@ -390,6 +409,8 @@ void ImGui::LabelText(const char* label, const char* fmt, ...)
 // Add a label+text combo aligned to other label+value widgets
 void ImGui::LabelTextV(const char* label, const char* fmt, va_list args)
 {
+    label = OptiI18n::Label(label);
+    fmt = OptiI18n::Text(fmt);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return;
@@ -763,6 +784,7 @@ bool ImGui::ButtonBehavior(const ImRect& bb, ImGuiID id, bool* out_hovered, bool
 
 bool ImGui::ButtonEx(const char* label, const ImVec2& size_arg, ImGuiButtonFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -1213,6 +1235,7 @@ bool ImGui::ImageButton(ImTextureID user_texture_id, const ImVec2& size, const I
 
 bool ImGui::Checkbox(const char* label, bool* v)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -1289,6 +1312,7 @@ bool ImGui::Checkbox(const char* label, bool* v)
 template<typename T>
 bool ImGui::CheckboxFlagsT(const char* label, T* flags, T flags_value)
 {
+    label = OptiI18n::Label(label);
     bool all_on = (*flags & flags_value) == flags_value;
     bool any_on = (*flags & flags_value) != 0;
     bool pressed;
@@ -1335,6 +1359,7 @@ bool ImGui::CheckboxFlags(const char* label, ImU64* flags, ImU64 flags_value)
 
 bool ImGui::RadioButton(const char* label, bool active)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -1390,6 +1415,7 @@ bool ImGui::RadioButton(const char* label, bool active)
 // FIXME: This would work nicely if it was a public template, e.g. 'template<T> RadioButton(const char* label, T* v, T v_button)', but I'm not sure how we would expose it..
 bool ImGui::RadioButton(const char* label, int* v, int v_button)
 {
+    label = OptiI18n::Label(label);
     const bool pressed = RadioButton(label, *v == v_button);
     if (pressed)
         *v = v_button;
@@ -1446,6 +1472,7 @@ void ImGui::ProgressBar(float fraction, const ImVec2& size_arg, const char* over
             ImFormatString(overlay_buf, IM_ARRAYSIZE(overlay_buf), "%.0f%%", fraction * 100 + 0.01f);
             overlay = overlay_buf;
         }
+        overlay = OptiI18n::Text(overlay);
 
         ImVec2 overlay_size = CalcTextSize(overlay, NULL);
         if (overlay_size.x > 0.0f)
@@ -1749,6 +1776,7 @@ void ImGui::SeparatorTextEx(ImGuiID id, const char* label, const char* label_end
 
 void ImGui::SeparatorText(const char* label)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return;
@@ -1895,6 +1923,8 @@ static float CalcMaxPopupHeightFromItemCount(int items_count)
 
 bool ImGui::BeginCombo(const char* label, const char* preview_value, ImGuiComboFlags flags)
 {
+    label = OptiI18n::Label(label);
+    preview_value = OptiI18n::Text(preview_value);
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = GetCurrentWindow();
 
@@ -2665,6 +2695,7 @@ bool ImGui::DragBehavior(ImGuiID id, ImGuiDataType data_type, void* p_v, float v
 // Read code of e.g. DragFloat(), DragInt() etc. or examples in 'Demo->Widgets->Data Types' to understand how to use this function directly.
 bool ImGui::DragScalar(const char* label, ImGuiDataType data_type, void* p_data, float v_speed, const void* p_min, const void* p_max, const char* format, ImGuiSliderFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -2686,6 +2717,8 @@ bool ImGui::DragScalar(const char* label, ImGuiDataType data_type, void* p_data,
     // Default format string when passing NULL
     if (format == NULL)
         format = DataTypeGetInfo(data_type)->PrintFmt;
+    // Same as SliderScalar: the format is visible text, not always a number.
+    format = OptiI18n::Text(format);
 
     const bool hovered = ItemHoverable(frame_bb, id, g.LastItemData.ItemFlags);
     bool temp_input_is_active = temp_input_allowed && TempInputIsActive(id);
@@ -3269,6 +3302,7 @@ bool ImGui::SliderBehavior(const ImRect& bb, ImGuiID id, ImGuiDataType data_type
 // Read code of e.g. SliderFloat(), SliderInt() etc. or examples in 'Demo->Widgets->Data Types' to understand how to use this function directly.
 bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_data, const void* p_min, const void* p_max, const char* format, ImGuiSliderFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -3290,6 +3324,9 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
     // Default format string when passing NULL
     if (format == NULL)
         format = DataTypeGetInfo(data_type)->PrintFmt;
+    // The value text can be a phrase rather than a number ("Same as menu",
+    // "%.1f%% of screen"), so it is looked up like a label.
+    format = OptiI18n::Text(format);
 
     const bool hovered = ItemHoverable(frame_bb, id, g.LastItemData.ItemFlags);
     bool temp_input_is_active = temp_input_allowed && TempInputIsActive(id);
@@ -3737,6 +3774,7 @@ void ImGui::SetNextItemRefVal(ImGuiDataType data_type, void* p_data)
 // Read code of e.g. InputFloat(), InputInt() etc. or examples in 'Demo->Widgets->Data Types' to understand how to use this function directly.
 bool ImGui::InputScalar(const char* label, ImGuiDataType data_type, void* p_data, const void* p_step, const void* p_step_fast, const char* format, ImGuiInputTextFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -3922,17 +3960,21 @@ namespace ImStb
 
 bool ImGui::InputText(const char* label, char* buf, size_t buf_size, ImGuiInputTextFlags flags, ImGuiInputTextCallback callback, void* user_data)
 {
+    label = OptiI18n::Label(label);
     IM_ASSERT(!(flags & ImGuiInputTextFlags_Multiline)); // call InputTextMultiline()
     return InputTextEx(label, NULL, buf, (int)buf_size, ImVec2(0, 0), flags, callback, user_data);
 }
 
 bool ImGui::InputTextMultiline(const char* label, char* buf, size_t buf_size, const ImVec2& size, ImGuiInputTextFlags flags, ImGuiInputTextCallback callback, void* user_data)
 {
+    label = OptiI18n::Label(label);
     return InputTextEx(label, NULL, buf, (int)buf_size, size, flags | ImGuiInputTextFlags_Multiline, callback, user_data);
 }
 
 bool ImGui::InputTextWithHint(const char* label, const char* hint, char* buf, size_t buf_size, ImGuiInputTextFlags flags, ImGuiInputTextCallback callback, void* user_data)
 {
+    label = OptiI18n::Label(label);
+    hint = OptiI18n::Text(hint);
     IM_ASSERT(!(flags & ImGuiInputTextFlags_Multiline)); // call InputTextMultiline() or  InputTextEx() manually if you need multi-line + hint.
     return InputTextEx(label, hint, buf, (int)buf_size, ImVec2(0, 0), flags, callback, user_data);
 }
@@ -6479,6 +6521,7 @@ bool ImGui::TreeNode(const void* ptr_id, const char* fmt, ...)
 
 bool ImGui::TreeNode(const char* label)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -6498,6 +6541,7 @@ bool ImGui::TreeNodeV(const void* ptr_id, const char* fmt, va_list args)
 
 bool ImGui::TreeNodeEx(const char* label, ImGuiTreeNodeFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -6532,6 +6576,14 @@ bool ImGui::TreeNodeExV(const char* str_id, ImGuiTreeNodeFlags flags, const char
     ImGuiID id = window->GetID(str_id);
     const char* label, *label_end;
     ImFormatStringToTempBufferV(&label, &label_end, fmt, args);
+    {
+        const char* localized_label = OptiI18n::Text(label, label_end);
+        if (localized_label != label)
+        {
+            label = localized_label;
+            label_end = nullptr;
+        }
+    }
     return TreeNodeBehavior(id, flags, label, label_end);
 }
 
@@ -7060,6 +7112,7 @@ void ImGui::SetNextItemStorageID(ImGuiID storage_id)
 // This is basically the same as calling TreeNodeEx(label, ImGuiTreeNodeFlags_CollapsingHeader). You can remove the _NoTreePushOnOpen flag if you want behavior closer to normal TreeNode().
 bool ImGui::CollapsingHeader(const char* label, ImGuiTreeNodeFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -7073,6 +7126,7 @@ bool ImGui::CollapsingHeader(const char* label, ImGuiTreeNodeFlags flags)
 // Do not mistake this with the Open state of the header itself, which you can adjust with SetNextItemOpen() or ImGuiTreeNodeFlags_DefaultOpen.
 bool ImGui::CollapsingHeader(const char* label, bool* p_visible, ImGuiTreeNodeFlags flags)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -7116,6 +7170,7 @@ bool ImGui::CollapsingHeader(const char* label, bool* p_visible, ImGuiTreeNodeFl
 // FIXME: Selectable() with (size.x == 0.0f) and (SelectableTextAlign.x > 0.0f) followed by SameLine() is currently not supported.
 bool ImGui::Selectable(const char* label, bool selected, ImGuiSelectableFlags flags, const ImVec2& size_arg)
 {
+    label = OptiI18n::Label(label);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -7297,6 +7352,7 @@ bool ImGui::Selectable(const char* label, bool selected, ImGuiSelectableFlags fl
 
 bool ImGui::Selectable(const char* label, bool* p_selected, ImGuiSelectableFlags flags, const ImVec2& size_arg)
 {
+    label = OptiI18n::Label(label);
     if (Selectable(label, *p_selected, flags, size_arg))
     {
         *p_selected = !*p_selected;
@@ -9221,6 +9277,7 @@ bool ImGui::BeginMenuEx(const char* label, const char* icon, bool enabled)
 
 bool ImGui::BeginMenu(const char* label, bool enabled)
 {
+    label = OptiI18n::Label(label);
     return BeginMenuEx(label, NULL, enabled);
 }
 
@@ -9244,6 +9301,8 @@ void ImGui::EndMenu()
 
 bool ImGui::MenuItemEx(const char* label, const char* icon, const char* shortcut, bool selected, bool enabled)
 {
+    label = OptiI18n::Label(label);
+    shortcut = OptiI18n::Text(shortcut);
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;

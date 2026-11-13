@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include "../i18n/OptiI18n.h"
+
 namespace DlssNr
 {
 // The .cube spec allows LUT_3D_SIZE 2..256. Capped lower here: every LUT anyone actually ships (17, 33,
@@ -270,7 +272,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
     std::ifstream file(path);
     if (!file.is_open())
     {
-        *error = "could not open " + path;
+        *error = std::string(OptiI18n::Text("could not open ")) + path;
         return false;
     }
 
@@ -353,14 +355,14 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
             int n = 0;
             if (!(iss >> n))
             {
-                *error = "LUT_3D_SIZE is missing its number (line " + std::to_string(lineNumber) + ")";
+                *error = OptiI18n::Text("LUT_3D_SIZE is missing its number (line ") + std::to_string(lineNumber) + ")";
                 return false;
             }
 
             if (n < 2 || n > kMaxLutSize)
             {
-                *error =
-                    "LUT_3D_SIZE " + std::to_string(n) + " is out of range (2.." + std::to_string(kMaxLutSize) + ")";
+                *error = "LUT_3D_SIZE " + std::to_string(n) + OptiI18n::Text(" is out of range (2..") +
+                         std::to_string(kMaxLutSize) + ")";
                 return false;
             }
 
@@ -375,7 +377,7 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
             float v[3];
             if (!(iss >> v[0] >> v[1] >> v[2]) || !std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]))
             {
-                *error = keyword + " needs three numbers (line " + std::to_string(lineNumber) + ")";
+                *error = keyword + OptiI18n::Text(" needs three numbers (line ") + std::to_string(lineNumber) + ")";
                 return false;
             }
 
@@ -390,21 +392,24 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
         float r = 0.0f;
         if (!TryParseFloat(first, &r))
         {
-            *error = "could not parse line " + std::to_string(lineNumber) + ": " + line;
+            *error = std::string(OptiI18n::Text("could not parse line ")) + std::to_string(lineNumber) +
+                     OptiI18n::Text(": ") + line;
             return false;
         }
 
         float g = 0.0f, b = 0.0f;
         if (!(iss >> g >> b))
         {
-            *error = "data row on line " + std::to_string(lineNumber) + " needs three numbers";
+            *error = std::string(OptiI18n::Text("data row on line ")) + std::to_string(lineNumber) +
+                     OptiI18n::Text(" needs three numbers");
             return false;
         }
 
         // "nan" / "inf" parse as numbers, but a lattice holding one turns into an out-of-range index when sampled.
         if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b))
         {
-            *error = "data row on line " + std::to_string(lineNumber) + " is not a finite number";
+            *error = std::string(OptiI18n::Text("data row on line ")) + std::to_string(lineNumber) +
+                     OptiI18n::Text(" is not a finite number");
             return false;
         }
 
@@ -422,14 +427,16 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
             *error = shaper.size != 0
                          ? "more data rows than LUT_1D_SIZE " + std::to_string(shaper.size) +
                                " calls for, and no LUT_3D_SIZE (line " + std::to_string(lineNumber) + ")"
-                         : "a data row appeared before LUT_3D_SIZE (line " + std::to_string(lineNumber) + ")";
+                         : std::string(OptiI18n::Text("a data row appeared before LUT_3D_SIZE (line ")) +
+                               std::to_string(lineNumber) + ")";
             return false;
         }
 
         const size_t expected = (size_t) size * size * size * 3;
         if (rgb.size() >= expected)
         {
-            *error = "more data rows than LUT_3D_SIZE " + std::to_string(size) + " calls for";
+            *error = std::string(OptiI18n::Text("more data rows than LUT_3D_SIZE ")) + std::to_string(size) +
+                     OptiI18n::Text(" calls for");
             return false;
         }
 
@@ -440,8 +447,9 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
 
     if (shaper.size != 0 && shaper.rgb.size() != (size_t) shaper.size * 3)
     {
-        *error = "expected " + std::to_string(shaper.size) + " data rows for LUT_1D_SIZE " +
-                 std::to_string(shaper.size) + ", found " + std::to_string(shaper.rgb.size() / 3);
+        *error = std::string(OptiI18n::Text("expected ")) + std::to_string(shaper.size) +
+                 OptiI18n::Text(" data rows for LUT_1D_SIZE ") + std::to_string(shaper.size) +
+                 OptiI18n::Text(", found ") + std::to_string(shaper.rgb.size() / 3);
         return false;
     }
 
@@ -454,8 +462,9 @@ inline bool ParseCube(const std::string& path, Lut3D* out, std::string* error)
     const size_t expected = (size_t) size * size * size * 3;
     if (sawSize && rgb.size() != expected)
     {
-        *error = "expected " + std::to_string(expected / 3) + " data rows for LUT_3D_SIZE " + std::to_string(size) +
-                 ", found " + std::to_string(rgb.size() / 3);
+        *error = std::string(OptiI18n::Text("expected ")) + std::to_string(expected / 3) +
+                 OptiI18n::Text(" data rows for LUT_3D_SIZE ") + std::to_string(size) +
+                 OptiI18n::Text(", found ") + std::to_string(rgb.size() / 3);
         return false;
     }
 

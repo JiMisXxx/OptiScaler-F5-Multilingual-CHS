@@ -2,6 +2,8 @@
 
 #include <framegen/FGOutput.h>
 
+#include "../i18n/OptiI18n.h"
+
 #include <cstdio>
 #include <string>
 
@@ -43,32 +45,32 @@ inline Status Describe(const Input& in)
     const std::string name = in.outputLabel != nullptr ? in.outputLabel : "";
 
     if (in.output == FGOutput::NoFG)
-        return { Tone::Neutral, "Frame generation off" };
+        return { Tone::Neutral, OptiI18n::Text("Frame generation off") };
     if (!in.inputSelected)
-        return { Tone::Neutral, "Off: pick an FG Input" };
+        return { Tone::Neutral, OptiI18n::Text("Off: pick an FG Input") };
     if (!in.hasFeature)
-        return { Tone::Waiting, name + ": waiting for the game's swap chain" };
+        return { Tone::Waiting, name + OptiI18n::Text(": waiting for the game's swap chain") };
     // Before Active: a blocked output unticks Active itself, so "unticked" would send the player to the wrong switch
     if (in.blockedReason != nullptr)
-        return { Tone::Waiting, name + ": off, " + in.blockedReason };
+        return { Tone::Waiting, name + OptiI18n::Text(": off, ") + OptiI18n::Text(in.blockedReason) };
     if (!in.active)
-        return { Tone::Neutral, name + (in.followsGame ? ": off (follows the game's DLSS FG setting)"
-                                                       : ": off (Active is unticked)") };
+        return { Tone::Neutral, name + OptiI18n::Text(in.followsGame ? ": off (follows the game's DLSS FG setting)"
+                                                                    : ": off (Active is unticked)") };
     if (in.paused)
-        return { Tone::Waiting, name + ": paused" };
+        return { Tone::Waiting, name + OptiI18n::Text(": paused") };
     if (in.generationOff)
-        return { Tone::Waiting, name + ": 1X (Dynamic MFG holds back)" };
+        return { Tone::Waiting, name + OptiI18n::Text(": 1X (Dynamic MFG holds back)") };
     if (!in.generating)
-        return { Tone::Waiting, name + ": waiting for the game's frames" };
+        return { Tone::Waiting, name + OptiI18n::Text(": waiting for the game's frames") };
 
     // As the FPS overlay counts it: shown frames per rendered frame
     const int multiplier = (in.interpolated > 0 ? in.interpolated : 0) + 1;
     char buffer[96];
     if (in.shownFps > 0.0)
-        snprintf(buffer, sizeof(buffer), "%s: generating %dX   %.0f -> %.0f fps", name.c_str(), multiplier,
-                 in.shownFps / multiplier, in.shownFps);
+        snprintf(buffer, sizeof(buffer), OptiI18n::Text("%s: generating %dX   %.0f -> %.0f fps"), name.c_str(),
+                 multiplier, in.shownFps / multiplier, in.shownFps);
     else
-        snprintf(buffer, sizeof(buffer), "%s: generating %dX", name.c_str(), multiplier);
+        snprintf(buffer, sizeof(buffer), OptiI18n::Text("%s: generating %dX"), name.c_str(), multiplier);
     return { Tone::Good, buffer };
 }
 } // namespace fgstatus

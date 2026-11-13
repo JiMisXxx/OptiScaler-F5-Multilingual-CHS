@@ -13,6 +13,8 @@
 #include <Config.h>
 #include <Util.h>
 
+#include "../i18n/OptiI18n.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1304,9 +1306,9 @@ const char* Headline()
         // amount of playing will change that; a large number means the game genuinely has nothing
         // shaped like an exposure, which is an answer rather than a failure.
         const unsigned int seen = Examined();
-        line = seen == 0 ? "DLSS-NR exposure scan: NOT RUNNING -- no resources seen at all"
-                         : "DLSS-NR exposure scan: examined " + std::to_string(seen) +
-                               " resources, none shaped like an exposure";
+        line = seen == 0 ? OptiI18n::Text("DLSS-NR exposure scan: NOT RUNNING -- no resources seen at all")
+                         : OptiI18n::Text("DLSS-NR exposure scan: examined ") + std::to_string(seen) +
+                               OptiI18n::Text(" resources, none shaped like an exposure");
         break;
     }
 
@@ -1326,9 +1328,10 @@ const char* Headline()
             mostReads = std::max(mostReads, t.reads);
         }
 
-        line = "DLSS-NR exposure scan: watching " + std::to_string(alive) +
-               (g_scan.waiting.empty() ? "" : " (" + std::to_string(g_scan.waiting.size()) + " more waiting)") +
-               ", none moving yet -- walk between light and shade  (" +
+        line = OptiI18n::Text("DLSS-NR exposure scan: watching ") + std::to_string(alive) +
+               (g_scan.waiting.empty() ? "" : (" (" + std::to_string(g_scan.waiting.size()) +
+                                              OptiI18n::Text(" more waiting)"))) +
+               OptiI18n::Text(", none moving yet -- walk between light and shade  (") +
                std::to_string(std::min(mostReads * 100 / kPatience, 100u)) + "%)";
         break;
     }
@@ -1362,7 +1365,7 @@ const char* Headline()
         // The live value is in here so the line visibly ticks. Without it the indicator looks stuck
         // the moment the range settles, which is exactly when it has succeeded.
         snprintf(buf, sizeof(buf),
-                 "DLSS-NR exposure scan: FOUND -- candidate %zu = %.5f  (%.5f..%.5f, x%.0f)  done",
+                 OptiI18n::Text("DLSS-NR exposure scan: FOUND -- candidate %zu = %.5f  (%.5f..%.5f, x%.0f)  done"),
                  best + 1, g_scan.tracked[best].latest, g_scan.tracked[best].lowest,
                  g_scan.tracked[best].highest, bestRatio);
         line = buf;
@@ -1370,7 +1373,7 @@ const char* Headline()
     }
 
     case Verdict::Barren:
-        line = "DLSS-NR exposure scan: nothing moved. No exposure to find here.";
+        line = OptiI18n::Text("DLSS-NR exposure scan: nothing moved. No exposure to find here.");
         break;
     }
 

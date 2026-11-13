@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include "../i18n/OptiI18n.h"
+
 namespace DlssNr
 {
 constexpr int kMaxLutChainLayers = 4;
@@ -443,7 +445,7 @@ inline std::string DlssNr_DescribeChain(const DlssNr_LutChainState& state,
                 DlssNr::DescribeLutSize(layer.lut) +
                 (in.converted
                      ? std::string(", as ") + DlssNr::LutSpaceName(in.space) +
-                           (in.gamut != in.space ? std::string(" in ") + DlssNr::LutGamutName(in.gamut) : std::string())
+                           (in.gamut != in.space ? std::string(OptiI18n::Text(" in ")) + DlssNr::LutGamutName(in.gamut) : std::string())
                      : std::string()) +
                 ")";
         ++shown;
