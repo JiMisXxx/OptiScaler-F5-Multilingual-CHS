@@ -1930,14 +1930,49 @@ static uint64_t GpuMemCommittedBytes(ID3D12Device* device, const D3D12_RESOURCE_
     return info.SizeInBytes == UINT64_MAX ? 0 : info.SizeInBytes;
 }
 
+// [Memory] ProtectMemory: the original SetResidencyPriority (not our hook) with HIGH on a new heap or committed
+// resource of one of our modules. Failure is tolerated and logged once (AMD 25.20 drivers answer E_INVALIDARG).
+static bool GpuMemProtect(IUnknown* object)
+{
+    if (o_SetResidencyPriority == nullptr)
+        return false;
+
+    ID3D12Pageable* pageable = nullptr;
+    if (FAILED(object->QueryInterface(IID_PPV_ARGS(&pageable))) || pageable == nullptr)
+        return false;
+
+    ID3D12Device1* device1 = nullptr;
+    HRESULT hr = pageable->GetDevice(IID_PPV_ARGS(&device1));
+    if (SUCCEEDED(hr) && device1 != nullptr)
+    {
+        const D3D12_RESIDENCY_PRIORITY priority = D3D12_RESIDENCY_PRIORITY_HIGH;
+        hr = o_SetResidencyPriority(device1, 1, &pageable, &priority);
+        device1->Release();
+    }
+
+    pageable->Release();
+
+    static std::atomic<bool> warned { false };
+    if (FAILED(hr) && !warned.exchange(true))
+        LOG_WARN("ProtectMemory: SetResidencyPriority failed ({:X}), allocations stay at the normal priority",
+                 (UINT) hr);
+
+    return SUCCEEDED(hr);
+}
+
 static void GpuMemNoteCommitted(ID3D12Device* device, const D3D12_HEAP_PROPERTIES* heap,
                                 const D3D12_RESOURCE_DESC* desc, HRESULT created, void** ppv, void* caller)
 {
     if (FAILED(created) || ppv == nullptr || *ppv == nullptr || heap == nullptr)
         return;
 
-    GpuMemory::Note((IUnknown*) *ppv, GpuMemCommittedBytes(device, desc), (int) heap->Type,
-                    (int) heap->MemoryPoolPreference, caller);
+    GpuMemory::NoteDevice(device);
+
+    const uint64_t bytes = GpuMemory::Active() ? GpuMemCommittedBytes(device, desc) : 0;
+    const bool protect = GpuMemory::ShouldProtect((int) heap->Type, (int) heap->MemoryPoolPreference, caller) &&
+                         GpuMemProtect((IUnknown*) *ppv);
+    GpuMemory::Note((IUnknown*) *ppv, bytes, (int) heap->Type, (int) heap->MemoryPoolPreference, caller,
+                    protect ? bytes : 0);
 }
 
 static void GpuMemNoteHeap(const D3D12_HEAP_DESC* desc, HRESULT created, void** ppv, void* caller)
@@ -1945,8 +1980,11 @@ static void GpuMemNoteHeap(const D3D12_HEAP_DESC* desc, HRESULT created, void** 
     if (FAILED(created) || ppv == nullptr || *ppv == nullptr || desc == nullptr)
         return;
 
+    const bool protect =
+        GpuMemory::ShouldProtect((int) desc->Properties.Type, (int) desc->Properties.MemoryPoolPreference, caller) &&
+        GpuMemProtect((IUnknown*) *ppv);
     GpuMemory::Note((IUnknown*) *ppv, desc->SizeInBytes, (int) desc->Properties.Type,
-                    (int) desc->Properties.MemoryPoolPreference, caller);
+                    (int) desc->Properties.MemoryPoolPreference, caller, protect ? desc->SizeInBytes : 0);
 }
 
 VALIDATE_HOOK(hkCreateHeap, PFN_CreateHeap)

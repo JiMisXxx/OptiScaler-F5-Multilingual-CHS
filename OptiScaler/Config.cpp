@@ -566,6 +566,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             LogToDebug.set_from_config(readBool("Log", "LogToDebug"));
             LogToNGX.set_from_config(readBool("Log", "LogToNGX"));
             LogGpuMemory.set_from_config(readBool("Log", "LogGpuMemory"));
+            ProtectMemory.set_from_config(readBool("Memory", "ProtectMemory"));
             D3D12Dred.set_from_config(readBool("Log", "D3D12Dred"));
             CrashDump.set_from_config(readBool("Log", "CrashDump"));
             OpenConsole.set_from_config(readBool("Log", "OpenConsole"));
@@ -2772,6 +2773,7 @@ bool Config::SaveIni()
         ini.SetValue("Log", "LogToDebug", GetBoolValue(Instance()->LogToDebug.value_for_config()).c_str());
         ini.SetValue("Log", "LogToNGX", GetBoolValue(Instance()->LogToNGX.value_for_config()).c_str());
         ini.SetValue("Log", "LogGpuMemory", GetBoolValue(Instance()->LogGpuMemory.value_for_config()).c_str());
+        ini.SetValue("Memory", "ProtectMemory", GetBoolValue(Instance()->ProtectMemory.value_for_config()).c_str());
         ini.SetValue("Log", "D3D12Dred", GetBoolValue(Instance()->D3D12Dred.value_for_config()).c_str());
         ini.SetValue("Log", "CrashDump", GetBoolValue(Instance()->CrashDump.value_for_config()).c_str());
         ini.SetValue("Log", "OpenConsole", GetBoolValue(Instance()->OpenConsole.value_for_config()).c_str());

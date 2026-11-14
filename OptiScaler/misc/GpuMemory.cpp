@@ -10,9 +10,14 @@
 #include <atomic>
 #include <unordered_map>
 
+#include <dxgi1_4.h>
+
 namespace
 {
 std::atomic<bool> g_active { false };
+std::atomic<bool> g_protect { false };
+std::atomic<bool> g_haveAdapter { false };
+IDXGIAdapter3* g_adapter = nullptr; // never released: lives as long as the process
 gpumem::Tally g_tally;
 
 std::mutex g_nameMutex;
@@ -65,7 +70,10 @@ void Emit(const std::string& line)
 class Tracker final : public IUnknown
 {
   public:
-    Tracker(std::string bucket, bool host, uint64_t bytes) : _bucket(std::move(bucket)), _host(host), _bytes(bytes) {}
+    Tracker(std::string bucket, bool host, uint64_t bytes, uint64_t prot)
+        : _bucket(std::move(bucket)), _host(host), _bytes(bytes), _prot(prot)
+    {
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
     {
@@ -88,7 +96,7 @@ class Tracker final : public IUnknown
         {
             // Not at process exit: the line it could produce would be logged into a closed log
             if (!State::Existing() || !State::Existing()->isShuttingDown)
-                Emit(g_tally.Add(_bucket, _host, -(int64_t) _bytes, GetTickCount64()));
+                Emit(g_tally.Add(_bucket, _host, -(int64_t) _bytes, GetTickCount64(), -(int64_t) _prot));
             delete this;
         }
         return n;
@@ -99,6 +107,7 @@ class Tracker final : public IUnknown
     std::string _bucket;
     bool _host;
     uint64_t _bytes;
+    uint64_t _prot;
 };
 } // namespace
 
@@ -106,13 +115,69 @@ bool GpuMemory::Init()
 {
     auto config = Config::Instance();
     const bool on = config->LogGpuMemory.value_or(config->LogToFile.value_or_default());
+    const bool protect = config->ProtectMemory.value_or_default();
     g_active.store(on);
-    return on;
+    g_protect.store(protect);
+
+    if (on)
+    {
+        g_tally.suffix = []() -> std::string
+        {
+            DXGI_QUERY_VIDEO_MEMORY_INFO info {};
+            if (!g_haveAdapter.load() || g_adapter == nullptr ||
+                FAILED(g_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+                return {};
+            char buf[96];
+            snprintf(buf, sizeof(buf), "; budget %llu MB, usage %llu MB", (unsigned long long) (info.Budget >> 20),
+                     (unsigned long long) (info.CurrentUsage >> 20));
+            return buf;
+        };
+    }
+
+    return on || protect;
 }
 
 bool GpuMemory::Active() { return g_active.load(std::memory_order_relaxed); }
 
-void GpuMemory::Note(IUnknown* object, uint64_t bytes, int heapType, int memoryPool, void* caller)
+bool GpuMemory::ProtectOn() { return g_protect.load(std::memory_order_relaxed); }
+
+bool GpuMemory::ShouldProtect(int heapType, int memoryPool, void* caller)
+{
+    if (!ProtectOn() || !gpumem::IsGpuMemory(heapType, memoryPool))
+        return false;
+
+    HMODULE module = Util::GetCallerModule(caller);
+    if (module == nullptr)
+        return false;
+
+    std::string storage;
+    return gpumem::ProtectedModule(BucketOf(module, storage));
+}
+
+void GpuMemory::NoteDevice(ID3D12Device* device)
+{
+    if (!Active() || device == nullptr || g_haveAdapter.load())
+        return;
+
+    static std::mutex m;
+    std::lock_guard lock(m);
+    if (g_haveAdapter.load())
+        return;
+
+    IDXGIFactory4* factory = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory != nullptr)
+    {
+        IDXGIAdapter3* adapter = nullptr;
+        if (SUCCEEDED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter))))
+            g_adapter = adapter;
+        factory->Release();
+    }
+
+    g_haveAdapter.store(true); // also when it failed: no retry per allocation
+}
+
+void GpuMemory::Note(IUnknown* object, uint64_t bytes, int heapType, int memoryPool, void* caller,
+                     uint64_t protectedBytes)
 {
     if (!Active() || object == nullptr || bytes == 0)
         return;
@@ -133,13 +198,13 @@ void GpuMemory::Note(IUnknown* object, uint64_t bytes, int heapType, int memoryP
     const std::string bucket = BucketOf(Util::GetCallerModule(caller), storage);
     const bool host = !gpumem::IsGpuMemory(heapType, memoryPool);
 
-    auto* tracker = new Tracker(bucket, host, bytes);
+    auto* tracker = new Tracker(bucket, host, bytes, protectedBytes);
     const HRESULT hr = d3dObject->SetPrivateDataInterface(kTrackerGuid, tracker);
     tracker->Release(); // D3D12 holds its own reference now
     d3dObject->Release();
 
     if (SUCCEEDED(hr))
-        Emit(g_tally.Add(bucket, host, (int64_t) bytes, GetTickCount64()));
+        Emit(g_tally.Add(bucket, host, (int64_t) bytes, GetTickCount64(), (int64_t) protectedBytes));
 }
 
 void GpuMemory::LogFinal()

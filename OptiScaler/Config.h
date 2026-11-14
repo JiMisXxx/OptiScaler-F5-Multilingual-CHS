@@ -250,6 +250,7 @@ class Config
     CustomOptional<bool> LogToConsole { false };
     CustomOptional<bool> LogToDebug { false };
     CustomOptional<bool> LogToNGX { false };
+    CustomOptional<bool> ProtectMemory { true }; // [Memory] high residency priority (read once)
     CustomOptional<bool, NoDefault>
         LogGpuMemory; // [Log] "GPU memory by module" lines; unset (auto) = on with LogToFile (read once)
     CustomOptional<bool> D3D12Dred { false }; // [Log] D3D12 device-removed breadcrumbs on the D3D11 bridge's device

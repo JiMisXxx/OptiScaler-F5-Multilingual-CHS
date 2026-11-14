@@ -10,8 +10,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
+#include <functional>
 #include <mutex>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -48,6 +51,23 @@ inline bool IsGpuMemory(int heapType, int memoryPool)
     return false;
 }
 
+// The modules whose allocations get D3D12_RESIDENCY_PRIORITY_HIGH ([Memory] ProtectMemory): OptiScaler itself (its
+// bucket name), f5low and the two NVIDIA runtimes it drives. The game, DLSS super resolution and Streamline stay
+// normal; Intel's libxess_fg asks for HIGH itself.
+inline bool ProtectedModule(std::string_view name)
+{
+    auto same = [&](std::string_view want)
+    {
+        if (name.size() != want.size())
+            return false;
+        for (size_t i = 0; i < name.size(); ++i)
+            if (std::tolower((unsigned char) name[i]) != std::tolower((unsigned char) want[i]))
+                return false;
+        return true;
+    };
+    return same("OptiScaler") || same("f5low.dll") || same("nvngx_dlssnr.dll") || same("nvngx_dlssg.dll");
+}
+
 inline uint64_t AlignUp(uint64_t value, uint64_t alignment)
 {
     return alignment == 0 ? value : (value + alignment - 1) / alignment * alignment;
@@ -56,9 +76,12 @@ inline uint64_t AlignUp(uint64_t value, uint64_t alignment)
 class Tally
 {
   public:
-    // bytes > 0 on creation, < 0 on destruction
+    // Text appended to every line, before the closing bracket (the budget and usage); called under the tally's lock
+    std::function<std::string()> suffix;
+
+    // bytes > 0 on creation, < 0 on destruction; prot: the part of it that got the high residency priority (same sign)
     // Returns a line to log when one is due (see Due), empty otherwise
-    std::string Add(const std::string& bucket, bool hostVisible, int64_t bytes, uint64_t nowMs)
+    std::string Add(const std::string& bucket, bool hostVisible, int64_t bytes, uint64_t nowMs, int64_t prot = 0)
     {
         std::lock_guard lock(_m);
         Entry& e = Find(bucket);
@@ -66,6 +89,9 @@ class Tally
         v += bytes;
         if (v < 0)
             v = 0; // a release of something counted before the tally was running; never go below nothing
+        e.prot += prot;
+        if (e.prot < 0)
+            e.prot = 0;
 
         const int64_t total = TotalGpu();
         if (total > _peakGpu)
@@ -100,6 +126,15 @@ class Tally
         return (uint64_t) Find(bucket).host;
     }
 
+    uint64_t ProtectedBytes()
+    {
+        std::lock_guard lock(_m);
+        int64_t t = 0;
+        for (const auto& e : _e)
+            t += e.prot;
+        return (uint64_t) t;
+    }
+
     uint64_t TotalGpuBytes()
     {
         std::lock_guard lock(_m);
@@ -112,6 +147,7 @@ class Tally
         std::string name;
         int64_t gpu = 0;
         int64_t host = 0;
+        int64_t prot = 0;
         int64_t loggedGpu = 0;
         int64_t loggedHost = 0;
     };
@@ -164,9 +200,10 @@ class Tally
     std::string FormatLocked(bool final)
     {
         std::vector<const Entry*> order;
-        int64_t host = 0;
+        int64_t host = 0, prot = 0;
         for (auto& e : _e)
         {
+            prot += e.prot;
             e.loggedGpu = e.gpu;
             e.loggedHost = e.host;
             host += e.host;
@@ -201,6 +238,10 @@ class Tally
         snprintf(tail, sizeof(tail), " (total %lld MB, host-visible %lld MB", (long long) (total / (int64_t) kMegabyte),
                  (long long) (host / (int64_t) kMegabyte));
         line += tail;
+        snprintf(tail, sizeof(tail), ", protected %lld MB", (long long) (prot / (int64_t) kMegabyte));
+        line += tail;
+        if (suffix)
+            line += suffix();
         if (final)
         {
             snprintf(tail, sizeof(tail), ", peak total %lld MB", (long long) (_peakGpu / (int64_t) kMegabyte));
