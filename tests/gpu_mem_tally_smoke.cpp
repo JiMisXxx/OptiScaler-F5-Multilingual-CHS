@@ -89,6 +89,44 @@ int main()
         CHECK(Has(line, "others"));
     }
 
+    // scopes
+    CHECK(ParseProtectScope("auto") == ProtectOff);
+    CHECK(ParseProtectScope("off") == ProtectOff);
+    CHECK(ParseProtectScope("False") == ProtectOff);
+    CHECK(ParseProtectScope("fg") == ProtectFg);
+    CHECK(ParseProtectScope("FG") == ProtectFg);
+    CHECK(ParseProtectScope("all") == ProtectAll);
+    CHECK(ParseProtectScope("true") == ProtectAll);
+    CHECK(ParseProtectScope("banana") == -1);
+    CHECK(ProtectedUnder(ProtectFg, "f5low.dll"));
+    CHECK(!ProtectedUnder(ProtectFg, "OptiScaler"));
+    CHECK(!ProtectedUnder(ProtectFg, "nvngx_dlssnr.dll"));
+    CHECK(ProtectedUnder(ProtectAll, "OptiScaler"));
+    CHECK(ProtectedUnder(ProtectAll, "nvngx_dlssg.dll"));
+    CHECK(!ProtectedUnder(ProtectAll, "libxess_fg.dll"));
+    CHECK(!ProtectedUnder(ProtectOff, "f5low.dll"));
+    CHECK(std::string(ProtectScopeName(ProtectFg)) == "fg");
+
+    {
+        // residency calls per module, by level, with known and unknown sizes
+        Tally t;
+        t.NoteResidency("libxess_fg.dll", 0xa0010000, (int64_t) MB(100));
+        t.NoteResidency("libxess_fg.dll", 0xa0010000, (int64_t) MB(80));
+        t.NoteResidency("sl.common.dll", 0x78000000, -1);
+        t.NoteResidency("sl.common.dll", 0xa0010000, (int64_t) MB(10));
+        std::string line = t.Final();
+        CHECK(Has(line, "residency calls: libxess_fg.dll 2 objects HIGH 180 MB"));
+        CHECK(Has(line, "sl.common.dll 2 objects NORMAL x1 HIGH x1 10 MB (+1 of unknown size)") ||
+              Has(line, "sl.common.dll 2 objects HIGH x1 NORMAL x1 10 MB (+1 of unknown size)"));
+        // a line is due because of them even though no memory moved
+        Tally u;
+        u.NoteResidency("x.dll", 0xa0010000, 0);
+        CHECK(!u.Due(100000).empty());
+        CHECK(u.Due(200000).empty());
+        Tally w;
+        CHECK(!Has(w.Final(), "residency"));
+    }
+
     if (fails == 0)
         printf("PASS\n");
     return fails == 0 ? 0 : 1;

@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string_view>
 #include <string>
@@ -66,6 +67,80 @@ inline bool ProtectedModule(std::string_view name)
         return true;
     };
     return same("OptiScaler") || same("f5low.dll") || same("nvngx_dlssnr.dll") || same("nvngx_dlssg.dll");
+}
+
+// [Memory] ProtectMemory scope: 0 off, 1 fg (the frame generator, f5low.dll), 2 all (the set above)
+enum ProtectScope : int
+{
+    ProtectOff = 0,
+    ProtectFg = 1,
+    ProtectAll = 2
+};
+
+// The scope as written in the ini; "true"/"false" stay accepted (all/off). -1: not a scope
+inline int ParseProtectScope(std::string_view v)
+{
+    auto same = [&](std::string_view want)
+    {
+        if (v.size() != want.size())
+            return false;
+        for (size_t i = 0; i < v.size(); ++i)
+            if (std::tolower((unsigned char) v[i]) != std::tolower((unsigned char) want[i]))
+                return false;
+        return true;
+    };
+    if (same("off") || same("false") || same("0") || same("auto"))
+        return ProtectOff;
+    if (same("fg"))
+        return ProtectFg;
+    if (same("all") || same("true") || same("1"))
+        return ProtectAll;
+    return -1;
+}
+
+inline const char* ProtectScopeName(int scope)
+{
+    return scope == ProtectFg ? "fg" : scope == ProtectAll ? "all" : "off";
+}
+
+// Does an allocation of this module get the high priority under the scope?
+inline bool ProtectedUnder(int scope, std::string_view name)
+{
+    if (scope == ProtectAll)
+        return ProtectedModule(name);
+    if (scope == ProtectFg)
+    {
+        auto same = [&](std::string_view want)
+        {
+            if (name.size() != want.size())
+                return false;
+            for (size_t i = 0; i < name.size(); ++i)
+                if (std::tolower((unsigned char) name[i]) != std::tolower((unsigned char) want[i]))
+                    return false;
+            return true;
+        };
+        return same("f5low.dll");
+    }
+    return false;
+}
+
+inline const char* PriorityName(uint32_t level)
+{
+    switch (level)
+    {
+    case 0x28000000:
+        return "MINIMUM";
+    case 0x50000000:
+        return "LOW";
+    case 0x78000000:
+        return "NORMAL";
+    case 0xa0010000:
+        return "HIGH";
+    case 0xc8000000:
+        return "MAXIMUM";
+    default:
+        return nullptr;
+    }
 }
 
 inline uint64_t AlignUp(uint64_t value, uint64_t alignment)
@@ -126,6 +201,20 @@ class Tally
         return (uint64_t) Find(bucket).host;
     }
 
+    // A SetResidencyPriority call by `module`: one object with `level`; bytes < 0: size unknown
+    void NoteResidency(const std::string& module, uint32_t level, int64_t bytes)
+    {
+        std::lock_guard lock(_m);
+        Res& r = _res[module];
+        ++r.objects;
+        ++r.levels[level];
+        if (bytes >= 0)
+            r.bytes += (uint64_t) bytes;
+        else
+            ++r.unknown;
+        _resDirty = true;
+    }
+
     uint64_t ProtectedBytes()
     {
         std::lock_guard lock(_m);
@@ -152,7 +241,16 @@ class Tally
         int64_t loggedHost = 0;
     };
 
+    struct Res
+    {
+        uint32_t objects = 0, unknown = 0;
+        uint64_t bytes = 0;
+        std::map<uint32_t, uint32_t> levels;
+    };
+
     std::mutex _m;
+    std::map<std::string, Res> _res;
+    bool _resDirty = false;
     std::vector<Entry> _e;
     uint64_t _lastLogMs = 0;
     bool _logged = false;
@@ -188,7 +286,7 @@ class Tally
             for (const auto& e : _e)
                 moved += Abs(e.gpu - e.loggedGpu) + Abs(e.host - e.loggedHost);
 
-            if (moved < (int64_t) kMinMovedBytes)
+            if (moved < (int64_t) kMinMovedBytes && !_resDirty)
                 return {};
         }
 
@@ -240,6 +338,32 @@ class Tally
         line += tail;
         snprintf(tail, sizeof(tail), ", protected %lld MB", (long long) (prot / (int64_t) kMegabyte));
         line += tail;
+        if (!_res.empty())
+        {
+            line += "; residency calls:";
+            bool firstRes = true;
+            for (const auto& [module, r] : _res)
+            {
+                line += firstRes ? " " : ", ";
+                firstRes = false;
+                line += module + " " + std::to_string(r.objects) + " objects";
+                for (const auto& [level, n] : r.levels)
+                {
+                    char lv[48];
+                    if (const char* nm = PriorityName(level))
+                        snprintf(lv, sizeof(lv), " %s", nm);
+                    else
+                        snprintf(lv, sizeof(lv), " 0x%x", level);
+                    line += lv;
+                    if (r.levels.size() > 1)
+                        line += " x" + std::to_string(n);
+                }
+                line += " " + std::to_string(r.bytes / kMegabyte) + " MB";
+                if (r.unknown)
+                    line += " (+" + std::to_string(r.unknown) + " of unknown size)";
+            }
+        }
+        _resDirty = false;
         if (suffix)
             line += suffix();
         if (final)

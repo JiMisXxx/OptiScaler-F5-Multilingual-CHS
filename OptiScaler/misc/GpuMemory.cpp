@@ -16,6 +16,7 @@ namespace
 {
 std::atomic<bool> g_active { false };
 std::atomic<bool> g_protect { false };
+std::atomic<int> g_scope { 0 };
 std::atomic<bool> g_haveAdapter { false };
 IDXGIAdapter3* g_adapter = nullptr; // never released: lives as long as the process
 gpumem::Tally g_tally;
@@ -89,6 +90,8 @@ class Tracker final : public IUnknown
 
     ULONG STDMETHODCALLTYPE AddRef() override { return ++_refs; }
 
+    uint64_t Bytes() const { return _bytes; }
+
     ULONG STDMETHODCALLTYPE Release() override
     {
         const ULONG n = --_refs;
@@ -115,9 +118,11 @@ bool GpuMemory::Init()
 {
     auto config = Config::Instance();
     const bool on = config->LogGpuMemory.value_or(config->LogToFile.value_or_default());
-    const bool protect = config->ProtectMemory.value_or_default();
+    const int scope = config->ProtectMemory.value_or_default();
+    const bool protect = scope != gpumem::ProtectOff;
     g_active.store(on);
     g_protect.store(protect);
+    g_scope.store(scope);
 
     if (on)
     {
@@ -151,7 +156,7 @@ bool GpuMemory::ShouldProtect(int heapType, int memoryPool, void* caller)
         return false;
 
     std::string storage;
-    return gpumem::ProtectedModule(BucketOf(module, storage));
+    return gpumem::ProtectedUnder(g_scope.load(), BucketOf(module, storage));
 }
 
 void GpuMemory::NoteDevice(ID3D12Device* device)
@@ -213,4 +218,39 @@ void GpuMemory::LogFinal()
         return;
 
     Emit(g_tally.Final());
+}
+
+void GpuMemory::NoteResidency(UINT numObjects, IUnknown* const* objects, const void* priorities, void* caller)
+{
+    if (!Active() || numObjects == 0 || objects == nullptr)
+        return;
+
+    std::string storage;
+    const std::string module = BucketOf(Util::GetCallerModule(caller), storage);
+    const auto* levels = static_cast<const D3D12_RESIDENCY_PRIORITY*>(priorities);
+
+    for (UINT i = 0; i < numObjects; ++i)
+    {
+        int64_t bytes = -1;
+        if (objects[i] != nullptr)
+        {
+            ID3D12Object* obj = nullptr;
+            if (SUCCEEDED(objects[i]->QueryInterface(IID_PPV_ARGS(&obj))) && obj != nullptr)
+            {
+                IUnknown* tracker = nullptr;
+                UINT size = sizeof(tracker);
+                if (SUCCEEDED(obj->GetPrivateData(kTrackerGuid, &size, &tracker)) && tracker != nullptr)
+                {
+                    // Our own class, attached by Note(): read what it holds, then give the reference back
+                    bytes = (int64_t) static_cast<Tracker*>(tracker)->Bytes();
+                    tracker->Release();
+                }
+                obj->Release();
+            }
+        }
+
+        g_tally.NoteResidency(module, levels != nullptr ? (uint32_t) levels[i] : 0, bytes);
+    }
+
+    Emit(g_tally.Due(GetTickCount64()));
 }

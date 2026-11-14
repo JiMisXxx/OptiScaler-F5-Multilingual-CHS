@@ -2152,6 +2152,11 @@ static HRESULT hkSetResidencyPriority(ID3D12Device1* This, UINT NumObjects, ID3D
 {
     auto result = o_SetResidencyPriority(This, NumObjects, ppObjects, pPriorities);
 
+    // Who asks for which priority, for the GPU memory log (our own ProtectMemory calls go to the original, not here)
+    if (GpuMemory::Active())
+        GpuMemory::NoteResidency(NumObjects, reinterpret_cast<IUnknown* const*>(ppObjects), pPriorities,
+                                 _ReturnAddress());
+
     // HACK: AMD Windows 25.20 drivers fail in xess/xefg with E_INVALIDARG
     // This hack allows them to work without the priority being actually set
     if (FAILED(result))
