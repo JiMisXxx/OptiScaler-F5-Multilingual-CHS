@@ -667,6 +667,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h" />
     <ClInclude Include="native\VirtualUpscalerHold.h" />
     <ClInclude Include="native\FpsLog.h" />
+    <ClInclude Include="misc\GpuMemTally.h" />
+    <ClInclude Include="misc\GpuMemory.h" />
     <ClInclude Include="native\GpuStageTiming.h" />
     <ClInclude Include="motion\OpticalFlow_Dx12.h" />
     <ClInclude Include="motion\SceneCut_Dx12.h" />
@@ -840,6 +842,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="fsr4\FSR4Models.cpp" />
     <ClCompile Include="fsr4\FSR4Presets.cpp" />
     <ClCompile Include="hooks\D3D12_Hooks.cpp" />
+    <ClCompile Include="misc\GpuMemory.cpp" />
     <ClCompile Include="hooks\DxgiFactory_Hooks.cpp" />
     <ClCompile Include="hooks\DxvkOutputs.cpp" />
     <ClCompile Include="hooks\DxgiFactory_WrappedCalls.cpp" />
