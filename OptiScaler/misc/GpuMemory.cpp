@@ -44,7 +44,7 @@ const char* BucketOf(HMODULE module, std::string& storage)
             else
             {
                 std::wstring w(path, n);
-                w = w.substr(w.find_last_of(L"\/") + 1);
+                w = w.substr(w.find_last_of(L"\\/") + 1);
                 for (wchar_t c : w)
                     name.push_back(c < 128 ? (char) c : '?');
             }

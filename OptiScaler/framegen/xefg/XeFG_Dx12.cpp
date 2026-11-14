@@ -217,7 +217,7 @@ static void LogTempHeapSizes(xefg_swapchain_handle_t context, const xefg_swapcha
     if (const DWORD n = GetModuleFileNameW(XeFGProxy::Module(), path, MAX_PATH); n > 0 && n < MAX_PATH)
     {
         name.assign(path, n);
-        name = name.substr(name.find_last_of(L"\/") + 1);
+        name = name.substr(name.find_last_of(L"\\/") + 1);
     }
 
     LOG_INFO(
