@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "Config.h"
+#include <misc/GpuMemTally.h>
 
 #include "Util.h"
 
@@ -565,6 +566,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             LogToConsole.set_from_config(readBool("Log", "LogToConsole"));
             LogToDebug.set_from_config(readBool("Log", "LogToDebug"));
             LogToNGX.set_from_config(readBool("Log", "LogToNGX"));
+            LogGpuMemory.set_from_config(readBool("Log", "LogGpuMemory"));
+            if (auto protect = readString("Memory", "ProtectMemory"); protect.has_value())
+            {
+                if (int scope = gpumem::ParseProtectScope(protect.value()); scope >= 0)
+                    ProtectMemory.set_from_config(scope);
+                else
+                    LOG_WARN("[Memory] ProtectMemory has invalid value '{}'; using the default (fg)", protect.value());
+            }
             D3D12Dred.set_from_config(readBool("Log", "D3D12Dred"));
             CrashDump.set_from_config(readBool("Log", "CrashDump"));
             OpenConsole.set_from_config(readBool("Log", "OpenConsole"));
@@ -2770,6 +2779,12 @@ bool Config::SaveIni()
         ini.SetValue("Log", "LogToConsole", GetBoolValue(Instance()->LogToConsole.value_for_config()).c_str());
         ini.SetValue("Log", "LogToDebug", GetBoolValue(Instance()->LogToDebug.value_for_config()).c_str());
         ini.SetValue("Log", "LogToNGX", GetBoolValue(Instance()->LogToNGX.value_for_config()).c_str());
+        ini.SetValue("Log", "LogGpuMemory", GetBoolValue(Instance()->LogGpuMemory.value_for_config()).c_str());
+        {
+            const auto scope = Instance()->ProtectMemory.value_for_config();
+            ini.SetValue("Memory", "ProtectMemory",
+                         scope.has_value() ? gpumem::ProtectScopeName(scope.value()) : "auto");
+        }
         ini.SetValue("Log", "D3D12Dred", GetBoolValue(Instance()->D3D12Dred.value_for_config()).c_str());
         ini.SetValue("Log", "CrashDump", GetBoolValue(Instance()->CrashDump.value_for_config()).c_str());
         ini.SetValue("Log", "OpenConsole", GetBoolValue(Instance()->OpenConsole.value_for_config()).c_str());

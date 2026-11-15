@@ -250,6 +250,10 @@ class Config
     CustomOptional<bool> LogToConsole { false };
     CustomOptional<bool> LogToDebug { false };
     CustomOptional<bool> LogToNGX { false };
+    // [Memory] high residency priority scope: 0 off, 1 fg (default), 2 all (read once)
+    CustomOptional<int> ProtectMemory { 1 };
+    CustomOptional<bool, NoDefault>
+        LogGpuMemory; // [Log] "GPU memory by module" lines; unset (auto) = on with LogToFile (read once)
     CustomOptional<bool> D3D12Dred { false }; // [Log] D3D12 device-removed breadcrumbs on the D3D11 bridge's device
     CustomOptional<bool> CrashDump { false }; // [Log] write OptiScaler_crash.dmp when the game crashes (read once at start)
     CustomOptional<bool> OpenConsole { false };

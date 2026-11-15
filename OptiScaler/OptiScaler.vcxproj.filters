@@ -509,6 +509,12 @@
     <ClInclude Include="native\VirtualUpscalerHold.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\GpuMemTally.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="misc\GpuMemory.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\FpsLog.h">
     <ClInclude Include="native\GpuStageTiming.h">
       <Filter>Header Files</Filter>
@@ -1534,6 +1540,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\depth_scale\DS_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="misc\GpuMemory.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="misc\FrameLimit.cpp">

@@ -11,6 +11,7 @@
 #include <nvapi/fakenvapi.h>
 #include <low_latency/input/input_common.h>
 #include <misc/FrameLimit.h>
+#include <misc/GpuMemory.h>
 #include <framegen/mfgunlock/MfgUnlock.h>
 #include <framegen/f5low/F5Low.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -193,6 +194,38 @@ void XeFG_Dx12::ApplyMaxInterpolations(uint32_t reported)
                  _maxInterpolationCount, _nativeMaxInterpolations);
     else
         LOG_INFO("Max supported interpolations: {}", _maxInterpolationCount);
+}
+
+// How much GPU memory the XeFG library asks for (its temporary buffer and texture heaps), for the GPU memory log. With
+// FG Output F5Low the library behind these calls is f5low.dll and the numbers are f5low's own estimate. Logging only.
+static void LogTempHeapSizes(xefg_swapchain_handle_t context, const xefg_swapchain_d3d12_init_params_t* params,
+                             uint32_t width, uint32_t height, DXGI_FORMAT format)
+{
+    if (!GpuMemory::Active() || context == nullptr || XeFGProxy::D3D12GetProperties() == nullptr)
+        return;
+
+    xefg_swapchain_properties_t props {};
+    const auto result = XeFGProxy::D3D12GetProperties()(context, params, width, height, format, &props);
+    if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+    {
+        LOG_INFO("XeFG temp heap sizes not available: {} ({})", magic_enum::enum_name(result), (UINT) result);
+        return;
+    }
+
+    wchar_t path[MAX_PATH] {};
+    std::wstring name = L"?";
+    if (const DWORD n = GetModuleFileNameW(XeFGProxy::Module(), path, MAX_PATH); n > 0 && n < MAX_PATH)
+    {
+        name.assign(path, n);
+        name = name.substr(name.find_last_of(L"\\/") + 1);
+    }
+
+    LOG_INFO(
+        "XeFG library {} temp heaps at {}x{}, up to {} generated frame(s): buffers {} MB, textures {} MB, together "
+        "{} MB",
+        wstring_to_string(name), width, height, params != nullptr ? params->maxInterpolatedFrames : 0,
+        props.tempBufferHeapSize / (1024 * 1024), props.tempTextureHeapSize / (1024 * 1024),
+        (props.tempBufferHeapSize + props.tempTextureHeapSize) / (1024 * 1024));
 }
 
 void XeFG_Dx12::LogAcceptedInterpolations()
@@ -555,6 +588,8 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
 #endif // !DONT_USE_XMX
 
     xefg_swapchain_result_t result;
+    LogTempHeapSizes(_swapChainContext, &params, desc->BufferDesc.Width, desc->BufferDesc.Height,
+                     desc->BufferDesc.Format);
     result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue, factory12,
                                                      &params);
 
@@ -719,9 +754,11 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     xefg_swapchain_result_t result;
 
     {
+        // The heap sizes are read inside the scope, like the init call they describe
 #ifndef DONT_USE_XMX
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 #endif // !DONT_USE_XMX
+        LogTempHeapSizes(_swapChainContext, &params, desc->Width, desc->Height, desc->Format);
         result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc, realQueue,
                                                          factory12, &params);
 
