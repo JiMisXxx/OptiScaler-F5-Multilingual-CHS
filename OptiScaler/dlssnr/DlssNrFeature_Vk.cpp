@@ -924,6 +924,48 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
     DlssNr::ReportPostLutStatus(status);
 }
 
+// Neural Rendering switched off: after kOffReleaseVk off, everything NR made goes (the models, images and passes), as
+// the D3D12 path does (DlssNr_Dx12.cpp ReleaseWhileOff). Vulkan has no per-frame retired list here, so it is the
+// retry's release: wait for the device once, then ReleaseNrObjects. That one wait happens while NR is off; a quick
+// off/on within kOffReleaseVk frees nothing and stays instant. The next frame with NR on rebuilds as after a retry.
+constexpr auto kOffReleaseVk = std::chrono::seconds(10);
+// Both under g_vkMutex. offSince is zero while on; tried makes it one release (one device wait) per off period, also
+// when the wait fails, so a device that will not go idle is not asked again every frame.
+std::chrono::steady_clock::time_point g_vkOffSince {};
+bool g_vkOffReleaseTried = false;
+
+static void ReleaseWhileOffVk()
+{
+    std::lock_guard<std::mutex> lock(g_vkMutex);
+    VkLockMark lockMark;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (g_vkOffSince == std::chrono::steady_clock::time_point {})
+        g_vkOffSince = now;
+    if (g_vkOffReleaseTried || now - g_vkOffSince < kOffReleaseVk || g_vk.device == VK_NULL_HANDLE)
+        return;
+    g_vkOffReleaseTried = true;
+
+    // The same wait the menu's Retry makes on this thread before ReleaseNrObjects; here it runs once, while NR is off.
+    if (vkDeviceWaitIdle(g_vk.device) != VK_SUCCESS)
+    {
+        LOG_WARN(
+            "DLSS-NR Vulkan: switched off, but the device would not go idle; its models stay until it is on again");
+        return;
+    }
+
+    ReleaseNrObjects();
+    LOG_INFO("DLSS-NR Vulkan: switched off for {} s, its models and surfaces released",
+             std::chrono::duration_cast<std::chrono::seconds>(kOffReleaseVk).count());
+}
+
+static void NoteOnVk()
+{
+    std::lock_guard<std::mutex> lock(g_vkMutex);
+    g_vkOffSince = {};
+    g_vkOffReleaseTried = false;
+}
+
 static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
                              VkPhysicalDevice physicalDevice, VkDevice device, bool beforeSr, bool rayReconstruction,
                              bool& applied, bool* handled = nullptr)
@@ -944,7 +986,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     }
 
     if (!cfg.DlssNrEnabled.value_or_default())
+    {
+        ReleaseWhileOffVk();
         return;
+    }
+    NoteOnVk();
 
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {

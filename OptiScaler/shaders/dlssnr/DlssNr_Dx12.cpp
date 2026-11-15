@@ -2687,7 +2687,8 @@ void ParkIdleViews()
 constexpr auto kOffRelease = std::chrono::seconds(10);
 std::chrono::steady_clock::time_point g_offSince {}; // zero while on
 
-void ReleaseWhileOff(ID3D12GraphicsCommandList* cmdList, unsigned long long epoch)
+// True once NR has been off for kOffRelease (the caller then also lets Deferred DLSS's own generation go).
+bool ReleaseWhileOff(ID3D12GraphicsCommandList* cmdList, unsigned long long epoch)
 {
     TickNrRetired(epoch);
 
@@ -2695,7 +2696,7 @@ void ReleaseWhileOff(ID3D12GraphicsCommandList* cmdList, unsigned long long epoc
     if (g_offSince == std::chrono::steady_clock::time_point {})
         g_offSince = now;
     if (now - g_offSince < kOffRelease)
-        return;
+        return false;
 
     bool holds = false;
     for (int slot = -1; slot < (int) kAllSlots && !holds; ++slot)
@@ -2718,6 +2719,8 @@ void ReleaseWhileOff(ID3D12GraphicsCommandList* cmdList, unsigned long long epoc
         LOG_INFO("DLSS-NR: switched off for {} s, {} view model(s) and their surfaces released",
                  std::chrono::duration_cast<std::chrono::seconds>(kOffRelease).count(), parked);
     }
+
+    return true;
 }
 
 } // namespace
@@ -7015,7 +7018,10 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     DlssNrNative::SetPrecision(precision);
 
     if (!cfg.DlssNrEnabled.value_or_default())
-        ReleaseWhileOff(cmdList, timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount);
+    {
+        if (ReleaseWhileOff(cmdList, timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount))
+            DeferredSr::ReleaseWhileOff(); // Deferred DLSS keeps its own model and surfaces
+    }
     else
         g_offSince = {};
 
