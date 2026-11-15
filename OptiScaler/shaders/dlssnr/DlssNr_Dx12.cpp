@@ -2679,6 +2679,35 @@ void ParkIdleViews()
                  std::chrono::duration_cast<std::chrono::minutes>(kKeepIdle).count());
 }
 
+// Neural Rendering switched off: every view's models and surfaces go, as an idle view's do (parked, freed once the GPU
+// finished the lists that used them). Without this they stayed for the rest of the session: ~1.4 GB with 3 passes at
+// 1440p. Called on every evaluate while off; the retired list is ticked here too, as Dispatch no longer runs.
+void ReleaseWhileOff(ID3D12GraphicsCommandList* cmdList, unsigned long long epoch)
+{
+    bool holds = false;
+    for (int slot = -1; slot < (int) kAllSlots && !holds; ++slot)
+        holds = SlotHolds(slot);
+
+    if (holds)
+    {
+        // Before anything is parked: the items wait for this list (and the ones before it) to finish
+        WatchNrList(cmdList);
+
+        unsigned int parked = 0;
+        for (int slot = -1; slot < (int) kAllSlots; ++slot)
+        {
+            if (!SlotHolds(slot))
+                continue;
+            ParkSlot(slot);
+            ++parked;
+        }
+
+        LOG_INFO("DLSS-NR: switched off, {} view model(s) and their surfaces released", parked);
+    }
+
+    TickNrRetired(epoch);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -6972,6 +7001,9 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         lastPrecision = precision;
     }
     DlssNrNative::SetPrecision(precision);
+
+    if (!cfg.DlssNrEnabled.value_or_default())
+        ReleaseWhileOff(cmdList, timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount);
 
     // A game with several DLSS features alive (DlssNr_Contexts.h): the main one goes on as before, another stands aside
     // or works in a view slot of its own. First of all, since everything below keeps one model and one history.
