@@ -2679,6 +2679,47 @@ void ParkIdleViews()
                  std::chrono::duration_cast<std::chrono::minutes>(kKeepIdle).count());
 }
 
+// Neural Rendering switched off: every view's models and surfaces go, as an idle view's do (parked, freed once the GPU
+// finished the lists that used them). Without this they stayed for the rest of the session: ~1.4 GB with 3 passes at
+// 1440p. Only after kOffRelease off, so a quick off/on to compare the look stays instant (building a pass again stops
+// the frame ~150-200 ms). Called on every evaluate while off; the retired list is ticked here too, as Dispatch no
+// longer runs.
+constexpr auto kOffRelease = std::chrono::seconds(10);
+std::chrono::steady_clock::time_point g_offSince {}; // zero while on
+
+void ReleaseWhileOff(ID3D12GraphicsCommandList* cmdList, unsigned long long epoch)
+{
+    TickNrRetired(epoch);
+
+    const auto now = std::chrono::steady_clock::now();
+    if (g_offSince == std::chrono::steady_clock::time_point {})
+        g_offSince = now;
+    if (now - g_offSince < kOffRelease)
+        return;
+
+    bool holds = false;
+    for (int slot = -1; slot < (int) kAllSlots && !holds; ++slot)
+        holds = SlotHolds(slot);
+
+    if (holds)
+    {
+        // Before anything is parked: the items wait for this list (and the ones before it) to finish
+        WatchNrList(cmdList);
+
+        unsigned int parked = 0;
+        for (int slot = -1; slot < (int) kAllSlots; ++slot)
+        {
+            if (!SlotHolds(slot))
+                continue;
+            ParkSlot(slot);
+            ++parked;
+        }
+
+        LOG_INFO("DLSS-NR: switched off for {} s, {} view model(s) and their surfaces released",
+                 std::chrono::duration_cast<std::chrono::seconds>(kOffRelease).count(), parked);
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -6972,6 +7013,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         lastPrecision = precision;
     }
     DlssNrNative::SetPrecision(precision);
+
+    if (!cfg.DlssNrEnabled.value_or_default())
+        ReleaseWhileOff(cmdList, timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount);
+    else
+        g_offSince = {};
 
     // A game with several DLSS features alive (DlssNr_Contexts.h): the main one goes on as before, another stands aside
     // or works in a view slot of its own. First of all, since everything below keeps one model and one history.
