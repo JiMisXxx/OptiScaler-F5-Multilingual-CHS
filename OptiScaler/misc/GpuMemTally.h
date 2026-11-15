@@ -103,6 +103,20 @@ inline const char* ProtectScopeName(int scope)
     return scope == ProtectFg ? "fg" : scope == ProtectAll ? "all" : "off";
 }
 
+// The file name of a module path, as the buckets are keyed: "J:\Games\f5low.dll" -> "f5low.dll" (both slashes;
+// non-ASCII as '?'). Kept here so the host test covers it: a lost backslash in this split once made every name a full
+// path, and ProtectMemory=fg then matched nothing.
+inline std::string ModuleFileName(std::wstring_view path)
+{
+    const size_t cut = path.find_last_of(L"\\/");
+    if (cut != std::wstring_view::npos)
+        path = path.substr(cut + 1);
+    std::string name;
+    for (wchar_t c : path)
+        name.push_back(c < 128 ? (char) c : '?');
+    return name;
+}
+
 // Does an allocation of this module get the high priority under the scope?
 inline bool ProtectedUnder(int scope, std::string_view name)
 {

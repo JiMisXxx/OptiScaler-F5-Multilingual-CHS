@@ -52,12 +52,7 @@ std::string BucketOf(HMODULE module)
         if (n == 0 || n >= MAX_PATH)
             name = "other";
         else
-        {
-            std::wstring w(path, n);
-            w = w.substr(w.find_last_of(L"\/") + 1);
-            for (wchar_t c : w)
-                name.push_back(c < 128 ? (char) c : '?');
-        }
+            name = gpumem::ModuleFileName(std::wstring_view(path, n));
     }
 
     std::lock_guard lock(g_nameMutex);

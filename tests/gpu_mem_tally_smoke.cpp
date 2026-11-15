@@ -90,6 +90,10 @@ int main()
     }
 
     // scopes
+    CHECK(ModuleFileName(L"J:\\Games\\Hookshot\\bin\\OptiScaler\\plugins\\f5low.dll") == "f5low.dll");
+    CHECK(ModuleFileName(L"C:/x/nvngx_dlssnr.dll") == "nvngx_dlssnr.dll");
+    CHECK(ModuleFileName(L"libxess_fg.dll") == "libxess_fg.dll");
+    CHECK(ProtectedUnder(ProtectFg, ModuleFileName(L"D:\\a\\f5low.dll")));
     CHECK(ParseProtectScope("auto") == -1); // auto = the default (fg), left to Config
     CHECK(ParseProtectScope("off") == ProtectOff);
     CHECK(ParseProtectScope("False") == ProtectOff);
