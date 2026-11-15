@@ -6,7 +6,7 @@
 // resource and heap here; the tracker attached to each one takes it off again when D3D12 destroys it.
 namespace GpuMemory
 {
-// Reads [Log] LogGpuMemory (auto = on with LogToFile) and [Memory] ProtectMemory (auto = off) once and says whether the
+// Reads [Log] LogGpuMemory (auto = on with LogToFile) and [Memory] ProtectMemory (auto = fg) once and says whether the
 // allocation hooks are wanted (either one). Call before hooking.
 bool Init();
 bool Active();    // the log line is on

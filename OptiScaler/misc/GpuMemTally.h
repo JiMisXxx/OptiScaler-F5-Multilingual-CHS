@@ -89,7 +89,7 @@ inline int ParseProtectScope(std::string_view v)
                 return false;
         return true;
     };
-    if (same("off") || same("false") || same("0") || same("auto"))
+    if (same("off") || same("false") || same("0"))
         return ProtectOff;
     if (same("fg"))
         return ProtectFg;

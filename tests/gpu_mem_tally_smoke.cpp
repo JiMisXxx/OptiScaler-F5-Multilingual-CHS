@@ -90,7 +90,7 @@ int main()
     }
 
     // scopes
-    CHECK(ParseProtectScope("auto") == ProtectOff);
+    CHECK(ParseProtectScope("auto") == -1); // auto = the default (fg), left to Config
     CHECK(ParseProtectScope("off") == ProtectOff);
     CHECK(ParseProtectScope("False") == ProtectOff);
     CHECK(ParseProtectScope("fg") == ProtectFg);
