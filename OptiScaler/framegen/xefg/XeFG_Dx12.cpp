@@ -754,10 +754,10 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     xefg_swapchain_result_t result;
 
     {
+        // The heap sizes are read inside the scope, like the init call they describe
 #ifndef DONT_USE_XMX
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 #endif // !DONT_USE_XMX
-        // Inside the scope, like the init call it describes
         LogTempHeapSizes(_swapChainContext, &params, desc->Width, desc->Height, desc->Format);
         result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc, realQueue,
                                                          factory12, &params);
