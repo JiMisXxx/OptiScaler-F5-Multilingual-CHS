@@ -571,6 +571,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             {
                 if (int scope = gpumem::ParseProtectScope(protect.value()); scope >= 0)
                     ProtectMemory.set_from_config(scope);
+                else
+                    LOG_WARN("[Memory] ProtectMemory has invalid value '{}'; using the default (fg)", protect.value());
             }
             D3D12Dred.set_from_config(readBool("Log", "D3D12Dred"));
             CrashDump.set_from_config(readBool("Log", "CrashDump"));

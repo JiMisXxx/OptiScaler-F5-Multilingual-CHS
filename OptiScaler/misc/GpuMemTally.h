@@ -151,9 +151,6 @@ inline uint64_t AlignUp(uint64_t value, uint64_t alignment)
 class Tally
 {
   public:
-    // Text appended to every line, before the closing bracket (the budget and usage); called under the tally's lock
-    std::function<std::string()> suffix;
-
     // bytes > 0 on creation, < 0 on destruction; prot: the part of it that got the high residency priority (same sign)
     // Returns a line to log when one is due (see Due), empty otherwise
     std::string Add(const std::string& bucket, bool hostVisible, int64_t bytes, uint64_t nowMs, int64_t prot = 0)
@@ -364,8 +361,6 @@ class Tally
             }
         }
         _resDirty = false;
-        if (suffix)
-            line += suffix();
         if (final)
         {
             snprintf(tail, sizeof(tail), ", peak total %lld MB", (long long) (_peakGpu / (int64_t) kMegabyte));

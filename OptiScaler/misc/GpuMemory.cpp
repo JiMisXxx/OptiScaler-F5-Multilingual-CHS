@@ -27,44 +27,67 @@ std::unordered_map<HMODULE, std::string> g_names;
 // {6F1D7A52-2C48-4C7B-9E0A-5B3F8E1D44A9}
 const GUID kTrackerGuid = { 0x6f1d7a52, 0x2c48, 0x4c7b, { 0x9e, 0x0a, 0x5b, 0x3f, 0x8e, 0x1d, 0x44, 0xa9 } };
 
-const char* BucketOf(HMODULE module, std::string& storage)
+std::string BucketOf(HMODULE module)
 {
     if (module == nullptr)
         return "other";
 
-    std::lock_guard lock(g_nameMutex);
-    auto it = g_names.find(module);
-    if (it == g_names.end())
     {
-        std::string name;
-        if (module == dllModule)
-            name = "OptiScaler";
-        else if (module == GetModuleHandleW(nullptr))
-            name = "game";
+        std::lock_guard lock(g_nameMutex);
+        if (auto it = g_names.find(module); it != g_names.end())
+            return it->second;
+    }
+
+    // GetModuleFileNameW takes the loader lock: never while holding g_nameMutex (a DllMain that creates a resource
+    // would wait on us while we wait on it). Two threads may resolve the same module; the first insert wins.
+    std::string name;
+    if (module == dllModule)
+        name = "OptiScaler";
+    else if (module == GetModuleHandleW(nullptr))
+        name = "game";
+    else
+    {
+        wchar_t path[MAX_PATH] {};
+        const DWORD n = GetModuleFileNameW(module, path, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH)
+            name = "other";
         else
         {
-            wchar_t path[MAX_PATH] {};
-            const DWORD n = GetModuleFileNameW(module, path, MAX_PATH);
-            if (n == 0 || n >= MAX_PATH)
-                name = "other";
-            else
-            {
-                std::wstring w(path, n);
-                w = w.substr(w.find_last_of(L"\\/") + 1);
-                for (wchar_t c : w)
-                    name.push_back(c < 128 ? (char) c : '?');
-            }
+            std::wstring w(path, n);
+            w = w.substr(w.find_last_of(L"\/") + 1);
+            for (wchar_t c : w)
+                name.push_back(c < 128 ? (char) c : '?');
         }
-        it = g_names.emplace(module, std::move(name)).first;
     }
-    storage = it->second;
-    return storage.c_str();
+
+    std::lock_guard lock(g_nameMutex);
+    return g_names.emplace(module, std::move(name)).first->second;
 }
 
-void Emit(const std::string& line)
+// The budget and usage, asked outside the tally's lock: Add() also runs inside D3D12/DXGI object destruction (the
+// tracker's Release), so no DXGI call may happen while that lock is held
+std::string BudgetText()
 {
-    if (!line.empty())
-        spdlog::info("{}", line);
+    DXGI_QUERY_VIDEO_MEMORY_INFO info {};
+    if (!g_haveAdapter.load() || g_adapter == nullptr ||
+        FAILED(g_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+        return {};
+    char buf[96];
+    snprintf(buf, sizeof(buf), "; budget %llu MB, usage %llu MB", (unsigned long long) (info.Budget >> 20),
+             (unsigned long long) (info.CurrentUsage >> 20));
+    return buf;
+}
+
+void Emit(std::string line, bool withBudget = true)
+{
+    if (line.empty())
+        return;
+
+    // Inside the closing bracket of the tally's line; not from the tracker's Release (D3D12/DXGI may hold locks there)
+    if (const std::string budget = withBudget ? BudgetText() : std::string {}; !budget.empty() && line.back() == ')')
+        line.insert(line.size() - 1, budget);
+
+    spdlog::info("{}", line);
 }
 
 // Lives as private data of the counted resource or heap; D3D12 releases it when the object dies
@@ -99,7 +122,7 @@ class Tracker final : public IUnknown
         {
             // Not at process exit: the line it could produce would be logged into a closed log
             if (!State::Existing() || !State::Existing()->isShuttingDown)
-                Emit(g_tally.Add(_bucket, _host, -(int64_t) _bytes, GetTickCount64(), -(int64_t) _prot));
+                Emit(g_tally.Add(_bucket, _host, -(int64_t) _bytes, GetTickCount64(), -(int64_t) _prot), false);
             delete this;
         }
         return n;
@@ -124,21 +147,6 @@ bool GpuMemory::Init()
     g_protect.store(protect);
     g_scope.store(scope);
 
-    if (on)
-    {
-        g_tally.suffix = []() -> std::string
-        {
-            DXGI_QUERY_VIDEO_MEMORY_INFO info {};
-            if (!g_haveAdapter.load() || g_adapter == nullptr ||
-                FAILED(g_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
-                return {};
-            char buf[96];
-            snprintf(buf, sizeof(buf), "; budget %llu MB, usage %llu MB", (unsigned long long) (info.Budget >> 20),
-                     (unsigned long long) (info.CurrentUsage >> 20));
-            return buf;
-        };
-    }
-
     return on || protect;
 }
 
@@ -155,8 +163,7 @@ bool GpuMemory::ShouldProtect(int heapType, int memoryPool, void* caller)
     if (module == nullptr)
         return false;
 
-    std::string storage;
-    return gpumem::ProtectedUnder(g_scope.load(), BucketOf(module, storage));
+    return gpumem::ProtectedUnder(g_scope.load(), BucketOf(module));
 }
 
 void GpuMemory::NoteDevice(ID3D12Device* device)
@@ -199,8 +206,7 @@ void GpuMemory::Note(IUnknown* object, uint64_t bytes, int heapType, int memoryP
         return;
     }
 
-    std::string storage;
-    const std::string bucket = BucketOf(Util::GetCallerModule(caller), storage);
+    const std::string bucket = BucketOf(Util::GetCallerModule(caller));
     const bool host = !gpumem::IsGpuMemory(heapType, memoryPool);
 
     auto* tracker = new Tracker(bucket, host, bytes, protectedBytes);
@@ -225,8 +231,7 @@ void GpuMemory::NoteResidency(UINT numObjects, IUnknown* const* objects, const v
     if (!Active() || numObjects == 0 || objects == nullptr)
         return;
 
-    std::string storage;
-    const std::string module = BucketOf(Util::GetCallerModule(caller), storage);
+    const std::string module = BucketOf(Util::GetCallerModule(caller));
     const auto* levels = static_cast<const D3D12_RESIDENCY_PRIORITY*>(priorities);
 
     for (UINT i = 0; i < numObjects; ++i)

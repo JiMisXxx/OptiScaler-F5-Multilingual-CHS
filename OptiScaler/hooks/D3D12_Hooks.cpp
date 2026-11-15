@@ -2592,30 +2592,10 @@ static void HookToDevice(ID3D12Device* InDevice)
         if (o_CreatePlacedResource != nullptr)
             DetourAttach(&(PVOID&) o_CreatePlacedResource, hkCreatePlacedResource);
 
-        if (o_CreateHeap != nullptr)
-            DetourAttach(&(PVOID&) o_CreateHeap, hkCreateHeap);
-
-        if (o_CreateCommittedResource1 != nullptr)
-            DetourAttach(&(PVOID&) o_CreateCommittedResource1, hkCreateCommittedResource1);
-
-        if (o_CreateHeap1 != nullptr)
-            DetourAttach(&(PVOID&) o_CreateHeap1, hkCreateHeap1);
-
-        if (o_CreateCommittedResource2 != nullptr)
-            DetourAttach(&(PVOID&) o_CreateCommittedResource2, hkCreateCommittedResource2);
-
-        if (o_CreateCommittedResource3 != nullptr)
-            DetourAttach(&(PVOID&) o_CreateCommittedResource3, hkCreateCommittedResource3);
-
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to detour ID3D12Device methods, error: {:X}", detourResult);
-            o_CreateHeap = nullptr;
-            o_CreateCommittedResource1 = nullptr;
-            o_CreateHeap1 = nullptr;
-            o_CreateCommittedResource2 = nullptr;
-            o_CreateCommittedResource3 = nullptr;
             o_CreateSampler = nullptr;
             o_CheckFeatureSupport = nullptr;
             o_CreateRootSignature = nullptr;
@@ -2623,6 +2603,41 @@ static void HookToDevice(ID3D12Device* InDevice)
             o_CreatePlacedResource = nullptr;
             o_D3D12DeviceRelease = nullptr;
             o_GetResourceAllocationInfo = nullptr;
+        }
+
+        // GPU memory log / ProtectMemory: their own transaction, so a slot an overlay or anti-cheat already patched
+        // only costs these five hooks, never the device hooks above (they run in every D3D12 game since auto = fg)
+        if (o_CreateHeap != nullptr || o_CreateCommittedResource1 != nullptr || o_CreateHeap1 != nullptr ||
+            o_CreateCommittedResource2 != nullptr || o_CreateCommittedResource3 != nullptr)
+        {
+            DetourTransactionBegin();
+            DetourUpdateThread(GetCurrentThread());
+
+            if (o_CreateHeap != nullptr)
+                DetourAttach(&(PVOID&) o_CreateHeap, hkCreateHeap);
+
+            if (o_CreateCommittedResource1 != nullptr)
+                DetourAttach(&(PVOID&) o_CreateCommittedResource1, hkCreateCommittedResource1);
+
+            if (o_CreateHeap1 != nullptr)
+                DetourAttach(&(PVOID&) o_CreateHeap1, hkCreateHeap1);
+
+            if (o_CreateCommittedResource2 != nullptr)
+                DetourAttach(&(PVOID&) o_CreateCommittedResource2, hkCreateCommittedResource2);
+
+            if (o_CreateCommittedResource3 != nullptr)
+                DetourAttach(&(PVOID&) o_CreateCommittedResource3, hkCreateCommittedResource3);
+
+            if (const auto gpuMemResult = DetourTransactionCommit(); gpuMemResult != NO_ERROR)
+            {
+                LOG_WARN("GPU memory hooks not installed (error {:X}): no GPU memory log, ProtectMemory off",
+                         gpuMemResult);
+                o_CreateHeap = nullptr;
+                o_CreateCommittedResource1 = nullptr;
+                o_CreateHeap1 = nullptr;
+                o_CreateCommittedResource2 = nullptr;
+                o_CreateCommittedResource3 = nullptr;
+            }
         }
     }
 
