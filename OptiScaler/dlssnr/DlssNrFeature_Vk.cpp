@@ -929,36 +929,41 @@ static void ApplyPostLutVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysica
 // retry's release: wait for the device once, then ReleaseNrObjects. That one wait happens while NR is off; a quick
 // off/on within kOffReleaseVk frees nothing and stays instant. The next frame with NR on rebuilds as after a retry.
 constexpr auto kOffReleaseVk = std::chrono::seconds(10);
-std::chrono::steady_clock::time_point g_vkOffSince {}; // zero while on
+// Both under g_vkMutex. offSince is zero while on; tried makes it one release (one device wait) per off period, also
+// when the wait fails, so a device that will not go idle is not asked again every frame.
+std::chrono::steady_clock::time_point g_vkOffSince {};
+bool g_vkOffReleaseTried = false;
 
 static void ReleaseWhileOffVk()
 {
-    const auto now = std::chrono::steady_clock::now();
-    if (g_vkOffSince == std::chrono::steady_clock::time_point {})
-        g_vkOffSince = now;
-    if (now - g_vkOffSince < kOffReleaseVk)
-        return;
-
     std::lock_guard<std::mutex> lock(g_vkMutex);
     VkLockMark lockMark;
 
-    const bool holds = g_vk.feature != nullptr || g_vk.activePasses != 0 || g_vk.output.image != VK_NULL_HANDLE ||
-                       g_vk.pass != nullptr;
-    if (!holds || g_vk.device == VK_NULL_HANDLE)
+    const auto now = std::chrono::steady_clock::now();
+    if (g_vkOffSince == std::chrono::steady_clock::time_point {})
+        g_vkOffSince = now;
+    if (g_vkOffReleaseTried || now - g_vkOffSince < kOffReleaseVk || g_vk.device == VK_NULL_HANDLE)
         return;
+    g_vkOffReleaseTried = true;
 
+    // The same wait the menu's Retry makes on this thread before ReleaseNrObjects; here it runs once, while NR is off.
     if (vkDeviceWaitIdle(g_vk.device) != VK_SUCCESS)
     {
-        static bool said = false;
-        if (!said)
-            LOG_WARN("DLSS-NR Vulkan: switched off, but the device would not go idle; its models stay");
-        said = true;
+        LOG_WARN(
+            "DLSS-NR Vulkan: switched off, but the device would not go idle; its models stay until it is on again");
         return;
     }
 
     ReleaseNrObjects();
     LOG_INFO("DLSS-NR Vulkan: switched off for {} s, its models and surfaces released",
              std::chrono::duration_cast<std::chrono::seconds>(kOffReleaseVk).count());
+}
+
+static void NoteOnVk()
+{
+    std::lock_guard<std::mutex> lock(g_vkMutex);
+    g_vkOffSince = {};
+    g_vkOffReleaseTried = false;
 }
 
 static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
@@ -985,7 +990,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         ReleaseWhileOffVk();
         return;
     }
-    g_vkOffSince = {};
+    NoteOnVk();
 
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {
