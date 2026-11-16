@@ -622,7 +622,7 @@ static bool InheritedProfileCombo(const char* label, CustomOptional<uint32_t, No
 // the model applied. How each pass looks is the look presets' (DlssNr_LookPresets.h), so picking a pass count never
 // undoes a look and a look never undoes this; the multipass profiles these buttons used to write are the Natural
 // look's.
-// What a pass preset overwrites besides the pass count, kept for this session so "Put my exposure back" can undo it.
+// What a pass preset overwrites besides the pass count, kept for this session so "Put my settings back" can undo it.
 // Unset stays unset on the way back (auto, not its default number).
 struct PassPresetUndo
 {
@@ -810,8 +810,9 @@ static bool PresetButton(const char* label, bool active, float width = 0.0f)
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.45f, 0.20f, 1.0f));
     }
 
-    const bool pressed =
-        ImGui::Button(active ? (std::string(kActiveMark) + label).c_str() : label, ImVec2(width, 0.0f));
+    // One "###" ID for both states, so the mark appearing does not drop keyboard/gamepad focus.
+    const std::string shown = std::string(active ? kActiveMark : "") + label + "###" + label;
+    const bool pressed = ImGui::Button(shown.c_str(), ImVec2(width, 0.0f));
 
     if (active)
         ImGui::PopStyleColor(3);
@@ -1324,7 +1325,7 @@ static void RenderEnableToggle(Config* config)
     // has to be findable from here (bound on the Input page's Keybinds card).
     ImGui::SameLine();
     const int key = config->DlssNrToggleKey.value_or_default();
-    ImGui::TextDisabled(key == UnboundKey ? "Toggle key: none" : "Toggle key: %s", MenuKeyName(key).c_str());
+    ImGui::TextDisabled("Toggle key: %s", MenuKeyName(key).c_str());
     ImGui::SameLine();
     if (ImGui::SmallButton("Set on the Input page##nrtogglekey"))
         MenuPages::RequestPage(MenuPages::Page::Input);
@@ -2306,9 +2307,9 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                 ApplyPassPreset(config, passes);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s",
-                                  "Also sets Model precision to NVIDIA (FP8) and puts exposure back to its "
-                                  "default (White point source Auto, Automatic's brightness slider at its default, "
-                                  "Highlight guard 2.0x).");
+                                  "Also sets Model precision to NVIDIA (FP8), turns off Lift model pass limit and "
+                                  "puts exposure back to its default (White point source Auto, Automatic's "
+                                  "brightness slider at its default, Highlight guard 2.0x).");
         }
         HelpMarker("Sets the pass count, with NR on FP8 and the default exposure. How each pass looks is the Look "
                    "presets'. Green and marked > = this pass count is in effect.");
@@ -2319,13 +2320,13 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
             g_passPresetUndo.reset();
         if (g_passPresetUndo)
         {
-            if (ImGui::SmallButton("Put my exposure back##passpresetundo"))
+            if (ImGui::SmallButton("Put my settings back##passpresetundo"))
             {
                 g_passPresetUndo->first.Write(config);
                 g_passPresetUndo.reset();
             }
-            HelpMarker("Puts back the exposure, Highlight guard and Model precision the pass preset replaced. Gone "
-                       "once you change one of them yourself.");
+            HelpMarker("Puts back the exposure, Highlight guard, Model precision and Lift model pass limit the pass "
+                       "preset replaced (the pass count stays). Gone once you change one of them yourself.");
         }
 
         // Directly under the pass presets, since those buttons set this slider's value. This page

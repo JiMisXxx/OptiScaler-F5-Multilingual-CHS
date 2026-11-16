@@ -835,8 +835,11 @@ bool EnsureCapabilityParams(ID3D12Device* device)
     if (g_nr.capabilityParams != nullptr)
         return true;
 
+    // Each failure logs which step failed; the reason (menu + log) says what the player can do.
     if (!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device))
     {
+        LOG_ERROR("DLSS-NR: the NGX core would not initialise (InitDx12 failed; GPU DLSS-capable: {})",
+                  IdentifyGpu::getPrimaryGpu().dlssCapable);
         g_nr.reason = IdentifyGpu::getPrimaryGpu().dlssCapable
                           ? "NVIDIA's DLSS would not start. Update the NVIDIA driver (details in OptiScaler.log)"
                           : "this GPU has no DLSS support. Neural Rendering needs an NVIDIA RTX card";
@@ -845,13 +848,16 @@ bool EnsureCapabilityParams(ID3D12Device* device)
 
     if (NVNGXProxy::D3D12_GetCapabilityParameters() == nullptr)
     {
+        LOG_ERROR("DLSS-NR: the NGX core has no capability parameters (D3D12_GetCapabilityParameters is null)");
         g_nr.reason = "NVIDIA's DLSS would not start. Update the NVIDIA driver (details in OptiScaler.log)";
         return false;
     }
 
-    if (NVNGXProxy::D3D12_GetCapabilityParameters()(&g_nr.capabilityParams) != NVSDK_NGX_Result_Success ||
-        g_nr.capabilityParams == nullptr)
+    if (const NVSDK_NGX_Result capResult = NVNGXProxy::D3D12_GetCapabilityParameters()(&g_nr.capabilityParams);
+        capResult != NVSDK_NGX_Result_Success || g_nr.capabilityParams == nullptr)
     {
+        LOG_ERROR("DLSS-NR: the NGX core refused its capability parameters (result 0x{:X} {}, block {})",
+                  (uint32_t) capResult, NgxResultName((unsigned int) capResult), g_nr.capabilityParams != nullptr);
         g_nr.capabilityParams = nullptr;
         g_nr.reason = "NVIDIA's DLSS would not start. Update the NVIDIA driver (details in OptiScaler.log)";
         return false;
@@ -4225,6 +4231,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.activeColor = CreateScratch(device, desc.Format, width, height);
     if (cropColor && g_nr.activeColor == nullptr)
     {
+        LOG_ERROR("DLSS-NR: the pre-SR active colour staging texture could not be allocated ({}x{}, format {})", width,
+                  height, (uint32_t) desc.Format);
         g_nr.failed = true;
         g_nr.reason = "a texture for NR before SR could not be made (often low video memory). Lower the model "
                       "resolution or texture quality, then Retry";
@@ -4638,6 +4646,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (!haveCodec)
     {
+        LOG_ERROR("DLSS-NR: the colour codec would not compile");
         g_nr.failed = true;
         g_nr.reason = "a shader would not compile. Please report it with OptiScaler.log";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
