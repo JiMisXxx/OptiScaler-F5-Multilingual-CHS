@@ -301,11 +301,13 @@ struct ShapeInputs
     // The input's own cap (OptiScaler's calls carry theirs) was planned for XeFG's other side: XeLL counts shown
     // frames, the others rendered ones. No interval and no Boost until it sends one for this side.
     bool modeForOtherSide = false;
+    // The game turned its own Reflex off (native::xefgreflex::GameTurnedLowLatencyOff): XeFG's XeLL follows it
+    bool gameTurnedOff = false;
 };
 
-// The sleep mode a tech gets from the input's own: XeLL with XeFG has low latency on whatever the game says (only Force
-// Disable turns it off), the split's other side the game's own with the cap, XeFG's own XeLL everything off; Input Off
-// sends low latency off, no Boost and no interval everywhere (OptiScaler's limiter keeps the cap)
+// The sleep mode a tech gets from the input's own: XeLL with XeFG has low latency on unless the game turned its own
+// Reflex off or Force Disable is set, the split's other side the game's own with the cap, XeFG's own XeLL everything
+// off; Input Off sends low latency off, no Boost and no interval everywhere (OptiScaler's limiter keeps the cap)
 constexpr SleepMode SleepModeFor(const SleepMode& game, Role role, const ShapeInputs& in)
 {
     using namespace native::xefgreflex;
@@ -338,7 +340,8 @@ constexpr SleepMode SleepModeFor(const SleepMode& game, Role role, const ShapeIn
         return DriverSleepModeInSplit(input, in.capIntervalUs);
     }
 
-    return SleepModeForOutput(input, in.capIntervalUs, in.xefgOutput && !split, in.forceDisabled, in.blocked);
+    return SleepModeForOutput(input, in.capIntervalUs, in.xefgOutput && !split, in.forceDisabled, in.blocked,
+                              in.gameTurnedOff);
 }
 
 // The game's own Reflex as the input: who keeps OptiScaler's frame cap (the output, through its sleep mode, or
