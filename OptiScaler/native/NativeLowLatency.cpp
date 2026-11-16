@@ -1051,6 +1051,9 @@ Status GetStatus()
     // In the split XeLL only keeps XeFG running: the game's Reflex lowers latency on the other side
     status.gameReflexFeedsXell = ReflexHooks::gameReflexFeedsXell() && status.xefgSide == XefgLatency::XeLL;
     status.forceReflexDisabled = ForceReflexDisabled();
+
+    status.gameReflexOff = InputCommon::game_turned_low_latency_off();
+
     const auto current = CurrentDevice();
     status.output = OutputText(current.api);
     status.offKeptForFrameGeneration =
