@@ -23,6 +23,7 @@ struct ColourEncodingStatus
     bool seen = false;
     std::string line;    // DlssNrColourEncoding::Describe
     std::string warning; // DlssNrColourEncoding::MismatchWarning, empty when the choice fits
+    const char* inUse = nullptr; // DlssNrColourEncoding::Name of the encoding NR reads with; null until a frame is seen
     // Whether the NR Exposure controls act on the last frame; LinearHdr until a frame is seen.
     DlssNrExposureState::State exposureState = DlssNrExposureState::State::LinearHdr;
     // The choice is gamma 2.2: the pass converts the picture at both edges (an exact round trip in intent, but not the

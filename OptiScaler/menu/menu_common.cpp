@@ -563,6 +563,8 @@ class Keybind
     }
 };
 
+std::string MenuKeyName(int virtualKey) { return Keybind::KeyNameFromVirtualKeyCode((USHORT) virtualKey); }
+
 Upscaler MenuCommon::GetBackendCode(const API api)
 {
     if (auto feature = State::Instance().currentFeature)

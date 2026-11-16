@@ -29,6 +29,9 @@ const ImVec4& CardHeaderActiveColor();
 ImFont* MonoFont(); // Hack; null with a custom TTF or HQ font off
 } // namespace MenuStyle
 
+// A key's name as the Keybinds card shows it ("Unbound" for none), for pages that mention a key next to its action.
+std::string MenuKeyName(int virtualKey);
+
 // Live numbers keep the fixed-width font so digits don't jitter when the default is proportional.
 class ScopedMonoFont
 {
