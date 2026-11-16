@@ -1903,9 +1903,9 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
             EdgeCompressionDrawText({ compress ? line.tone : EdgeCompressionLine::Tone::Grey, text });
             HelpMarker(
                 "NR works on fewer pixels: the middle stays sharp, the edges are squeezed. Saves GPU time; edges "
-                "slightly softer. Set on the NR Input page.");
-            if (ImGui::SmallButton("Set in NR Input##f5lowcompress"))
-                MenuPages::RequestPage(MenuPages::Page::NrInput);
+                "slightly softer. Set on the NR Options page (Performance).");
+            if (ImGui::SmallButton("Set in NR Options##f5lowcompress"))
+                MenuPages::RequestPage(MenuPages::Page::NrOptions);
         }
     }
 
@@ -3424,6 +3424,9 @@ static void RenderExposureControls(Config* config, float menuResScale)
 }
 
 // NR Options.
+// Defined with its helpers below; drawn in the Performance card.
+static void RenderEdgeCompression(Config* config, float menuResScale, const NrCommon& nr);
+
 static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon& nr)
 {
     const bool enabled = nr.enabled;
@@ -3569,8 +3572,8 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
     else
         lastHybridWarning.clear();
 
-    // Everything that trades NR's GPU time against quality, in one card: Model precision, Reuse bottleneck, Reuse detail
-    // between frames, and the pass limit.
+    // Everything that trades NR's GPU time against quality, in one card: Model precision, Reuse bottleneck, Reuse
+    // detail between frames, Compress screen edges and the pass limit.
     if (auto card = ScopedCollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         int precisionChoice = config->DlssNrPrecision.value_or_default() == 4 ? 1 : 0;
@@ -3737,6 +3740,13 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                 ImGui::TreePop();
             }
         }
+
+        // Compress screen edges is another way to lighten NR, and it excludes Reuse detail: next to it.
+        // Same item width as on the NR Input page it came from (this page sets none of its own).
+        ImGui::Spacing();
+        ImGui::PushItemWidth(220.0f * menuResScale);
+        RenderEdgeCompression(config, menuResScale, nr);
+        ImGui::PopItemWidth();
 
         ImGui::Spacing();
         if (ImGui::Checkbox("Lift model pass limit (up to 30; expensive)", &unlockPasses))
@@ -4156,7 +4166,7 @@ static void RenderPostLutSection(Config* config)
     }
 }
 
-// Compress screen edges, its own card on the NR Input page. The checkbox, the layout, what is happening,
+// Compress screen edges, in the Performance card on the NR Options page. The checkbox, the layout, what is happening,
 // the on-screen layout, and the advanced values. The runtime rebuilds on any change (a layout change resets NR's
 // history once); every edit goes through Spatial::Constrain, the same limits the runtime checks against.
 static void StoreSpatialSettings(Config* config, const DlssNr::Spatial::Settings& s)
@@ -4677,11 +4687,7 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
     }
 
     // Open while a setting in them is on, so it is not hidden
-    const bool spatialOn = config->DlssNrSpatialCompression.value_or_default();
     const bool lutOn = !config->DlssNrLutFile.value_or_default().empty();
-
-    if (NrCard card("Compress screen edges (experimental)##card", menuResScale, spatialOn); card.IsOpen())
-        RenderEdgeCompression(config, menuResScale, nr);
 
     if (NrCard card("Input LUT##card", menuResScale, lutOn); card.IsOpen())
         RenderLutSection(config);
