@@ -963,6 +963,7 @@ float StyleSkinWeight(float3 stored)
 // and the tiled build of this file (DLSSNR_SMOOTH_CANVAS_TILED, D3D12), where each 16x16 group decodes its tile and a
 // SC_RADIUS border once into group-shared memory and the taps read that: the same numbers for a fraction of the work
 // (every tap decoded the curve, a log and a colour ratio; 129 of them per pixel). CanvasFetch is the one difference.
+// The two builds are equal on WARP (tests/nr_input_style_shader_smoke.cpp); a driver may round them differently.
 // The reach is at most 2 (2160 lines and up), so the taps stay within SC_RADIUS = 10 pixels.
 #define SC_GROUP 16
 #define SC_RADIUS 10

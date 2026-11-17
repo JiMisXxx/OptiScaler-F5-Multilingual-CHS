@@ -2757,10 +2757,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
         if (!EdgeCompressionVk::pass->Dispatch(
                 cmdBuffer,
-                DlssNr::Spatial::MakeConstants(EdgeCompressionVk::Layout(), replaceCorrection ? 103 : 102, guides, 1.0f,
-                                               1.0f),
-                reads,
-                EdgeCompressionVk::proxy.view, EdgeCompressionVk::answer.view))
+                // As on D3D12: no edge-loss correction against the unstyled picture while an input style is on
+                DlssNr::Spatial::MakeConstants(EdgeCompressionVk::Layout(),
+                                               replaceCorrection && !inputRestyled ? 103 : 102, guides, 1.0f, 1.0f),
+                reads, EdgeCompressionVk::proxy.view, EdgeCompressionVk::answer.view))
         {
             EdgeCompressionVk::TurnOff(Spatial::Status::TurnedOffDispatch);
             g_vk.reset = true;
