@@ -2470,18 +2470,22 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         mvY *= (float) workHeight / height;
     }
 
-    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h), as on D3D12: restyle the model's
-    // picture once it is final (after the shrink and the edge packing), each style that is on in turn, each on the one
-    // before's result, alternating between two images. The last result stands in for the model input and the resolve's
-    // proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back only what the model painted on
-    // top of it. Skipped above 100% model resolution, where the resolve compares against the full proxy instead.
+    // Experimental input styles (Config.h DlssNrInputFlatten ..., DlssNr_InputStyles.h), as on D3D12: restyle the
+    // model's picture once it is final (after the shrink and the edge packing), each style that is on in turn, each on
+    // the one before's result, alternating between two images. The last result stands in for the model input and the
+    // resolve's proxy (ordinaryProxy below, and through the edge unpacking), so Composed hands back only what the model
+    // painted on top of it. Above 100% model resolution it runs with Compress screen edges (the resolve's proxy is
+    // unpacked from the model input, so both sides agree); without it the resolve compares against the full native
+    // proxy instead, so it is skipped there (D3D12 styles the native picture before the enlarge; not yet here).
     bool inputRestyled = false;
     {
         const DlssNrInput::Styles styles = cfg.DlssNrInputStyles();
-        DlssNrInput::Pass passes[2];
-        const int passCount = DlssNrInput::Passes(styles, passes);
+        DlssNrInput::Pass passes[DlssNrInput::kMaxRuns];
+        const int passCount = DlssNrInput::Runs(styles, passes);
 
-        const char* skip = passCount == 0 ? nullptr : workScale > 1.0f ? "model resolution above 100%" : nullptr;
+        const char* skip = passCount == 0                 ? nullptr
+                           : workScale > 1.0f && !spatial ? "model resolution above 100% without Compress screen edges"
+                                                          : nullptr;
         int ran = 0;
 
         if (passCount > 0 && skip == nullptr)

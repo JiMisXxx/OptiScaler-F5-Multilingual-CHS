@@ -581,9 +581,10 @@ class Config
     // DlssNrInputStructureHint: local contrast raised on luminance, CAS-like, overshoot bounded; strength 0..3.
     // DlssNrInputStyleFacesOnly: both only where the colour looks like skin (the same colour test as
     // SkinProtection). The resolve compares the answer against the same restyled picture, so Composed hands back only
-    // what the model painted; Replace shows the model's painting as it is. Skipped at model resolution above 100% and on
-    // the deferred path. The ini also keeps the old single InputStyle / InputStyleStrength (read when none of the new
-    // keys is set, and written as the first style that runs, for a build from before).
+    // what the model painted; Replace shows the model's painting as it is. Skipped on the deferred path, and on Vulkan
+    // above 100% model resolution without Compress screen edges. The ini also keeps the old single InputStyle /
+    // InputStyleStrength (read when none of the new keys is set, and written as the first style that runs, for a build
+    // from before).
     CustomOptional<uint32_t> DlssNrInputFlatten { DlssNrInput::kFlattenOff };
     CustomOptional<float> DlssNrInputFlattenStrength { 1.0f };
     CustomOptional<bool> DlssNrInputStructureHint { false };

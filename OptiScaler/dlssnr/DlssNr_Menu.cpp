@@ -2168,10 +2168,9 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     if (auto card = ScopedCollapsingHeader("Look Presets", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         const auto now = ReadLook(config);
-        // The input styles are skipped above 100% model resolution and on the deferred path (Config.h
-        // DlssNrInputFlatten ...)
-        const bool inputStyleOff = config->DlssNrWorkingScale.value_or_default() > 1.0f + 0.005f ||
-                                   config->DlssNrDeferredDlss.value_or_default();
+        // The input styles are skipped on the deferred path (Config.h DlssNrInputFlatten ...); also on Vulkan above
+        // 100% model resolution without Compress screen edges, which the input card's help text says
+        const bool inputStyleOff = config->DlssNrDeferredDlss.value_or_default();
 
         // The base the second row is built on is derived from the settings when one of those looks is in effect, else
         // it is this session's last pick (Standard at start) and changes nothing until a look is clicked
@@ -2198,8 +2197,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s%s", look.tip,
                                   look.experimental && inputStyleOff
-                                      ? "\nNo effect right now: the input style is skipped above 100% model "
-                                        "resolution and on the deferred path."
+                                      ? "\nNo effect right now: the input style is skipped on the deferred path."
                                       : "");
         }
 
@@ -4381,7 +4379,8 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
                    "The styles combine and run in this order: flatten, then structure hint.\nWith a composed "
                    "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "
                    "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
-                   "style is one more pass before the model runs. No effect above 100% Model resolution.");
+                   "style is one more pass before the model runs. On Vulkan, no effect above 100% Model resolution "
+                   "unless Compress screen edges is on.");
 
         // A strength slider for a style that is on, with its Reset (1.0) beside it
         const auto strength = [&](const char* label, const char* resetId, float& value, uint32_t style)
@@ -4416,9 +4415,13 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
         ImGui::SameLine();
         changed |= ImGui::RadioButton("Smooth canvas##inputflatten", &flatten, (int) DlssNrInput::kFlattenSmoothCanvas);
         styles.flatten = (uint32_t) flatten;
-        HelpMarker("Watercolour flattens texture into washes and keeps edges (can look blocky).\nSmooth canvas shows NR "
-                   "skin like an untextured old-game surface: pores and fine shading flattened, contours kept, so NR "
-                   "paints its own skin detail.\nStrength blends with the picture as it was (0 to 1).");
+        HelpMarker(
+            "Watercolour flattens texture into washes and keeps edges (can look blocky).\nSmooth canvas shows NR "
+            "skin like an untextured old-game surface: pores and fine shading flattened, contours and colour "
+            "edges (lips, eyes) kept, so NR "
+            "paints its own skin detail.\nStrength: watercolour 0 to 1 blends with the picture as it was; smooth "
+            "canvas blends up to 1, and above it (to 3) smooths its own result again: one more pass, and "
+            "more GPU time, for each step.");
 
         if (styles.flatten != DlssNrInput::kFlattenOff)
             strength("Strength##inputflattenstrength", "Reset##inputflattenstrength", styles.flattenStrength,
