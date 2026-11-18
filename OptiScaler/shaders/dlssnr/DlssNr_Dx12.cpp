@@ -369,8 +369,10 @@ struct NrState
     Scaler nrScaler = Scaler::Count;
 
     // Experimental input styles (DlssNr_InputStyles.h): the model's picture restyled (DlssNrMode_Watercolor,
-    // DlssNrMode_StructureHint or DlssNrMode_SmoothCanvas), which then stands in for the model input and the resolve's proxy. Created when first
-    // used, parked with the scratch set; its state is tracked because the resolve reads it.
+    // DlssNrMode_StructureHint or DlssNrMode_SmoothCanvas), which then stands in for the model input and the resolve's
+    // proxy; above 100% Model resolution without Compress screen edges it is the styled native picture (nativeProxy),
+    // enlarged for the model and read by the resolve. Created when first used, parked with the scratch set; its state
+    // is tracked because the resolve reads it.
     ID3D12Resource* styled = nullptr;
     D3D12_RESOURCE_STATES styledState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     // The second texture the styles alternate with when more than one is on
@@ -6288,13 +6290,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (spatial && (!superiorPacked || CalibrationActive()) && result == NVSDK_NGX_Result_Success &&
         finalAnswer != nullptr)
     {
-        spatialUnpacked =
-            EdgeCompression::PrepareUnpack(device, EdgeCompression::Layout()) &&
-            DispatchSpatial(cmdList,
-                            DlssNr::Spatial::MakeConstants(EdgeCompression::Layout(), replaceCorrection ? 103 : 102,
-                                                           guides, 1.0f, 1.0f),
-                            modelInput, finalAnswer, replaceCorrection ? spatialReference : nullptr,
-                            EdgeCompression::proxy, EdgeCompression::answer);
+        // Replace's edge-loss correction measures against the unstyled picture; while an input style is on it would put
+        // the game's texture back in the compressed edge bands only, so it is left out (Replace shows the painting).
+        const bool correctEdges = replaceCorrection && !inputRestyled;
+        spatialUnpacked = EdgeCompression::PrepareUnpack(device, EdgeCompression::Layout()) &&
+                          DispatchSpatial(cmdList,
+                                          DlssNr::Spatial::MakeConstants(EdgeCompression::Layout(),
+                                                                         correctEdges ? 103 : 102, guides, 1.0f, 1.0f),
+                                          modelInput, finalAnswer, correctEdges ? spatialReference : nullptr,
+                                          EdgeCompression::proxy, EdgeCompression::answer);
 
         if (spatialUnpacked)
         {

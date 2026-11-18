@@ -2224,8 +2224,11 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
     {
         const auto now = ReadLook(config);
         // The input styles are skipped on the deferred path (Config.h DlssNrInputFlatten ...); also on Vulkan above
-        // 100% model resolution without Compress screen edges, which the input card's help text says
+        // 100% model resolution without Compress screen edges (the menu does not know the API, so the tip says "on
+        // Vulkan")
         const bool inputStyleOff = config->DlssNrDeferredDlss.value_or_default();
+        const bool inputStyleOffOnVulkan = config->DlssNrWorkingScale.value_or_default() > 1.0f + 0.005f &&
+                                           !config->DlssNrSpatialCompression.value_or_default();
 
         // The base the second row is built on is derived from the settings when one of those looks is in effect, else
         // it is this session's last pick (Standard at start) and changes nothing until a look is clicked
@@ -2251,8 +2254,12 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
 
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s%s", look.tip,
-                                  look.experimental && inputStyleOff
+                                  !look.experimental ? ""
+                                  : inputStyleOff
                                       ? "\nNo effect right now: the input style is skipped on the deferred path."
+                                  : inputStyleOffOnVulkan
+                                      ? "\nOn Vulkan, no effect right now: the input style is skipped above 100% Model "
+                                        "resolution without Compress screen edges."
                                       : "");
         }
 
@@ -4493,8 +4500,9 @@ static void RenderInputPage(Config* config, float menuResScale, const NrCommon& 
                    "The styles combine and run in this order: flatten, then structure hint.\nWith a composed "
                    "curve only what NR paints differently shows; with a replace curve you see NR's painting as it is "
                    "(Restore Sharpness is off while a style is on, or it would put the game's texture back).\nEach "
-                   "style is one more pass before the model runs. On Vulkan, no effect above 100% Model resolution "
-                   "unless Compress screen edges is on.");
+                   "style is one more pass before the model runs (above 100% Model resolution without Compress screen "
+                   "edges it runs on the full-size picture, which costs more at high output resolutions). On Vulkan, "
+                   "no effect above 100% Model resolution unless Compress screen edges is on.");
 
         // A strength slider for a style that is on, with its Reset (1.0) beside it
         const auto strength = [&](const char* label, const char* resetId, float& value, uint32_t style)
