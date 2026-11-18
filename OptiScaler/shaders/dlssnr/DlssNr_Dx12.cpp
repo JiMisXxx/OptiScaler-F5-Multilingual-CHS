@@ -6,6 +6,7 @@
 #include <dlssnr/DlssNr_AllocatorEpochs.h>
 #include <output/SdrToHdr_ProxyDx12.h>
 #include <native/DriverInitGate.h>
+#include <misc/IdentifyGpu.h>
 
 #include <set>
 #include <wrl/client.h>
@@ -779,7 +780,7 @@ bool EnsureForwarder()
     {
         LOG_ERROR("nvngx.dll_dlssnr.dll not found beside OptiScaler ({}) or the game executable",
                   g_dllDir.string());
-        g_nr.reason = "nvngx.dll_dlssnr.dll is missing";
+        g_nr.reason = "nvngx.dll_dlssnr.dll is missing. Copy it from the release zip next to OptiScaler.dll";
         return false;
     }
 
@@ -791,7 +792,8 @@ bool EnsureForwarder()
     {
         LOG_ERROR("nvngx.dll_dlssnr.dll found at {} but would not load, error {}", path.string(),
                   GetLastError());
-        g_nr.reason = "nvngx.dll_dlssnr.dll would not load";
+        g_nr.reason = "nvngx.dll_dlssnr.dll would not load. Copy it again from the release zip (details in "
+                      "OptiScaler.log)";
         return false;
     }
 
@@ -815,7 +817,7 @@ bool EnsureForwarder()
 
     if (g_nr.create == nullptr || g_nr.evaluate == nullptr)
     {
-        g_nr.reason = "Update nvngx.dll_dlssnr.dll from the complete release (NR v2 exports required)";
+        g_nr.reason = "this nvngx.dll_dlssnr.dll is too old. Copy the one from the release zip";
         return false;
     }
 
@@ -834,23 +836,31 @@ bool EnsureCapabilityParams(ID3D12Device* device)
     if (g_nr.capabilityParams != nullptr)
         return true;
 
+    // Each failure logs which step failed; the reason (menu + log) says what the player can do.
     if (!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device))
     {
-        g_nr.reason = "the NGX core would not initialise";
+        LOG_ERROR("DLSS-NR: the NGX core would not initialise (InitDx12 failed; GPU DLSS-capable: {})",
+                  IdentifyGpu::getPrimaryGpu().dlssCapable);
+        g_nr.reason = IdentifyGpu::getPrimaryGpu().dlssCapable
+                          ? "NVIDIA's DLSS would not start. Update the NVIDIA driver (details in OptiScaler.log)"
+                          : "this GPU has no DLSS support. Neural Rendering needs an NVIDIA RTX card";
         return false;
     }
 
     if (NVNGXProxy::D3D12_GetCapabilityParameters() == nullptr)
     {
-        g_nr.reason = "the NGX core has no capability parameters";
+        LOG_ERROR("DLSS-NR: the NGX core has no capability parameters (D3D12_GetCapabilityParameters is null)");
+        g_nr.reason = "NVIDIA's DLSS would not start. Update the NVIDIA driver (details in OptiScaler.log)";
         return false;
     }
 
-    if (NVNGXProxy::D3D12_GetCapabilityParameters()(&g_nr.capabilityParams) != NVSDK_NGX_Result_Success ||
-        g_nr.capabilityParams == nullptr)
+    if (const NVSDK_NGX_Result capResult = NVNGXProxy::D3D12_GetCapabilityParameters()(&g_nr.capabilityParams);
+        capResult != NVSDK_NGX_Result_Success || g_nr.capabilityParams == nullptr)
     {
+        LOG_ERROR("DLSS-NR: the NGX core refused its capability parameters (result 0x{:X} {}, block {})",
+                  (uint32_t) capResult, NgxResultName((unsigned int) capResult), g_nr.capabilityParams != nullptr);
         g_nr.capabilityParams = nullptr;
-        g_nr.reason = "the NGX core refused its capability parameters";
+        g_nr.reason = "NVIDIA's DLSS would not start. Update the NVIDIA driver (details in OptiScaler.log)";
         return false;
     }
 
@@ -4243,8 +4253,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.activeColor = CreateScratch(device, desc.Format, width, height);
     if (cropColor && g_nr.activeColor == nullptr)
     {
+        LOG_ERROR("DLSS-NR: the pre-SR active colour staging texture could not be allocated ({}x{}, format {})", width,
+                  height, (uint32_t) desc.Format);
         g_nr.failed = true;
-        g_nr.reason = "the pre-SR active colour staging texture could not be allocated";
+        g_nr.reason = "a texture for NR before SR could not be made (often low video memory). Lower the model "
+                      "resolution or texture quality, then Retry";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
         return;
@@ -4400,7 +4413,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!snippet.has_value())
         {
             g_nr.failed = true;
-            g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
+            g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game. Copy it from the release zip";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
             device->Release();
             return;
@@ -4437,7 +4450,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             g_nr.featurePendingSubmission = false;
             g_nr.failed = true;
-            g_nr.reason = "the model would not initialise";
+            g_nr.reason = "the model would not start. Lower the model resolution or passes, or update the GPU "
+                          "driver (details in OptiScaler.log)";
             if (g_nr.lastModelError && *g_nr.lastModelError())
             {
                 g_nr.modelError = g_nr.lastModelError();
@@ -4654,8 +4668,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (!haveCodec)
     {
+        LOG_ERROR("DLSS-NR: the colour codec would not compile");
         g_nr.failed = true;
-        g_nr.reason = "the colour codec would not compile";
+        g_nr.reason = "a shader would not compile. Please report it with OptiScaler.log";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
         return;
@@ -5730,7 +5745,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (proxyResult != 1)
         {
             g_nr.failed = true;
-            g_nr.reason = "the proxy path could not run the model";
+            g_nr.reason = "the model could not run. Please report it with OptiScaler.log";
             LOG_ERROR("DLSS-NR (proxy): evaluate returned 0x{:X} ({}), disabling for this session",
                       proxyResult, NgxResultName(proxyResult));
         }
@@ -6786,7 +6801,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     else
     {
         g_nr.failed = true;
-        g_nr.reason = "the model refused to run";
+        g_nr.reason = "the model refused to run. Lower the model resolution or passes, then Retry (details in "
+                      "OptiScaler.log)";
         if (g_nr.lastModelError && *g_nr.lastModelError())
         {
             g_nr.modelError = g_nr.lastModelError();
