@@ -37,11 +37,13 @@ inline constexpr std::string_view kKeptKeys[] = {
     "FinishedPicture",
     "Precision",
     "Preset",
+    "WeightsSet",
     "WorkingScale",
     "ModelResolutionAuto",
     "ReducedUpscaleMethod",
     "Transfer",
     "SuperiorScalingPreset",
+    "SuperiorAtNative",
     "ScalingDownscaler",
     // reuse
     "VitEvery",
