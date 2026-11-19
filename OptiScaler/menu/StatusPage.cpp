@@ -361,6 +361,22 @@ void RenderFork(Config* config, float menuResScale)
             const bool nrUsable = summary.nrEnabled && summary.failure.empty();
 
             Row("Neural Rendering", NeuralRenderingText(summary.nrEnabled, summary.failure, summary.backend));
+
+            // Its main settings, for a bug report (the Neural Rendering pages have all of them; profiles are files, so
+            // which one was loaded last is not shown)
+            if (summary.nrEnabled)
+            {
+                Row("  Model",
+                    NrModelText(config->DlssNrPreset.value_or_default(), config->DlssNrWeightsSet.value_or_default()));
+                Row("  Passes", NrPassesText(config->DlssNrPasses.value_or_default(),
+                                             config->DlssNrWorkingScale.value_or_default()));
+                Row("  Pass at", NrPlacementText(config->DlssNrFinishedPicture.value_or_default(),
+                                                 config->DlssNrRunBeforeSr.value_or_default(),
+                                                 config->DlssNrDeferredDlss.value_or_default()));
+                Row("  Detail reuse", NrDetailReuseText(config->DlssNrDetailReuse.value_or_default(),
+                                                        config->DlssNrDetailReuseInterval.value_or_default()));
+                Row("  F5LUT", config->DlssNrPostLutStackEnabled.value_or_default() ? "On" : "Off");
+            }
             Row("Optical F5Low", OpticalF5LowText((NativeMode) summary.mode, summary.gameCallsUpscaler, nrUsable));
 
             // The FG page's words, which follow the generator f5low.dll was asked for

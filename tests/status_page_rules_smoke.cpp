@@ -88,6 +88,23 @@ int main()
              "Neural Rendering + frame generation, stands aside (the game calls an upscaler)"));
     CHECK(Is(OpticalF5LowText(NativeMode::MotionOnly, false, false), "Motion only"));
 
+    // Neural Rendering settings
+    CHECK(Is(NrModelText(0, ""), "DLL's choice"));
+    CHECK(Is(NrModelText(1, ""), "Preset A (main)"));
+    CHECK(Is(NrModelText(2, "StrongB-NBA1"), "Preset B (small), weights StrongB-NBA1"));
+    CHECK(Is(NrModelText(9, ""), "DLL's choice"));
+    CHECK(Is(NrPassesText(1, 1.0f), "1 pass, working scale 1.00"));
+    CHECK(Is(NrPassesText(3, 0.85f), "3 passes, working scale 0.85"));
+    CHECK(Is(NrPlacementText(false, false, false), "After Super Resolution"));
+    CHECK(Is(NrPlacementText(false, true, false), "Before Super Resolution"));
+    CHECK(Is(NrPlacementText(true, true, false), "Finished Picture")); // the combo's rule: Finished Picture wins
+    CHECK(Is(NrPlacementText(false, true, true), "Generate before Super Resolution, apply after"));
+    CHECK(Is(NrDetailReuseText(false, 3), "Off"));
+    CHECK(Is(NrDetailReuseText(true, 1), "Off"));
+    CHECK(Is(NrDetailReuseText(true, 2), "Model every 2nd frame"));
+    CHECK(Is(NrDetailReuseText(true, 3), "Model every 3rd frame"));
+    CHECK(Is(NrDetailReuseText(true, 4), "Model every 4th frame"));
+
     if (failures == 0)
         printf("status_page_rules_smoke: PASS\n");
 

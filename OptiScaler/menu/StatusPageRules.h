@@ -218,6 +218,46 @@ inline std::string NeuralRenderingText(bool enabled, const std::string& failure,
 }
 
 // Optical F5Low's mode, and whether it stands aside because the game calls an upscaler of its own
+// [DlssNr] Preset (1 A, 2 B, else the DLL's choice) and WeightsSet (a folder under nr_weights, empty = the DLL's own)
+inline std::string NrModelText(uint32_t preset, const std::string& weightsSet)
+{
+    std::string text = preset == 1 ? "Preset A (main)" : preset == 2 ? "Preset B (small)" : "DLL's choice";
+
+    if (!weightsSet.empty())
+        text += ", weights " + weightsSet;
+
+    return text;
+}
+
+// [DlssNr] Passes and WorkingScale
+inline std::string NrPassesText(uint32_t passes, float workingScale)
+{
+    char text[64];
+    snprintf(text, sizeof(text), "%u %s, working scale %.2f", passes, passes == 1 ? "pass" : "passes", workingScale);
+    return text;
+}
+
+// Where the pass runs, by the "NR Pass at" combo's rule: Finished Picture wins over before Super Resolution
+inline const char* NrPlacementText(bool finishedPicture, bool beforeSr, bool generateBeforeApplyAfter)
+{
+    if (finishedPicture)
+        return "Finished Picture";
+
+    if (generateBeforeApplyAfter)
+        return "Generate before Super Resolution, apply after";
+
+    return beforeSr ? "Before Super Resolution" : "After Super Resolution";
+}
+
+// [DlssNr] DetailReuse: the model runs one frame in Interval, its detail moved along in between
+inline std::string NrDetailReuseText(bool enabled, uint32_t interval)
+{
+    if (!enabled || interval < 2)
+        return "Off";
+
+    return "Model every " + std::to_string(interval) + (interval == 2 ? "nd" : interval == 3 ? "rd" : "th") + " frame";
+}
+
 // nrUsable: Neural Rendering is on and has not failed, which the Neural Rendering modes need
 inline std::string OpticalF5LowText(NativeMode mode, bool gameCallsUpscaler, bool nrUsable)
 {
