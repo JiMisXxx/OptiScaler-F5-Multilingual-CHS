@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <dlssnr/PassProfiles.h>
 #include <dlssnr/DlssNr_SuperiorScaling.h>
+#include <dlssnr/DlssNr_Weights.h>
 #include <dlssnr/DlssNr_SuperiorGains.h>
 #include <dlssnr/DlssNr_GpuLifetime.h>
 #include <dlssnr/DlssNr_AllocatorEpochs.h>
@@ -261,6 +262,11 @@ struct NrState
     int* lastCreate = nullptr;
     const char* (*lastModelError)() = nullptr;
     std::string modelError;
+    // Model weights selector (optional forwarder exports; an older forwarder lacks them and the DLL's own
+    // weights are used). builtWeightsSet = the set the current features were created with.
+    void (*weightsSelect)(const wchar_t*) = nullptr;
+    int (*weightsTakeLog)(char*, int) = nullptr;
+    std::string builtWeightsSet;
 
     NVSDK_NGX_Parameter* capabilityParams = nullptr;
     // The loaded nvngx.dll_dlssnr.dll is the vendor-neutral port (it exports dlssnr_backend_id): it runs the
@@ -816,6 +822,8 @@ bool EnsureForwarder()
     g_nr.lastInit = (int*) GetProcAddress(g_nr.forwarder, "dlssnr_call_last_init");
     g_nr.lastCreate = (int*) GetProcAddress(g_nr.forwarder, "dlssnr_call_last_create");
     g_nr.lastModelError = (const char*(*)()) GetProcAddress(g_nr.forwarder, "dlssnr_call_error");
+    g_nr.weightsSelect = (void (*)(const wchar_t*)) GetProcAddress(g_nr.forwarder, "dlssnr_weights_select");
+    g_nr.weightsTakeLog = (int (*)(char*, int)) GetProcAddress(g_nr.forwarder, "dlssnr_weights_take_log");
 
     if (g_nr.create == nullptr || g_nr.evaluate == nullptr)
     {
@@ -2234,9 +2242,53 @@ void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer
                    uiWidth, uiHeight, bbWidth, bbHeight);
 }
 
+// Hands the forwarder the weight set the next feature creates read (OptiScaler/nr_weights/<set>), or none.
+// SelectWeights is called before every create; DlssNr::Weights resolves and checks the folder.
+void SelectWeights(const Config& cfg)
+{
+    const auto set = cfg.DlssNrWeightsSet.value_or_default();
+    if (g_nr.weightsSelect == nullptr)
+    {
+        if (!set.empty())
+            LOG_WARN("DLSS-NR: Model weights '{}' needs the forwarder from this release (nvngx.dll_dlssnr.dll); "
+                     "the DLL's own weights are used",
+                     set);
+        return;
+    }
+    const auto dir = DlssNr::Weights::Folder(set).wstring();
+    if (!set.empty() && dir.empty())
+        LOG_WARN("DLSS-NR: Model weights '{}' is not a folder name; the DLL's own weights are used", set);
+    g_nr.weightsSelect(dir.c_str());
+}
+
+// The forwarder's account of what each weights read got (stock or which file), into OptiScaler.log.
+void LogWeightsReads()
+{
+    if (g_nr.weightsTakeLog == nullptr)
+        return;
+    char text[4096] {};
+    if (g_nr.weightsTakeLog(text, (int) sizeof(text)) <= 0)
+        return;
+    std::string_view rest(text);
+    while (!rest.empty())
+    {
+        const auto end = rest.find('\n');
+        const auto line = rest.substr(0, end);
+        if (!line.empty())
+            LOG_INFO("DLSS-NR weights: {}", line);
+        if (end == std::string_view::npos)
+            break;
+        rest.remove_prefix(end + 1);
+    }
+}
 
 bool TuningMatchesFeature(const Config& cfg, unsigned int requestedPasses)
 {
+    // All passes are built from the same weight set (an older forwarder cannot serve one: no rebuild for nothing)
+    if (g_nr.feature != nullptr && g_nr.weightsSelect != nullptr &&
+        g_nr.builtWeightsSet != cfg.DlssNrWeightsSet.value_or_default())
+        return false;
+
     for (unsigned int pass = 0; pass < requestedPasses; ++pass)
     {
         // A profile cannot be stale until its feature exists. This lets a user prepare pass 2 or 3
@@ -2257,6 +2309,7 @@ void RecordBuiltPrimaryTuning(const Config& cfg)
 {
     g_nr.builtPassTuning[0] = PassTuning(cfg, 0);
     g_nr.builtPreset[0] = PassPreset(cfg, 0);
+    g_nr.builtWeightsSet = cfg.DlssNrWeightsSet.value_or_default();
     g_nr.builtIntensity = cfg.DlssNrIntensity.value_or_default();
     g_nr.builtStyle[0] = PassStyle(cfg, 0);
     g_nr.builtLocalStructure = cfg.DlssNrLocalStructure.value_or_default();
@@ -4109,6 +4162,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         spatial = false;
         superiorPacked = false;
     }
+    // [DlssNr] SuperiorAtNative: the private DLSS at 100% and above. Above 100% it works at native, on the pair after
+    // the supersample down-leg, while NR itself keeps its supersampled raster and its ordinary guides.
+    const bool superiorAtNative =
+        superior && DlssNr::SuperiorScaling::StabilizeAtNative(
+                        cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
+                        cfg.DlssNrSuperiorScalingPreset.value_or_default(), superiorState.srUnavailable);
+    const bool superiorSupersample =
+        DlssNr::SuperiorScaling::StabilizeSupersampled(superiorAtNative, width, height, workWidth, workHeight);
 
     if (!spatial)
         EdgeCompression::Release();
@@ -4434,6 +4495,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+        SelectWeights(cfg);
         const auto tuning = PassTuning(cfg, 0);
         // Not at the same moment as a game's vkCreateDevice (native/DriverInitGate.h)
         native::DriverInitScope driverInit;
@@ -4447,6 +4509,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                         // UI correction at the model's own default: with no UI layer fed to it there
                         // is nothing for it to correct.
                         1);
+        LogWeightsReads();
 
         if (g_nr.feature == nullptr)
         {
@@ -4578,6 +4641,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             else
             {
                 SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+                SelectWeights(cfg);
                 const auto tuning = PassTuning(cfg, pass);
                 native::DriverInitScope driverInit;
                 g_nr.passFeature[pass] = g_nr.create(
@@ -4587,6 +4651,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     (int) PassStyle(cfg, pass),
                     tuning.structure, tuning.tone, tuning.skin,
                     tuning.autoMask ? 1 : 0, 1);
+                LogWeightsReads();
 
                 if (g_nr.passFeature[pass] != nullptr)
                 {
@@ -4618,11 +4683,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (superior)
     {
         ResTrack_Dx12::HookLateNrQueue(device);
-        const bool temporal = DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, spatial,
-                                                                     modelWidth, modelHeight);
-        if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height,
-                               superiorPacked ? modelWidth : workWidth, superiorPacked ? modelHeight : workHeight,
-                               workScale, frame, temporal, depth && guides.depth.valid(),
+        const bool temporal =
+            superiorAtNative || DlssNr::SuperiorScaling::NeedsTemporal(width, height, workWidth, workHeight, spatial,
+                                                                       modelWidth, modelHeight);
+        const unsigned superiorW = superiorPacked ? modelWidth : superiorSupersample ? width : workWidth;
+        const unsigned superiorH = superiorPacked ? modelHeight : superiorSupersample ? height : workHeight;
+        if (SuperiorRun::Begin(*this, cmdList, device, colourFormat, width, height, superiorW, superiorH, workScale,
+                               frame, temporal, depth && guides.depth.valid(),
                                superiorPacked ? &EdgeCompression::Layout() : nullptr) != SuperiorRun::Began::Run)
         {
             device->Release();
@@ -6036,7 +6103,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                      spatial ? guides : matchedRegions, frame);
         if (!ok)
             result = NVSDK_NGX_Result_Fail;
-        else if (!spatial)
+        // Supersampling under SuperiorAtNative: the matched guides are the private DLSS's native ones, not the model's
+        else if (!spatial && !superiorSupersample)
         {
             superiorMatched = true;
             modelDepth = superiorGeneration->depth.Get();
@@ -6116,8 +6184,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         MakeModelReadable(finalAnswer);
         superiorCompleted = pass + 1u;
         // Frequency shaping between passes needs no private DLSS: No DLSS shapes like CNN and Transformer do.
-        if (superiorGeneration && (superiorGeneration->shaping || (spatial && superiorGainScales.low < 1.0f)) &&
-            pass + 1u < effectivePasses)
+        // (Not while supersampling under SuperiorAtNative: its generation works at native, the passes above it.)
+        if (superiorGeneration && !superiorSupersample &&
+            (superiorGeneration->shaping || (spatial && superiorGainScales.low < 1.0f)) && pass + 1u < effectivePasses)
         {
             const bool due = superiorSchedule.Due(pass, superiorCovered);
             const bool ran = due && SuperiorRun::InterPass(*superiorGeneration, *this, cmdList, cfg,
@@ -6646,11 +6715,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the output takes a UAV, so resolveTarget is the output there)
         if (cached)
             EditCache::ApplyCached(cacheFrame, resolveTarget);
-        else if (superiorGeneration && (superiorGeneration->shaping || (spatial && superiorGainScales.low < 1.0f)))
+        // Supersampling under SuperiorAtNative steadies the pair the down-leg averaged to native; without it (down-leg
+        // failed) the ordinary resolve below takes the supersampled pair, as with Superior off.
+        else if (superiorGeneration && (!superiorSupersample || superDownOk) &&
+                 (superiorGeneration->shaping || (spatial && superiorGainScales.low < 1.0f)))
         {
             auto& g = *superiorGeneration;
-            auto* shapingProxy = g.packed ? modelInput : g.shaping ? ordinaryProxy : resolveProxy;
-            auto* answer = g.packed ? finalAnswer : g.shaping ? ordinaryAnswer : resolveAnswer;
+            const bool modelPair = g.shaping && !superiorSupersample;
+            auto* shapingProxy = g.packed ? modelInput : modelPair ? ordinaryProxy : resolveProxy;
+            auto* answer = g.packed ? finalAnswer : modelPair ? ordinaryAnswer : resolveAnswer;
             auto* residual = g.PrivateReady() && depth && guides.depth.valid()
                                  ? SuperiorRun::Stabilize(g, *this, cmdList, shapingProxy, answer, motionIn, guides,
                                                           frame, superiorReset, g_nr.heldActive,
