@@ -103,6 +103,10 @@ The edit cache (`EditCache` in the ini: the model one frame in N, its change to 
 
 The layout and mapping behind Compress screen edges (the sharp middle, the squeezed edges, and the rational curve that packs and unpacks them) are adapted from [Yuri Grib / @BeliyG3's Optimizer FPS for DLSS5](https://github.com/BeliyG3/optimizer-fps-dlss5/tree/64902dd6a02460e5f6b778504ec2a4005faf4d9c) (MIT, Copyright (c) 2026 Yuri Grib), pinned at commit `64902dd6`. The way to apply it to NR (pack the colour, depth and motion, run the model on the packed picture, unpack the model's input and answer through the same resampling) follows [wilsjo2's fork](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass), v0.8.9 (OptiScaler-DLSSNR-PreSR-Multipass, commit [`be229250`](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/commit/be2292501f)), adapted onto this fork's own NR code. See the [licence](../Licenses/PeripheralWarp_LICENSE.txt).
 
+## XeSS in Unreal Engine games: scene depth and motion vectors
+
+Taking the scene depth and render resolution motion vectors from Intel's UE XeSS plugin (finding its velocity flattening by the texture name, the scene depth copy in queue order, the frame generation depth state) is ported from [upstream OptiScaler](https://github.com/optiscaler/OptiScaler) (GPL-3.0), by FakeMichau, commit `7e941561`. Adapted onto this fork: its own retire list for textures the GPU can still read (including the copy texture when it grows), one device only, an undone hook install on failure, `[XeSS] UnrealDepth` to turn it off, and the instruction decoding split out and host tested.
+
 ## OptiScaler contributors
 
 These credits are retained from the original OptiScaler README:

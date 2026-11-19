@@ -268,6 +268,10 @@ class Config
     CustomOptional<bool> BuildPipelines { true };
     CustomOptional<int32_t> NetworkModel { 0 };
     CustomOptional<bool> CreateHeaps { true };
+    // Unreal Engine games with Intel's XeSS plugin: take the scene depth and render resolution motion vectors from the
+    // plugin's velocity flattening, which gives XeSS neither (inputs/XeSS_UE_Dx12.cpp). Checked at each XeSS context
+    // until the plugin is hooked, no effect after that.
+    CustomOptional<bool> XeSSUnrealDepth { true };
 
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) --- removable as one block -----------------
     // DLSS Neural Rendering: a detail-synthesis pass over the upscaler's output. Off by default -- it is

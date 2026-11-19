@@ -386,6 +386,12 @@
     <ClInclude Include="inputs\XeSS_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="inputs\XeSS_UE_Decode.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="inputs\XeSS_UE_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="inputs\XeSS_Proxy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1438,6 +1444,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="inputs\XeSS_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="inputs\XeSS_UE_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hooks\Vulkan_Hooks.cpp">
