@@ -268,6 +268,10 @@ class Config
     CustomOptional<bool> BuildPipelines { true };
     CustomOptional<int32_t> NetworkModel { 0 };
     CustomOptional<bool> CreateHeaps { true };
+    // Unreal Engine games with Intel's XeSS plugin: take the scene depth and render resolution motion vectors from the
+    // plugin's velocity flattening, which gives XeSS neither (inputs/XeSS_UE_Dx12.cpp). Checked at each XeSS context
+    // until the plugin is hooked, no effect after that.
+    CustomOptional<bool> XeSSUnrealDepth { true };
 
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) --- removable as one block -----------------
     // DLSS Neural Rendering: a detail-synthesis pass over the upscaler's output. Off by default -- it is
@@ -356,6 +360,9 @@ class Config
     // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
     // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };
+    // Model weights: a folder under OptiScaler/nr_weights the model reads its weights from (files named
+    // <resource>.<CRC32 of the stock resource>.bin, exported for that DLL); empty = the DLL's own weights.
+    CustomOptional<std::string> DlssNrWeightsSet { std::string() };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
     CustomOptional<uint32_t> DlssNrStyle { 0 };
@@ -491,6 +498,9 @@ class Config
     CustomOptional<uint32_t> DlssNrTransfer { 1 }; // 11: Superior Scaling
     // Private SR preference: No DLSS=0, CNN=1 (D/E), Transformer=11 (K).
     CustomOptional<uint32_t> DlssNrSuperiorScalingPreset { 1 };
+    // Superior Scaling's private DLSS also steadies NR at 100% Model resolution and above (above: on the answer after
+    // it is averaged back to native). Off = the private DLSS runs only below 100%, as before 0.1.39.
+    CustomOptional<bool> DlssNrSuperiorAtNative { true };
 
     // Measure the white point from the frame instead of taking it from the slider. On a frame the
     // game already tone mapped there is nothing to measure and this has no effect.

@@ -469,6 +469,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             BuildPipelines.set_from_config(readBool("XeSS", "BuildPipelines"));
             NetworkModel.set_from_config(readInt("XeSS", "NetworkModel"));
             CreateHeaps.set_from_config(readBool("XeSS", "CreateHeaps"));
+            XeSSUnrealDepth.set_from_config(readBool("XeSS", "UnrealDepth"));
         }
 
         // DLSS
@@ -1211,6 +1212,7 @@ void Config::ReadDlssNr()
     DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
     DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
     DlssNrSuperiorScalingPreset.set_from_config(readUInt("DlssNr", "SuperiorScalingPreset"));
+    DlssNrSuperiorAtNative.set_from_config(readBool("DlssNr", "SuperiorAtNative"));
 
     DlssNrWhitePointFromExposure.set_from_config(readBool("DlssNr", "WhitePointFromExposure"));
     DlssNrProbeD3D11.set_from_config(readBool("DlssNr", "ProbeD3D11"));
@@ -1348,6 +1350,7 @@ void Config::ReadDlssNr()
     DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
     DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
     DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
+    DlssNrWeightsSet.set_from_config(readString("DlssNr", "WeightsSet"));
     DlssNrIntensity.set_from_config(readFloat("DlssNr", "Intensity"));
     DlssNrStyle.set_from_config(readUInt("DlssNr", "Style"));
     DlssNrPass2Preset.set_from_config(readUInt("DlssNr", "Pass2Preset"));
@@ -1482,6 +1485,7 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "Transfer", GetIntValue(c.DlssNrTransfer.value_for_config()).c_str());
     out.SetValue("DlssNr", "SuperiorScalingPreset",
                  GetIntValue(c.DlssNrSuperiorScalingPreset.value_for_config()).c_str());
+    out.SetValue("DlssNr", "SuperiorAtNative", GetBoolValue(c.DlssNrSuperiorAtNative.value_for_config()).c_str());
 
     out.SetValue("DlssNr", "ProbeD3D11",
                  GetBoolValue(c.DlssNrProbeD3D11.value_for_config()).c_str());
@@ -1625,6 +1629,7 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "WhitePointScale",
                  GetFloatValue(c.DlssNrWhitePointScale.value_for_config()).c_str());
     out.SetValue("DlssNr", "Preset", GetIntValue(c.DlssNrPreset.value_for_config()).c_str());
+    out.SetValue("DlssNr", "WeightsSet", c.DlssNrWeightsSet.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "Intensity", GetFloatValue(c.DlssNrIntensity.value_for_config()).c_str());
     out.SetValue("DlssNr", "Style", GetIntValue(c.DlssNrStyle.value_for_config()).c_str());
     out.SetValue("DlssNr", "Pass2Preset",
@@ -1898,11 +1903,13 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("FinishedPicture", DlssNrFinishedPicture),
         NR_PROFILE_FIELD("Precision", DlssNrPrecision),
         NR_PROFILE_FIELD("Preset", DlssNrPreset),
+        NR_PROFILE_FIELD("WeightsSet", DlssNrWeightsSet),
         NR_PROFILE_FIELD("WorkingScale", DlssNrWorkingScale),
         NR_PROFILE_FIELD("ModelResolutionAuto", DlssNrModelResolutionAuto),
         NR_PROFILE_FIELD("ReducedUpscaleMethod", DlssNrReducedUpscaleMethod),
         NR_PROFILE_FIELD("Transfer", DlssNrTransfer),
         NR_PROFILE_FIELD("SuperiorScalingPreset", DlssNrSuperiorScalingPreset),
+        NR_PROFILE_FIELD("SuperiorAtNative", DlssNrSuperiorAtNative),
         NR_PROFILE_FIELD("ScalingDownscaler", DlssNrScalingDownscaler),
         NR_PROFILE_FIELD("VitEvery", DlssNrVitEvery),
         NR_PROFILE_FIELD("VitEveryPlain", DlssNrVitEveryPlain),
@@ -2473,6 +2480,7 @@ bool Config::SaveIni()
     {
         ini.SetValue("XeSS", "BuildPipelines", GetBoolValue(Instance()->BuildPipelines.value_for_config()).c_str());
         ini.SetValue("XeSS", "CreateHeaps", GetBoolValue(Instance()->CreateHeaps.value_for_config()).c_str());
+        ini.SetValue("XeSS", "UnrealDepth", GetBoolValue(Instance()->XeSSUnrealDepth.value_for_config()).c_str());
         ini.SetValue("XeSS", "NetworkModel", GetIntValue(Instance()->NetworkModel.value_for_config()).c_str());
     }
 

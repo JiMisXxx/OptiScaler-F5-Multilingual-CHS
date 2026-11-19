@@ -8,6 +8,8 @@
 #include "DlssNr_Profiles.h"
 #include "DlssNr_StreamlinePicture.h"
 #include "DlssNr_SuperiorScaling.h"
+#include "DlssNr_Weights.h"
+#include "PassProfiles.h"
 #include "DlssNrNative.h"
 
 
@@ -653,6 +655,111 @@ struct PassPresetUndo
 // Set by a pass preset that changed one of those settings: `before` is what it replaced, `after` what it wrote. The
 // undo is offered only while the settings are still `after`, so a later change of the player's is never undone.
 static std::optional<std::pair<PassPresetUndo, PassPresetUndo>> g_passPresetUndo;
+
+// [DlssNr] WeightsSet: the folders in OptiScaler/nr_weights, read again each time the list opens. All passes use
+// the chosen set; a change rebuilds the Neural Rendering features (the model reads its weights at create).
+// Which models a set has files for: WEIGHTS_HT.* = Model A (Preset A), WEIGHTS_CC_SMALL_FP8.* = Model B.
+struct WeightsSetModels
+{
+    bool a = false, b = false;
+    std::string Label() const { return a && b ? "Model A + B" : a ? "Model A" : b ? "Model B" : "no weight files"; }
+};
+static WeightsSetModels ScanWeightsSet(const std::string& name)
+{
+    WeightsSetModels m;
+    const auto dir = DlssNr::Weights::Folder(name);
+    std::error_code ec;
+    if (dir.empty())
+        return m;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+    {
+        // wstring + our converter: path::string() throws on names the code page cannot hold (CustomProviders::List)
+        const auto file = wstring_to_string(entry.path().filename().wstring());
+        if (file.rfind("WEIGHTS_HT.", 0) == 0)
+            m.a = true;
+        else if (file.rfind("WEIGHTS_CC_SMALL_FP8.", 0) == 0)
+            m.b = true;
+    }
+    return m;
+}
+
+static void ModelWeightsCombo(Config* config)
+{
+    static std::vector<std::pair<std::string, WeightsSetModels>> sets;
+    static std::string scannedCurrent;
+    static WeightsSetModels currentModels;
+    const std::string current = config->DlssNrWeightsSet.value_or_default();
+    if (current != scannedCurrent)
+    {
+        scannedCurrent = current;
+        currentModels = current.empty() ? WeightsSetModels {} : ScanWeightsSet(current);
+    }
+    const std::string shown =
+        current.empty() ? std::string("Stock (the DLL's own)") : current + " (" + currentModels.Label() + ")";
+
+    if (ImGui::BeginCombo("Model weights", shown.c_str()))
+    {
+        if (ImGui::IsWindowAppearing())
+        {
+            sets.clear();
+            std::error_code ec;
+            const auto root = DlssNr::Weights::Root();
+            for (const auto& entry : std::filesystem::directory_iterator(root, ec))
+                if (entry.is_directory(ec))
+                {
+                    const auto name = wstring_to_string(entry.path().filename().wstring());
+                    sets.emplace_back(name, ScanWeightsSet(name));
+                }
+            std::sort(sets.begin(), sets.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
+            currentModels = current.empty() ? WeightsSetModels {} : ScanWeightsSet(current);
+        }
+
+        if (ImGui::Selectable("Stock (the DLL's own)", current.empty()))
+            config->DlssNrWeightsSet = std::string();
+        for (const auto& [name, models] : sets)
+        {
+            const std::string label = name + " (" + models.Label() + ")";
+            if (ImGui::Selectable(label.c_str(), name == current))
+                config->DlssNrWeightsSet = name;
+        }
+        ImGui::EndCombo();
+    }
+    HelpMarker("Weights the model runs with, for every pass. Stock: the ones inside nvngx_dlssnr.dll. Other "
+               "entries: folders in OptiScaler\\nr_weights, each holding weight files exported for this DLL; the "
+               "brackets say which model the set has weights for. A pass on the other model keeps its stock "
+               "weights. A file is used only by the DLL it was made for; otherwise the stock weights run and "
+               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 (and "
+               "games bridged to it) only for now.");
+
+    if (current.empty())
+        return;
+
+    // Selection reaches the model only on the D3D12 path (native D3D12 or a bridge to it) for now
+    const auto& state = State::Instance();
+    const bool d3d12Path =
+        !DlssNr::IsRunningVk() && state.swapchainApi != API::Vulkan &&
+        (state.swapchainApi != API::DX11 || state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
+    if (!d3d12Path)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "No effect here yet: DirectX 12 only for now.");
+        return;
+    }
+
+    // Preset A (1) runs Model A; Default, B and the legacy 3 run Model B on 310.9 DLLs (310.8 has only Model A, which
+    // this note does not know about). Passes 4 and up use Pass 1's; the driver proxy runs one pass.
+    {
+        const unsigned passes =
+            config->DlssNrUseProxy.value_or_default() ? 1u : std::max(1u, config->DlssNrPasses.value_or_default());
+        bool usesA = false, usesB = false;
+        for (unsigned pass = 0; pass < std::min(passes, 3u); ++pass)
+            (DlssNr::Profiles::PassPreset(*config, pass) == 1u ? usesA : usesB) = true;
+        if ((!usesA || !currentModels.a) && (!usesB || !currentModels.b))
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "No effect: no pass runs %s.",
+                               currentModels.b && !currentModels.a   ? "Model B (Preset B or Default)"
+                               : currentModels.a && !currentModels.b ? "Model A (Preset A)"
+                                                                     : "a model this set has weights for");
+    }
+}
 
 static void ApplyPassPreset(Config* config, unsigned int passes)
 {
@@ -4672,6 +4779,21 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
                        "different artifacts of its own.");
 
+            ImGui::BeginDisabled(
+                nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable() ||
+                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) ==
+                    DlssNr::SuperiorScaling::NoPrivateDlss);
+            bool atNative = config->DlssNrSuperiorAtNative.value_or_default();
+            if (ImGui::Checkbox("Also at 100% and above", &atNative))
+                config->DlssNrSuperiorAtNative = atNative;
+            ImGui::EndDisabled();
+            HelpMarker(
+                "Off: the DLSS above steadies NR only while Model resolution is below 100%.\n"
+                "On: it also runs at 100% and above. Above 100% NR still works at the larger size; its result "
+                "is brought back to the screen's size first and the DLSS steadies that. Costs the DLSS's time at "
+                "full screen size. Not with Compress screen edges, which has its own rule. Like below 100%, "
+                "Superior's own composition then leaves out Depth fade.");
+
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)
                 ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
@@ -4936,6 +5058,7 @@ static void RenderPassesPage(Config* config, float menuResScale)
         if (ImGui::Combo("Preset", &preset, presets, IM_ARRAYSIZE(presets)))
             config->DlssNrPreset = (uint32_t) preset;
         HelpMarker(presetHelp);
+        ModelWeightsCombo(config);
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);
