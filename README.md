@@ -1,7 +1,6 @@
 # 这仅仅是一个汉化版本，目前支持中英双语言切换
 
-# 以上是作者原版介绍
-
+# 以下是作者原版介绍：
 # OptiScaler Neural Rendering
 
 A game mod that uses NVIDIA AI to change lighting, detail and colour. You can adjust the look and how much performance the effect costs.
