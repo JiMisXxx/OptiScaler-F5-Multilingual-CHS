@@ -5180,6 +5180,19 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     return in;
 }
 
+StatusSummary CurrentStatusSummary(Config* config)
+{
+    const auto in = HeaderInputs(config, HeaderBanner::Feature::None, false);
+
+    StatusSummary summary;
+    summary.nrEnabled = config->DlssNrEnabled.value_or_default();
+    summary.failure = FailureReason();
+    summary.mode = in.mode;
+    summary.gameCallsUpscaler = in.gameCallsUpscaler;
+    summary.backend = BackendName();
+    return summary;
+}
+
 bool RenderHeaderBanner(Config* config, HeaderBanner::Feature feature, bool upscalerFiles,
                         const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour,
                         void (*upscalerFileChecks)())

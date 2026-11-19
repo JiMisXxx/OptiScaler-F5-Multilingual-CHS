@@ -93,6 +93,17 @@ bool RenderHeaderBanner(::Config* config, HeaderBanner::Feature feature, bool up
                         const std::string& upscalerNames, const std::string& backendName, const ImVec4& offerColour,
                         void (*upscalerFileChecks)());
 
+// The Status page's Neural Rendering and Optical F5Low lines (menu/StatusPage.cpp), read as the header line reads them
+struct StatusSummary
+{
+    bool nrEnabled = false;                                      // Enable Neural Rendering is on
+    std::string failure;                                         // why NR failed this session, empty when it has not
+    DlssNrNativeMode::Shown mode = DlssNrNativeMode::Shown::Off; // Optical F5Low's mode
+    bool gameCallsUpscaler = false;                              // so Optical F5Low stands aside
+    std::string backend;                                         // BackendName(): empty until the model is loaded
+};
+StatusSummary CurrentStatusSummary(::Config* config);
+
 // A line on the Upscaler page while the current upscaler is Optical F5Low's own (the game makes no upscaler call), and
 // a hint on the Frame Generation page where Optical F5Low could give frame generation its input (`noUpscalerFeature`:
 // no upscaler is running).
