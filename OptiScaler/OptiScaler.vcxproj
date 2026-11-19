@@ -363,6 +363,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="plugins\PluginsView.h" />
     <ClInclude Include="menu\PluginsPage.h" />
     <ClInclude Include="menu\NotificationsPage.h" />
+    <ClInclude Include="menu\StatusPage.h" />
+    <ClInclude Include="menu\StatusPageRules.h" />
     <ClInclude Include="misc\NotificationHistory.h" />
     <ClInclude Include="misc\LibraryPathCheck.h" />
     <ClInclude Include="framegen\mfgunlock\Locator.h" />
@@ -1139,6 +1141,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="menu\menu_common.cpp" />
     <ClCompile Include="menu\PluginsPage.cpp" />
     <ClCompile Include="menu\NotificationsPage.cpp" />
+    <ClCompile Include="menu\StatusPage.cpp" />
     <ClCompile Include="plugins\PluginApi.cpp" />
     <ClCompile Include="menu\menu_dx_base.cpp" />
     <ClCompile Include="menu\menu_dx11.cpp" />

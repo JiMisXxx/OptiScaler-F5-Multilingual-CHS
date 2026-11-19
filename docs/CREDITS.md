@@ -107,6 +107,10 @@ The layout and mapping behind Compress screen edges (the sharp middle, the squee
 
 Taking the scene depth and render resolution motion vectors from Intel's UE XeSS plugin (finding its velocity flattening by the texture name, the scene depth copy in queue order, the frame generation depth state) is ported from [upstream OptiScaler](https://github.com/optiscaler/OptiScaler) (GPL-3.0), by FakeMichau, commit `7e941561`. Adapted onto this fork: its own retire list for textures the GPU can still read (including the copy texture when it grows), one device only, an undone hook install on failure, `[XeSS] UnrealDepth` to turn it off, and the instruction decoding split out and host tested.
 
+## Status page
+
+The Status page (System, Detected, Hooks and Init Flags: what OptiScaler found and runs, dense enough for one screenshot) is ported from [upstream OptiScaler](https://github.com/optiscaler/OptiScaler)'s Status tab (GPL-3.0), by TheRazerMD and FakeMichau, commits `d63306ea`, `434b9555`, `76511542`, `2a382e1f`, `deb645a1`, `c220ad9e`, `76028322` and `fc44c2be`. It is drawn with this fork's menu cards, its words are in a host-tested rules header, and a card for this fork's own features (Neural Rendering, Optical F5Low, F5Low frame generation, HDR output, memory protection) is added.
+
 ## OptiScaler contributors
 
 These credits are retained from the original OptiScaler README:
