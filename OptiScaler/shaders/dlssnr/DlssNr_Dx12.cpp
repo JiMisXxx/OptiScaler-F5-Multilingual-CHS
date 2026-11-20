@@ -2246,41 +2246,11 @@ void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer
 // SelectWeights is called before every create; DlssNr::Weights resolves and checks the folder.
 void SelectWeights(const Config& cfg)
 {
-    const auto set = cfg.DlssNrWeightsSet.value_or_default();
-    if (g_nr.weightsSelect == nullptr)
-    {
-        if (!set.empty())
-            LOG_WARN("DLSS-NR: Model weights '{}' needs the forwarder from this release (nvngx.dll_dlssnr.dll); "
-                     "the DLL's own weights are used",
-                     set);
-        return;
-    }
-    const auto dir = DlssNr::Weights::Folder(set).wstring();
-    if (!set.empty() && dir.empty())
-        LOG_WARN("DLSS-NR: Model weights '{}' is not a folder name; the DLL's own weights are used", set);
-    g_nr.weightsSelect(dir.c_str());
+    DlssNr::Weights::Select(g_nr.weightsSelect, cfg.DlssNrWeightsSet.value_or_default(), "");
 }
 
 // The forwarder's account of what each weights read got (stock or which file), into OptiScaler.log.
-void LogWeightsReads()
-{
-    if (g_nr.weightsTakeLog == nullptr)
-        return;
-    char text[4096] {};
-    if (g_nr.weightsTakeLog(text, (int) sizeof(text)) <= 0)
-        return;
-    std::string_view rest(text);
-    while (!rest.empty())
-    {
-        const auto end = rest.find('\n');
-        const auto line = rest.substr(0, end);
-        if (!line.empty())
-            LOG_INFO("DLSS-NR weights: {}", line);
-        if (end == std::string_view::npos)
-            break;
-        rest.remove_prefix(end + 1);
-    }
-}
+void LogWeightsReads() { DlssNr::Weights::LogReads(g_nr.weightsTakeLog, ""); }
 
 bool TuningMatchesFeature(const Config& cfg, unsigned int requestedPasses)
 {

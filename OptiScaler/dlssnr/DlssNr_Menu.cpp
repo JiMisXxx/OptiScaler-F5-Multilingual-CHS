@@ -728,20 +728,21 @@ static void ModelWeightsCombo(Config* config)
                "entries: folders in OptiScaler\\nr_weights, each holding weight files exported for this DLL; the "
                "brackets say which model the set has weights for. A pass on the other model keeps its stock "
                "weights. A file is used only by the DLL it was made for; otherwise the stock weights run and "
-               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 (and "
-               "games bridged to it) only for now.");
+               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 and "
+               "Vulkan (native or bridged); DirectX 11 only when bridged to DirectX 12.");
 
     if (current.empty())
         return;
 
-    // Selection reaches the model only on the D3D12 path (native D3D12 or a bridge to it) for now
+    // Selection reaches the model on the D3D12 path (native D3D12, or a D3D11/Vulkan bridge to it) and on native
+    // Vulkan; a D3D11 game not bridged to D3D12 does not reach it.
     const auto& state = State::Instance();
-    const bool d3d12Path =
-        !DlssNr::IsRunningVk() && state.swapchainApi != API::Vulkan &&
-        (state.swapchainApi != API::DX11 || state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
-    if (!d3d12Path)
+    const bool reachesModel = DlssNr::IsRunningVk() || state.swapchainApi != API::DX11 ||
+                              state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+    if (!reachesModel)
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "No effect here yet: DirectX 12 only for now.");
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                           "No effect here yet: DirectX 11 only when bridged to DirectX 12.");
         return;
     }
 
@@ -4731,7 +4732,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         const bool reduced = modelScale < 0.999f;
         const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
-        // Superior needs D3D12 (or a D3D12 bridge) and NVIDIA's DLSS SR through NGX for its temporal part.
+        // Superior's private DLSS needs NVIDIA's DLSS SR through NGX (D3D12, a D3D12 bridge or native Vulkan); it runs
+        // below 100% Model resolution, and at 100% and above under Also at 100% and above.
         static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
         const int enlarge = superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
@@ -4743,7 +4745,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             for (int i = 0; i < IM_ARRAYSIZE(enlargeNames); ++i)
             {
                 const unsigned mode = i == 3 ? DlssNr::SuperiorScaling::Transfer : unsigned(i);
-                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale, nr.vulkan);
+                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale);
 
                 if (ImGui::Selectable(enlargeNames[i], i == enlarge,
                                       blocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
@@ -4763,8 +4765,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             "NVIDIA residual: only the changes, NVIDIA's way; with Upscale Method Bilinear, also kept on "
             "their side of edges.\n"
             "Superior Scaling: its own Area downsample, frequency shaping and optional private DLSS to steady NR "
-            "over time, including at 100% with Compress screen edges. Needs DirectX 12 or a DirectX 12 bridge; "
-            "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
+            "over time, including at 100% with Compress screen edges. On native Vulkan it runs with No DLSS, CNN or "
+            "Transformer below 100% and with CNN or Transformer at 100% and above (Also at 100% and above), one model "
+            "pass, without Compress screen edges or Reuse detail; where it "
+            "cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
             "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
         if (superior)
@@ -4776,7 +4780,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             const auto selected =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default());
             int preset = selected == choices[0] ? 0 : selected == choices[2] ? 2 : 1;
-            ImGui::BeginDisabled(nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable());
+            const bool srUnavailable =
+                nr.vulkan ? DlssNr::SuperiorSrUnavailableVk() : DlssNr::SuperiorScaling::SrUnavailable();
+            ImGui::BeginDisabled(srUnavailable);
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
                 config->DlssNrSuperiorScalingPreset = choices[preset];
             ImGui::EndDisabled();
@@ -4788,10 +4794,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
                        "different artifacts of its own.");
 
-            ImGui::BeginDisabled(
-                nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable() ||
-                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) ==
-                    DlssNr::SuperiorScaling::NoPrivateDlss);
+            ImGui::BeginDisabled(srUnavailable || DlssNr::SuperiorScaling::Preset(
+                                                      config->DlssNrSuperiorScalingPreset.value_or_default()) ==
+                                                      DlssNr::SuperiorScaling::NoPrivateDlss);
             bool atNative = config->DlssNrSuperiorAtNative.value_or_default();
             if (ImGui::Checkbox("Also at 100% and above", &atNative))
                 config->DlssNrSuperiorAtNative = atNative;
@@ -4801,12 +4806,15 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 "On: it also runs at 100% and above. Above 100% NR still works at the larger size; its result "
                 "is brought back to the screen's size first and the DLSS steadies that. Costs the DLSS's time at "
                 "full screen size. Not with Compress screen edges, which has its own rule. Like below 100%, "
-                "Superior's own composition then leaves out Depth fade.");
+                "Superior's own composition then leaves out Depth fade. On native Vulkan too, in one NR pass.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)
-                ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
-                                   "used here.");
+            {
+                const auto vulkanStatus = DlssNr::SuperiorStatusVk();
+                if (!vulkanStatus.empty())
+                    ImGui::TextWrapped("%s", vulkanStatus.c_str());
+            }
             else if (!unavailable.empty())
                 ImGui::TextWrapped("Superior Scaling is not running (%s); Matched residual is used. Select it again "
                                    "to retry.",
