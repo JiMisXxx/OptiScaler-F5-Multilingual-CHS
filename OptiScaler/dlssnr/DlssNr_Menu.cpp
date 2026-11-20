@@ -728,20 +728,21 @@ static void ModelWeightsCombo(Config* config)
                "entries: folders in OptiScaler\\nr_weights, each holding weight files exported for this DLL; the "
                "brackets say which model the set has weights for. A pass on the other model keeps its stock "
                "weights. A file is used only by the DLL it was made for; otherwise the stock weights run and "
-               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 (and "
-               "games bridged to it) only for now.");
+               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 and "
+               "Vulkan (native or bridged); DirectX 11 only when bridged to DirectX 12.");
 
     if (current.empty())
         return;
 
-    // Selection reaches the model only on the D3D12 path (native D3D12 or a bridge to it) for now
+    // Selection reaches the model on the D3D12 path (native D3D12, or a D3D11/Vulkan bridge to it) and on native
+    // Vulkan; a D3D11 game not bridged to D3D12 does not reach it.
     const auto& state = State::Instance();
-    const bool d3d12Path =
-        !DlssNr::IsRunningVk() && state.swapchainApi != API::Vulkan &&
-        (state.swapchainApi != API::DX11 || state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
-    if (!d3d12Path)
+    const bool reachesModel = DlssNr::IsRunningVk() || state.swapchainApi != API::DX11 ||
+                              state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+    if (!reachesModel)
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "No effect here yet: DirectX 12 only for now.");
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                           "No effect here yet: DirectX 11 only when bridged to DirectX 12.");
         return;
     }
 
