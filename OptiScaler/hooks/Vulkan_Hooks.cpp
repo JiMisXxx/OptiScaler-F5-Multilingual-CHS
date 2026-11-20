@@ -380,6 +380,9 @@ PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0)
         return o_QueuePresentKHR != nullptr ? (PFN_vkVoidFunction) FGOutputQueuePresent : nullptr;
 
+    if (std::strcmp(pName, "vkWaitForPresentKHR") == 0)
+        return (PFN_vkVoidFunction) o_WaitForPresentKHR;
+
     return nullptr;
 }
 
@@ -1659,9 +1662,15 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
             fgSwapchain = nativeFg->CreateSwapchain(device, &localCreateInfo, pAllocator, pSwapchain);
             result = VK_SUCCESS;
 
-            // FFX could not make it: the game's own swapchain, as without the output
+            // FFX could not make it: the game's own swapchain, as without the output (a failed create of the output's
+            // retired the old swapchain, it is not passed again)
             if (!fgSwapchain)
+            {
+                if (nativeFg->RetiredOldSwapchain())
+                    localCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+
                 latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);
+            }
         }
 
         if (!fgSwapchain)
@@ -1863,10 +1872,17 @@ static VkResult hkvkAcquireNextImage2KHR(VkDevice device, const VkAcquireNextIma
 VALIDATE_HOOK(hkvkWaitForPresentKHR, PFN_vkWaitForPresentKHR)
 static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
 {
-    // An output with the driver's own swapchain (F5Low) keeps the game's present ids meaningful, they go to the driver
     if (auto fg = State::Instance().currentVkFG;
-        fg != nullptr && fg->OwnsSwapchain(swapchain) && !fg->HasDriverSwapchain() && !FromFGOutput(_ReturnAddress()))
+        fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
     {
+        // An output with the driver's own swapchain (F5Low) keeps the game's present ids meaningful: its worker
+        // presents to the swapchain, so the wait goes through the output's locking
+        if (fg->HasDriverSwapchain())
+        {
+            ScopedFGCall fgCall {};
+            return fg->WaitForPresent(device, swapchain, presentId, timeout);
+        }
+
         return VK_SUCCESS;
     }
 

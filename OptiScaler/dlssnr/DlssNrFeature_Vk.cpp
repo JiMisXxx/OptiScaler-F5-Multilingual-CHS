@@ -1846,12 +1846,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     encode.ModelWorkScale = (reduced && workScale < 1.0f) ? workScale : 1.0f;
     encode.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
     encode.Transfer = cfg.DlssNrTransfer.value_or_default();
-    // Superior Scaling is D3D12-only (its private DLSS and PSOs). Native Vulkan runs Matched residual instead, said once.
+    // Superior Scaling is D3D12-only (its private DLSS and PSOs). Native Vulkan runs Matched residual instead, said
+    // once.
     if (DlssNr::SuperiorScaling::Enabled(encode.Transfer))
     {
         static std::once_flag warned;
-        std::call_once(warned, []
-                       { LOG_WARN("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Vulkan uses Matched residual"); });
+        std::call_once(
+            warned,
+            [] { LOG_WARN("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Vulkan uses Matched residual"); });
         encode.Transfer = DlssNr::SuperiorScaling::FallbackTransfer;
     }
     // Tone-mapped frames keep the Paper white scale; a linear HDR frame is shown at its base white point, or at the
@@ -2662,16 +2664,15 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                     vitEveryFrame ? 1u : std::clamp(cfg.DlssNrVitEveryPlain.value_or_default(), 1u, 2u),
                                     (long long) (g_vk.frames & 0x3FFFFFFFFFFFFFFFull), nullptr, false,
                                     DlssNrVitReuse::kCopyPlain | DlssNrVitReuse::kCopyFp8);
-        evaluated = g_vk.evaluate(
-            (void*) cmdBuffer, passFeature, g_vk.capabilityParams,
-            &input->ngx, modelDepth, spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,
-            spatial ? modelWidth : guideWidth, spatial ? modelHeight : guideHeight,
-            spatial ? modelWidth : guides.motion.width, spatial ? modelHeight : guides.motion.height,
-            spatial ? 0u : guides.depth.x, spatial ? 0u : guides.depth.y,
-            spatial ? 0u : reusePlan.motionBaseX, spatial ? 0u : reusePlan.motionBaseY, depthInverted ? 1 : 0,
-            passReset ? 1 : 0, tuning.intensity,
-            (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone, tuning.skin,
-            tuning.autoMask ? 1 : 0, mvX, mvY);
+        evaluated = g_vk.evaluate((void*) cmdBuffer, passFeature, g_vk.capabilityParams, &input->ngx, modelDepth,
+                                  spatial ? modelMotion : reusePlan.motion, &answer->ngx, modelWidth, modelHeight,
+                                  spatial ? modelWidth : guideWidth, spatial ? modelHeight : guideHeight,
+                                  spatial ? modelWidth : guides.motion.width,
+                                  spatial ? modelHeight : guides.motion.height, spatial ? 0u : guides.depth.x,
+                                  spatial ? 0u : guides.depth.y, spatial ? 0u : reusePlan.motionBaseX,
+                                  spatial ? 0u : reusePlan.motionBaseY, depthInverted ? 1 : 0, passReset ? 1 : 0,
+                                  tuning.intensity, (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone,
+                                  tuning.skin, tuning.autoMask ? 1 : 0, mvX, mvY);
         if (DlssNrNative::EndEvaluate(nullptr))
             LOG_WARN("DLSS-NR Vulkan: Reuse bottleneck is {}", DlssNrNative::VitStatus());
         if (evaluated != 1)

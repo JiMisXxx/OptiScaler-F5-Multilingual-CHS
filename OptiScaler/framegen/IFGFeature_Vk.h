@@ -124,6 +124,16 @@ class IFGFeature_Vk : public virtual IFGFeature
     // One line for the menu: why the output is not generating, or what it does now. Empty when there is nothing to say.
     virtual std::string StatusLine() const { return {}; }
 
+    // A failed CreateSwapchain of the output retired the game's old swapchain: the create that follows is made without
+    // it
+    virtual bool RetiredOldSwapchain() const { return false; }
+
+    // vkWaitForPresentKHR of the game on the output's swapchain (the driver's, with the output's locking)
+    virtual VkResult WaitForPresent(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
+    {
+        return VK_SUCCESS;
+    }
+
     // The game's swapchain calls, the hooks route them here for the output's swapchain
     virtual bool CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                  const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) = 0;

@@ -101,12 +101,11 @@ int main()
     CHECK(GeneratedAfter(1, 3, 3) == 0);
     CHECK(GeneratedAfter(-2, 3, 3) == 0);
 
-    // job queue: push while there is room, wait briefly, then drain
-    CHECK(OnQueue(0, 0.0) == QueueAction::Push);
-    CHECK(OnQueue(1, 0.0) == QueueAction::Push);
-    CHECK(OnQueue(kJobQueueCap, 0.0) == QueueAction::Wait);
-    CHECK(OnQueue(kJobQueueCap, 2.9) == QueueAction::Wait);
-    CHECK(OnQueue(kJobQueueCap, 3.0) == QueueAction::Drain);
+    // the game thread's budget
+    CHECK(RemainingMs(50.0, 0.0) == 50);
+    CHECK(RemainingMs(50.0, 20.5) == 29);
+    CHECK(RemainingMs(50.0, 49.5) == 1);
+    CHECK(RemainingMs(50.0, 80.0) == 1);
 
     if (fails == 0)
         std::printf("f5low_vk_rules_smoke: PASS\n");

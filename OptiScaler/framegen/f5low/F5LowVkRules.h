@@ -15,9 +15,18 @@ inline constexpr uint32_t kSlots = 4;
 // What the generator will be asked for.
 inline constexpr uint32_t kMaxGenerated = 5;
 
-// Jobs (generated frames plus the real one) waiting for the present worker. The game thread waits briefly when it is
-// full, then drains the worker and presents the real image itself, without generation.
-inline constexpr uint32_t kJobQueueCap = 2;
+// The game thread never waits longer than this in one present, in all (the job two frames back, the slot, the fences,
+// the worker's drain, the swapchain lock). The worker's wait for the swapchain lock is longer: a game's direct present
+// may block on vsync inside it.
+inline constexpr double kBlockMsRule = 50.0;
+inline constexpr unsigned long kWorkerLockMsRule = 1000;
+
+// What is left of the game thread's budget (at least 1 ms, a zero wait would be a poll that fails by itself)
+inline uint32_t RemainingMs(double budgetMs, double elapsedMs)
+{
+    const double left = budgetMs - elapsedMs;
+    return left < 1.0 ? 1u : static_cast<uint32_t>(left);
+}
 
 // The swapchain's image count asked of the driver: the game's own plus one image per frame we may generate, capped at
 // what the surface offers (surfaceMax 0 = no limit).
@@ -90,23 +99,6 @@ struct FenceCounter
 inline uint32_t GeneratedAfter(int result, uint32_t reported, uint32_t asked)
 {
     return result == 0 && reported >= asked ? asked : 0;
-}
-
-// The job queue's answer when the game thread has a frame to generate: Push, Wait (briefly, for the worker) or Drain
-// (give up generating this frame: wait for the worker to go idle and present the real image directly).
-enum class QueueAction
-{
-    Push,
-    Wait,
-    Drain
-};
-
-inline QueueAction OnQueue(uint32_t queued, double waitedMs, double briefMs = 3.0)
-{
-    if (queued < kJobQueueCap)
-        return QueueAction::Push;
-
-    return waitedMs < briefMs ? QueueAction::Wait : QueueAction::Drain;
 }
 
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.

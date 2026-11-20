@@ -47,20 +47,26 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     double _lastEntryMs = 0.0;
     uint64_t _generatedFrames = 0;
     int _failures = 0;
-    int _wanted = 1;     // generated frames per game frame the multiplier asks for
-    int _countLimit = 5; // lowered when f5low refuses a larger count
-    mutable std::string _nameCache;
+    int _wanted = 1;          // generated frames per game frame the multiplier asks for
+    int _countLimit = 5;      // lowered when f5low refuses a larger count
+    std::string _nameCache;   // built once in the constructor
+    bool _removed = false;    // the D3D12 device was removed: stays so across swapchains
+    bool _retiredOld = false; // a failed create retired the game's old swapchain
+    bool _loggedBehind = false;
 
     void SetReason(const std::string& reason);
     void UpdateCount();
 
-    bool Prepare(const Pending& pending, uint32_t count, bool& useHudless);
+    bool Prepare(const Pending& pending, uint32_t count, bool& useHudless, uint32_t set);
     bool EnsureSlots();
 
     // Our own GPU work and the worker, so a size change or a teardown can go on: the worker drained, every fence of
     // ours waited
     void WaitOwnWork();
     bool DrainWorker(DWORD timeoutMs);
+    bool QuiesceWorker(DWORD timeoutMs);
+    void LatchOff(const std::string& reason);
+    bool CarryPresentStructs(const VkPresentInfoKHR* present, Job& job);
     void StartWorker();
     void StopWorker(bool join);
     void WorkerLoop();
@@ -69,7 +75,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     // present queue. Returns after the last generated frame was presented.
     void RunGenerated(const Job& job, bool paced);
     bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);
-    VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info);
+    VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD lockTimeoutMs);
     VkResult DirectPresent(VkQueue queue, const VkPresentInfoKHR* info);
 
     enum class Outcome
@@ -96,6 +102,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     bool HasDriverSwapchain() const override final { return true; }
     bool WantsLatencyMode() const override final { return true; }
     void OnDeviceDestroying(VkDevice device) override final;
+    bool RetiredOldSwapchain() const override final { return _retiredOld; }
+    VkResult WaitForPresent(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId,
+                            uint64_t timeout) override final;
 
     bool CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                          const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) override final;
