@@ -3514,7 +3514,9 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         if (finishedPicture && enabled)
         {
             const auto feature = State::Instance().currentFeature;
-            if (feature && (feature->Api() != API::DX12 || feature->IsWithDx12()))
+            // A native Vulkan game runs it too (dlssnr/DlssNr_FinishedVk.h): its status line is NR's own, below
+            const bool nativeVulkan = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
+            if (feature && !nativeVulkan && (feature->Api() != API::DX12 || feature->IsWithDx12()))
                 ImGui::TextWrapped("This option needs a native DirectX 12 game.");
             else if (GameFgPausesFinishedPicture())
             {

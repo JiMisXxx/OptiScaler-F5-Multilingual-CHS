@@ -2,6 +2,7 @@
 
 #include "VulkanwDx12_Hooks.h"
 #include <dlssnr/DlssNr_ExposureScan_Vk.h>
+#include <dlssnr/DlssNr_FinishedVk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <State.h>
@@ -6174,6 +6175,7 @@ void Vulkan_wDx12::hk_vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32
     }
 
     GenericDepthVk::ExecuteCommands(commandBuffer, commandBufferCount, pCommandBuffers);
+    DlssNr::FinishedVk::NoteExecuteCommands(commandBuffer, commandBufferCount, pCommandBuffers);
     o_vkCmdExecuteCommands(cmdBuffer, commandBufferCount, pCommandBuffers);
 }
 
@@ -6340,6 +6342,10 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     // "extra signal fence". Refusing it left that fence unsignalled and the game waiting on it.
     if (submitCount == 0 || pSubmits == nullptr)
         return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
+
+    // Finished Picture's captures wait for the submit of the command buffer they were recorded into
+    for (uint32_t i = 0; i < submitCount; i++)
+        DlssNr::FinishedVk::NoteSubmit(pSubmits[i].pCommandBuffers, pSubmits[i].commandBufferCount);
 
 #ifdef LOG_ALL_RECORDS
     LOG_DEBUG("queue: {:X}, submitCount: {}, fence: {:X}", (size_t) queue, submitCount, (size_t) fence);
@@ -6635,6 +6641,9 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, co
     if (submitCount == 0 || pSubmits == nullptr)
         return o_vkQueueSubmit2(queue, submitCount, pSubmits, fence);
 
+    for (uint32_t i = 0; i < submitCount; i++)
+        DlssNr::FinishedVk::NoteSubmit2(pSubmits[i].pCommandBufferInfos, pSubmits[i].commandBufferInfoCount);
+
     PendingSubmission pending {};
     uint32_t submitIndex = UINT32_MAX;
     uint32_t commandBufferIndex = UINT32_MAX;
@@ -6680,6 +6689,9 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount,
     if (submitCount == 0 || pSubmits == nullptr)
         return o_vkQueueSubmit2KHR(queue, submitCount, pSubmits, fence);
 
+    for (uint32_t i = 0; i < submitCount; i++)
+        DlssNr::FinishedVk::NoteSubmit2(pSubmits[i].pCommandBufferInfos, pSubmits[i].commandBufferInfoCount);
+
     PendingSubmission pending {};
     uint32_t submitIndex = UINT32_MAX;
     uint32_t commandBufferIndex = UINT32_MAX;
@@ -6723,6 +6735,7 @@ VkResult Vulkan_wDx12::hk_vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
 #endif
 
     GenericDepthVk::BeginCommandBuffer(commandBuffer, pBeginInfo);
+    DlssNr::FinishedVk::ForgetCommandBuffers(1, &commandBuffer); // recorded again: what was in it is gone
     return o_vkBeginCommandBuffer(commandBuffer, pBeginInfo);
 }
 
@@ -6758,6 +6771,7 @@ VkResult Vulkan_wDx12::hk_vkResetCommandBuffer(VkCommandBuffer commandBuffer, Vk
         cmdBufferStateTracker.OnReset(commandBuffer);
 
     GenericDepthVk::ForgetCommandBuffers(1, &commandBuffer);
+    DlssNr::FinishedVk::ForgetCommandBuffers(1, &commandBuffer);
     return o_vkResetCommandBuffer(commandBuffer, flags);
 }
 
@@ -6774,6 +6788,7 @@ void Vulkan_wDx12::hk_vkFreeCommandBuffers(VkDevice device, VkCommandPool comman
 
     // Call original function
     GenericDepthVk::ForgetCommandBuffers(commandBufferCount, pCommandBuffers);
+    DlssNr::FinishedVk::ForgetCommandBuffers(commandBufferCount, pCommandBuffers);
     o_vkFreeCommandBuffers(device, commandPool, commandBufferCount, pCommandBuffers);
 }
 
