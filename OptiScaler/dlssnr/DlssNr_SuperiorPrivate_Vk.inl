@@ -939,7 +939,13 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
         const double now = NowSeconds();
         UpdateMotion(cmd, in, now, reset);
         if (probe.selection.Advance(now))
+        {
             reset = true;
+            // One line per D <-> E handover, so a run can confirm the idle swap.
+            LOG_INFO("DLSS-NR Vulkan Superior Scaling: CNN handed over to {}", probe.selection.idle
+                                                                                   ? "E (the picture is still)"
+                                                                                   : "D (the picture moves)");
+        }
         idle = probe.selection.idle;
         mix *= probe.selection.fade.weight;
     }
