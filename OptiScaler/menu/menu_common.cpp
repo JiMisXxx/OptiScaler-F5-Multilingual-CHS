@@ -4684,7 +4684,8 @@ void MenuCommon::RenderFrameGenerationFooter(RenderMenuContext& ctx)
     const bool gameDlssgShown =
         !state.externalFrameGeneration && state.activeFgInput != FGInput::ForceXeLL &&
         ((state.dlssgMfgMax.has_value() && state.dlssgMfgMax.value() >= 1) || state.dlssgGameDMFGSupported) &&
-        state.activeFgOutput != FGOutput::DLSSG && state.activeFgInput != FGInput::DLSSG;
+        state.activeFgOutput != FGOutput::DLSSG && state.activeFgInput != FGInput::DLSSG &&
+        !state.gameDlssgReplacedByOwnFg; // forced off then (slDLSSGSetOptions), its buttons would do nothing
 
     if (gameDlssgShown)
     {

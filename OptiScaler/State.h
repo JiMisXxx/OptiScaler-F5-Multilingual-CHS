@@ -310,6 +310,10 @@ class State
     std::atomic<float> xefgDynamicCapFps = 0.0f;
 
     bool dlssgGameDMFGSupported = false;
+    // The game's DLSS-G swapchain hooks were cleared at its plugin load because OptiScaler makes the frame generation
+    // swapchain (FG Input not DLSSG): its DLSS-G stays off for the session, even if OptiScaler's FG fails to start
+    // later
+    std::atomic<bool> gameDlssgReplacedByOwnFg = false;
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
     // The game's own DLSS FG choice (slDLSSGSetOptions) with FG Input DLSSG; OptiScaler's FG follows it while

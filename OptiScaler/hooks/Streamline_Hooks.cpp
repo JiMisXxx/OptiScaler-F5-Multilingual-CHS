@@ -141,6 +141,20 @@ static bool IsSL1AndDLSSGManaged()
            (state.activeFgInput == FGInput::DLSSG || state.activeFgOutput == FGOutput::DLSSG);
 }
 
+// OptiScaler makes its own frame generation swapchain (FGHooks, CheckForFGStatus: an FG Input that is not None or
+// NvngxFG, and an FG Output). The game's DLSS-G swapchain hooks would wrap it a second time (Forza Horizon 6, OptiFG +
+// F5Low: Streamline made two frame generation swapchains and crashed in sl.interposer at the first present), so they
+// are cleared as for FG Input DLSSG. D3D12 only: not checked on Vulkan (native Vulkan FG / bridge), and clearing would
+// also zero sl.dlss_g's Vulkan queue requests; there the game's DLSS-G and OptiScaler's FG can still both run.
+// SL1 games are not covered (IsSL1AndDLSSGManaged), untested there
+static bool OwnsFrameGenerationSwapchainD3D12(sl::RenderAPI renderApi)
+{
+    const auto& state = State::Instance();
+
+    return renderApi != sl::RenderAPI::eVulkan && state.activeFgInput != FGInput::NoFG &&
+           state.activeFgInput != FGInput::NvngxFG && state.activeFgOutput != FGOutput::NoFG;
+}
+
 static void PatchSL1PluginJson(nlohmann::json& configJson)
 {
     if (!IsSL1AndDLSSGManaged())
@@ -1220,8 +1234,22 @@ bool StreamlineHooks::hkdlssg_slOnPluginLoad(sl::param::IParameters* params, con
     nlohmann::json configJson = nlohmann::json::parse(*pluginJSON);
 
     // Kill the DLSSG streamline swapchain hooks
-    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG)
+    const bool ownsFgSwapchain = OwnsFrameGenerationSwapchainD3D12(renderApi);
+    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG ||
+        ownsFgSwapchain)
     {
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            State::Instance().gameDlssgReplacedByOwnFg = true;
+
+        if (ownsFgSwapchain && State::Instance().activeFgInput != FGInput::DLSSG &&
+            State::Instance().activeFgOutput != FGOutput::DLSSG)
+        {
+            LOG_INFO("Game's DLSS-G swapchain hooks cleared: OptiScaler makes the frame generation swapchain (FG Input "
+                     "{}, FG Output {})",
+                     magic_enum::enum_name(State::Instance().activeFgInput),
+                     magic_enum::enum_name(State::Instance().activeFgOutput));
+        }
+
         if (configJson.contains("/hooks"_json_pointer))
             configJson["hooks"].clear();
 
@@ -1454,8 +1482,25 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         return o_slDLSSGSetOptions(viewport, newOptions);
     }
 
+    // OptiScaler makes the frame generation swapchain, so its swapchain hooks were cleared at plugin load: OptiScaler's
+    // frame generation replaces the game's (also over KeepGameDlssg). Kept from plugin load, not re-checked, so the
+    // game's DLSS-G stays off without its hooks even if OptiScaler's FG fails to start later. Its resources are freed:
+    // it never comes back this session
+    if (state.activeFgInput != FGInput::DLSSG && state.gameDlssgReplacedByOwnFg)
+    {
+        static std::atomic<bool> loggedReplaced { false };
+        if (!loggedReplaced.exchange(true))
+            LOG_INFO("The game's own DLSS-G is forced off: OptiScaler's frame generation replaces it (FG Input {}, FG "
+                     "Output {})",
+                     magic_enum::enum_name(state.activeFgInput), magic_enum::enum_name(state.activeFgOutput));
+        newOptions.mode = sl::DLSSGMode::eOff;
+        newOptions.flags &= ~sl::DLSSGFlags::eRetainResourcesWhenOff;
+        return o_slDLSSGSetOptions(viewport, newOptions);
+    }
+
     // F5Low's DLSS-G generator: the game's Streamline runs F5Low's nvngx_dlssg (redirect), which f5low patches only
-    // when its own context starts, so the game's DLSS-G stays off (unless FG Input is DLSSG or KeepGameDlssg is set)
+    // when its own context starts, so the game's DLSS-G stays off (unless FG Input is DLSSG or KeepGameDlssg is set).
+    // With an FG Input (OptiFG etc.) the branch above already turned it off; this one covers FG Input None
     if (F5Low::ForcesGameDlssgOff())
     {
         static std::atomic<bool> loggedF5lowOff { false };
