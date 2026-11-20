@@ -19,7 +19,8 @@ bool SrUnavailable();
 // The game's NGX D3D12 runtime is shutting down: every NGX handle is about to be destroyed by NGX itself.
 void NgxDx12Shutdown();
 constexpr uint32_t Transfer = 11u;
-// Where Superior cannot run (native Vulkan, no NGX DLSS SR, no depth), the ordinary path runs Matched residual.
+// Where Superior cannot run (no NGX DLSS SR, no depth, or on native Vulkan the cases in DlssNr_SuperiorVkRule.h), the
+// ordinary path runs Matched residual.
 constexpr uint32_t FallbackTransfer = 1u;
 constexpr uint32_t ShaderFlag = 65536u;
 constexpr uint32_t LowGroupHeight = 16u;
@@ -77,9 +78,11 @@ template <class P> inline void SetGuidedRange(P& p, float scale)
     const float inverse = 1.f / (sigma * sigma);
     std::memcpy(&p.ExposureSourceWidth, &inverse, sizeof(inverse));
 }
-inline bool CanSelectUpscaleMode(unsigned mode, float scale, bool nativeVulkan)
+// Superior Scaling is selectable on every route: where it cannot run (see DlssNr_SuperiorVkRule.h for native Vulkan)
+// the ordinary path runs Matched residual and the status line under the combo says why.
+inline bool CanSelectUpscaleMode(unsigned mode, float scale)
 {
-    return mode == Transfer ? !nativeVulkan : mode == 0u || (mode <= 2u && scale < .999f);
+    return mode == Transfer || mode == 0u || (mode <= 2u && scale < .999f);
 }
 // -1 keeps the generic PSO. Specialization changes no user setting or colour calculation.
 // The fallback resolve PSO slot (DlssNr_Dx12::_superiorResolve, 9 slots). The raw (non-temporal) resolve compiles

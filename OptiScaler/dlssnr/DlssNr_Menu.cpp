@@ -4722,7 +4722,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         const bool reduced = modelScale < 0.999f;
         const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
-        // Superior needs D3D12 (or a D3D12 bridge) and NVIDIA's DLSS SR through NGX for its temporal part.
+        // Superior's private DLSS needs NVIDIA's DLSS SR through NGX (D3D12 or a D3D12 bridge); on native Vulkan it
+        // runs without one for now (No DLSS), below 100% Model resolution.
         static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
         const int enlarge = superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
@@ -4734,7 +4735,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             for (int i = 0; i < IM_ARRAYSIZE(enlargeNames); ++i)
             {
                 const unsigned mode = i == 3 ? DlssNr::SuperiorScaling::Transfer : unsigned(i);
-                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale, nr.vulkan);
+                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale);
 
                 if (ImGui::Selectable(enlargeNames[i], i == enlarge,
                                       blocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
@@ -4754,8 +4755,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             "NVIDIA residual: only the changes, NVIDIA's way; with Upscale Method Bilinear, also kept on "
             "their side of edges.\n"
             "Superior Scaling: its own Area downsample, frequency shaping and optional private DLSS to steady NR "
-            "over time, including at 100% with Compress screen edges. Needs DirectX 12 or a DirectX 12 bridge; "
-            "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
+            "over time, including at 100% with Compress screen edges. On native Vulkan it runs below 100% without the "
+            "private DLSS for now (No DLSS), one model pass, without Compress screen edges or Reuse detail; where it "
+            "cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
             "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
         if (superior)
@@ -4778,6 +4780,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "Transformer - Should provide greater stability than CNN at a performance cost. Use it when CNN "
                        "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
                        "different artifacts of its own.");
+            // Greyed above rather than left to be chosen: on native Vulkan the choice would change nothing (the private
+            // DLSS is not there yet), and the saved one is still the one a D3D12 game reads.
+            if (nr.vulkan)
+                ImGui::TextDisabled("On Vulkan, CNN and Transformer are not available yet; they run as No DLSS.");
 
             ImGui::BeginDisabled(
                 nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable() ||
@@ -4796,8 +4802,11 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)
-                ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
-                                   "used here.");
+            {
+                const auto vulkanStatus = DlssNr::SuperiorStatusVk();
+                if (!vulkanStatus.empty())
+                    ImGui::TextWrapped("%s", vulkanStatus.c_str());
+            }
             else if (!unavailable.empty())
                 ImGui::TextWrapped("Superior Scaling is not running (%s); Matched residual is used. Select it again "
                                    "to retry.",
