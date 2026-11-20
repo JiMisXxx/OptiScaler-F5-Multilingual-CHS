@@ -5,4 +5,8 @@
 #include "VkAux.hlsli"
 [[vk::binding(10, 0)]]
 Texture2D<float4> gUnusedPrivateAux : register(t5);
+// The frozen file declares gTarget / gKeep without a format; PrivateCarrier.hlsl declares them again, with one.
+#define gTarget gFrozenTarget
+#define gKeep gFrozenKeep
+#define VK_PRIVATE_TARGETS 1
 #include "PrivateCarrier.hlsl"
