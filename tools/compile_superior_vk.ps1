@@ -7,6 +7,11 @@
 #                          superior/RawLow_vk.hlsl (VkAux.hlsli + RawLow.hlsl)           -> host_low_raw
 #   guide passes           superior/SpatialGuides.hlsl, JointGuides.hlsl                 -> host_uniform_*guides*
 #   live NR shader         precompile/dlssnr.hlsl + superior/HostResolve.hlsli           -> host_resolve_guided_raw
+#                          (and the signed-residual resolves of the private DLSS: host_resolve_hdr/sdr, host_normal_*)
+#   private DLSS           superior/PrivateCarrier_vk.hlsl (encode, decode), PrivateMotion.hlsl, the ghost field shaders
+#                          (CompactGhost, GhostContrastHistory, CoarseGhostDilate, GhostBiasMask, GhostOutwardFeather) -> private_*
+#   frozen v59 shader, more modes: the generic pass (Mode 7, the private DLSS's unit exposure), the carrier decode
+#                          (Mode 38) and the signed residual's low field (Mode 18)   -> dlssnr_superior_*
 # Every entry point is renamed CSMain in the module, so the host makes all pipelines the same way.
 #
 # The D3D12 blobs are not touched: the sources only gained code under VK_MODE, and tools/compile_nr_interpass.ps1 -Check
@@ -38,10 +43,10 @@ function Write-Header([string]$spv, [string]$header, [string]$name) {
     [IO.File]::WriteAllText($header, (($lines -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
 }
 
-function Build([string]$source, [string]$entry, [string[]]$defines, [string]$stem) {
+function Build([string]$source, [string]$entry, [string[]]$defines, [string]$stem, [string[]]$bindings = @()) {
     $spv = Join-Path $scratch "${stem}_Shader_Vk.spv"
     $dxcArgs = @('-spirv', '-T', 'cs_6_0', '-E', $entry, '-fspv-entrypoint-name=CSMain', '-O3', '-Qstrip_debug', '-D', 'VK_MODE') +
-        $defines + @((Split-Path $source -Leaf), '-Fo', $spv)
+        $defines + $bindings + @((Split-Path $source -Leaf), '-Fo', $spv)
     Push-Location (Split-Path $source -Parent)
     try { & $dxc @dxcArgs | Out-Null } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "DXC failed: $stem" }
@@ -66,6 +71,47 @@ try {
 
     $live = Join-Path $shaders "precompile/dlssnr.hlsl"
     Build $live "CSMain" @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1", "-D", "DLSSNR_SUPERIOR_HOST_RAW=1", "-D", "DLSSNR_SUPERIOR_GUIDED_RAW=1") "host_resolve_guided_raw"
+
+    # The signed-residual resolves (a private DLSS ran): the live shader without the raw-answer define, the plain ones and
+    # the colour-mapping specializations of the D3D12 set that an unpacked frame can reach.
+    $hostResolve = @("-D", "DLSSNR_SUPERIOR_HOST_RESOLVE=1")
+    Build $live "CSMain" $hostResolve "host_resolve_hdr"
+    Build $live "CSMain" ($hostResolve + @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1")) "host_resolve_sdr"
+    foreach ($variant in @("sdr", "hdr0", "hdr2", "hdr4", "hdr6")) {
+        $pass = if ($variant -eq "sdr") { 1 } else { 0 }
+        $mapping = if ($pass) { 0 } else { [int]$variant.Substring(3) }
+        $defines = $hostResolve + @("-D", "DLSSNR_SUPERIOR_HOST_NORMAL=1", "-D", "DLSSNR_SUPERIOR_HOST_PASSTHROUGH=$pass",
+                                    "-D", "DLSSNR_SUPERIOR_HOST_MAPPING=$mapping")
+        if ($pass) { $defines += @("-D", "DLSSNR_SUPERIOR_HOST_SDR=1") }
+        Build $live "CSMain" $defines "host_normal_$variant"
+    }
+
+    # More modes of the frozen v59 shader (through the same wrapper as the Area downsample).
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @() "dlssnr_superior_generic"
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "SuperiorCarrierMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1") "dlssnr_superior_carrier"
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1", "-D", "DLSSNR_SUPERIOR_LOW=1") "dlssnr_superior_low"
+
+    # The private DLSS's own shaders carry no vk::binding (except through the frozen shader they include): the host's
+    # descriptor layout is fixed here, register by register. b0 the constants, t0-t3 bindings 1-4, t5 binding 8, t4 binding 9
+    # (the frozen shader's gAux), u0-u1 bindings 5-6, s0 binding 7 (DlssNrSuperior_Vk.h).
+    $layout = @("-fvk-bind-register", "b0", "0", "0", "0", "-fvk-bind-register", "t0", "0", "1", "0",
+                "-fvk-bind-register", "t1", "0", "2", "0", "-fvk-bind-register", "t2", "0", "3", "0",
+                "-fvk-bind-register", "t3", "0", "4", "0", "-fvk-bind-register", "t4", "0", "9", "0",
+                "-fvk-bind-register", "t5", "0", "8", "0", "-fvk-bind-register", "u0", "0", "5", "0",
+                "-fvk-bind-register", "u1", "0", "6", "0", "-fvk-bind-register", "s0", "0", "7", "0")
+    $carrier = Join-Path $superior "PrivateCarrier_vk.hlsl"
+    Build $carrier "PrivateEncode" @() "private_encode" $layout
+    Build $carrier "PrivateDecode" @() "private_fade" $layout
+    Build $carrier "PrivateDecode" @("-D", "SUPERIOR_GHOST_DECODE=1", "-D", "SUPERIOR_GHOST_DECODE_SEED=1") "private_ghost_decode_seed" $layout
+    Build (Join-Path $superior "PrivateMotion.hlsl") "SampleMotion" @() "private_cnn_motion" $layout
+    Build (Join-Path $superior "CompactGhost.hlsl") "ClearVisibility" @() "private_ghost_clear" $layout
+    foreach ($stage in @(1, 2)) {
+        Build (Join-Path $superior "CompactGhost.hlsl") "CompactGhostMain" @("-D", "DLSSNR_COMPACT_GHOST_STAGE=$stage", "-D", "DLSSNR_GHOST_STEP=4") "private_ghost_coarse_$stage" $layout
+    }
+    Build (Join-Path $superior "GhostContrastHistory.hlsl") "GhostContrastHistory" @("-D", "DLSSNR_CONTRAST_COMPACT=1", "-D", "DLSSNR_GHOST_STEP=4") "private_ghost_reference" $layout
+    Build (Join-Path $superior "CoarseGhostDilate.hlsl") "CoarseGhostDilate" @("-D", "DLSSNR_COARSE_RADIUS=1", "-D", "DLSSNR_GHOST_CONTRAST=1") "private_ghost_dilate" $layout
+    Build (Join-Path $superior "GhostBiasMask.hlsl") "GhostBiasMask" @() "private_ghost_bias" $layout
+    Build (Join-Path $superior "GhostOutwardFeather.hlsl") "GhostOutwardFeather" @("-D", "DLSSNR_GHOST_FEATHER_STAGE=1", "-D", "DLSSNR_GHOST_FEATHER_INPLACE=1") "private_ghost_rings_inplace" $layout
 
     # Every shipped blob must come from this script, and nothing else may sit beside them.
     $shipped = @(Get-ChildItem $out -Filter "*_Shader_Vk.h" | ForEach-Object { $_.Name -replace '_Shader_Vk\.h$', '' })
