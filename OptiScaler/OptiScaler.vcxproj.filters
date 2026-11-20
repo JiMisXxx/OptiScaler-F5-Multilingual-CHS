@@ -1929,6 +1929,9 @@
     <ClCompile Include="framegen\f5low\F5Low.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="framegen\f5low\F5Low_Vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="framegen\mfgunlock\hde\hde64.c">
       <Filter>Source Files</Filter>
     </ClCompile>

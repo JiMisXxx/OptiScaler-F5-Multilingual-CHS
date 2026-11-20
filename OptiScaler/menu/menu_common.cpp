@@ -4053,7 +4053,17 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     // F5Low output requirements: the XeFG ones, plus an NVIDIA GPU and f5low.dll in the plugins folder
     auto constexpr f5lowOutputIndex = (uint32_t) FGOutput::F5Low;
     static const auto f5lowAvailability = F5Low::Available();
-    if (outputOptions[xefgOutputIndex].disabled)
+    // A native Vulkan game's own swapchain (no bridge) offers F5Low's XeFG Tensor, not XeFG (framegen/f5low/F5Low_Vk.h)
+    const bool f5lowOnNativeVulkan = vulkanNoFg && vulkanNativeFg && state.swapchainApi == API::Vulkan;
+
+    if (f5lowOnNativeVulkan)
+    {
+        outputOptions[f5lowOutputIndex].set_disabled(!f5lowAvailability.available, f5lowAvailability.reason);
+
+        if (!outputOptions[f5lowOutputIndex].disabled)
+            outputOptions[f5lowOutputIndex].tooltip += "\n\nXeFG Tensor only on the native swapchain";
+    }
+    else if (outputOptions[xefgOutputIndex].disabled)
         outputOptions[f5lowOutputIndex].set_disabled(true, outputOptions[xefgOutputIndex].tooltip);
     else
         outputOptions[f5lowOutputIndex].set_disabled(!f5lowAvailability.available, f5lowAvailability.reason);

@@ -113,6 +113,17 @@ class IFGFeature_Vk : public virtual IFGFeature
     // The handle the game gets is the driver's, VK_NV_low_latency2 calls with it reach the driver
     virtual bool HasDriverSwapchain() const { return false; }
 
+    // The output's own swapchain create wants the game's usual VK_NV_low_latency2 mode chained into it (the hook does
+    // that before CreateSwapchain). Only for outputs that make the driver's swapchain themselves, not through
+    // Streamline.
+    virtual bool WantsLatencyMode() const { return false; }
+
+    // The game is destroying `device`: the output lets go of everything it made on it, the GPU work included
+    virtual void OnDeviceDestroying(VkDevice device) {}
+
+    // One line for the menu: why the output is not generating, or what it does now. Empty when there is nothing to say.
+    virtual std::string StatusLine() const { return {}; }
+
     // The game's swapchain calls, the hooks route them here for the output's swapchain
     virtual bool CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                  const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) = 0;

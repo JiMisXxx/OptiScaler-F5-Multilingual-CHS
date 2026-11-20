@@ -5506,7 +5506,7 @@ void RenderVulkanRoute(Config* config)
         EnterGameUpscalerRoute(config);
     }
 
-    HelpMarker("Native swapchain: FSR FG or DLSS-G on the game's own swapchain. No XeFG.\n"
+    HelpMarker("Native swapchain: FSR FG, DLSS-G or F5Low (XeFG Tensor) on the game's own swapchain. No XeFG.\n"
                "Bridge: reads the game's upscaler call. XeFG, FSR FG and DLSS-G.\n"
                "Choose before the game starts; leaving the bridge needs a restart.");
 
