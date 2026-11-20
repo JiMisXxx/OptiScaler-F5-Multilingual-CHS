@@ -133,8 +133,8 @@ bool Holds() { return feature != nullptr || params != nullptr || carrier.Valid()
 // A preset change, a new raster or the end of the pass: the device is drained, then the feature and the images go.
 void Rebuild(VkDevice device)
 {
-    if (Holds() && device != VK_NULL_HANDLE)
-        vkDeviceWaitIdle(device);
+    if (Holds())
+        Drain(device);
 
     ReleaseNgx();
     DestroyImages();
@@ -273,6 +273,23 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
                  "(select Superior Scaling again to retry)");
         Say("NVIDIA DLSS is not available here. Using the current NR edit.");
         return false;
+    }
+
+    // Every pass it dispatches is built now: one that will not build is a private DLSS that cannot be made, said here.
+    {
+        std::vector<Blob> blobs { Blob::Generic,     Blob::CarrierDecode, Blob::LowSigned, Blob::ResolveHdr,
+                                  Blob::ResolveSdr,  Blob::PrivateEncode };
+        if (Sup::NeedsGhostField(preset))
+            for (const Blob b : { Blob::GhostClear, Blob::GhostCoarse1, Blob::GhostCoarse2, Blob::GhostReference,
+                                  Blob::GhostDilate, Blob::GhostBias, Blob::GhostDecodeSeed, Blob::GhostRingsInPlace })
+                blobs.push_back(b);
+        if (!pass->Build(cmd, blobs.data(), blobs.size()))
+        {
+            phase = Phase::Failed;
+            LOG_WARN("DLSS-NR Vulkan Superior Scaling: the private DLSS passes could not be built; running No DLSS");
+            Say("Private DLSS could not be created. Using the current NR edit.");
+            return false;
+        }
     }
 
     if (!CreateImage(carrier, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, true) ||

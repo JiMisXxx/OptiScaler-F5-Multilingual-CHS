@@ -294,6 +294,9 @@ std::mutex g_vkMutex;
 // before the first. The game's Vulkan route can move Neural Rendering to the D3D12 bridge at run time, after which this
 // path is never entered again but g_vk.feature stays; IsRunningVk reads this to tell the two apart.
 std::atomic<long long> g_vkSeamStamp { 0 };
+// The NR frame (g_vk.frames) on which the device was last drained, so the several places that free images after a size
+// change drain it once, not once each. ~0 before the first.
+unsigned long long g_vkDrainedAt = ~0ull;
 constexpr long long kVkSeamStaleMs = 1000;
 
 long long SteadyMs()
@@ -1520,7 +1523,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         // on RDR2 and Enshrouded by dragging the model-resolution slider). Drain the device first.
         // Only the rare resize path reaches here, so the CPU stall is a one-off hitch, not per-frame.
         if (g_vk.device != VK_NULL_HANDLE)
+        {
             vkDeviceWaitIdle(g_vk.device);
+            g_vkDrainedAt = g_vk.frames;
+        }
 
         if (g_vk.feature != nullptr && g_vk.release != nullptr)
         {
@@ -2291,17 +2297,16 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     // Superior Scaling (DlssNr_Superior_Vk.inl): whether its No DLSS composition runs this frame, and says why not when
     // it does not. It replaces the ordinary downsample, guides and resolve below; everything else is the ordinary path.
-    const bool superiorRuns =
-        SuperiorVk::Begin(cfg, device, physicalDevice, workWidth < width || workHeight < height, spatial, passes,
-                          workWidth, workHeight) == DlssNr::SuperiorScaling::VkRule::Outcome::Runs;
+    // A Superior dispatch that fails below gives it up (SuperiorVk::GiveUp) and the frame goes on with the ordinary
+    // step, so it is not const.
+    bool superiorRuns =
+        SuperiorVk::Begin(cmdBuffer, cfg, device, physicalDevice, workWidth < width || workHeight < height, spatial,
+                          passes, workWidth, workHeight) == DlssNr::SuperiorScaling::VkRule::Outcome::Runs;
     // Another kind of picture and guides for the model from here (or back): its history starts over, as on D3D12.
+    if (superiorRuns != SuperiorVk::wasRunning)
     {
-        static bool superiorWasRunning = false;
-        if (superiorRuns != superiorWasRunning)
-        {
-            superiorWasRunning = superiorRuns;
-            g_vk.reset = true;
-        }
+        SuperiorVk::wasRunning = superiorRuns;
+        g_vk.reset = true;
     }
 
     // The model's input: the full proxy, or a downsampled copy of it when the working scale is below
@@ -2368,13 +2373,22 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             Transition(cmdBuffer, g_vk.proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             Transition(cmdBuffer, g_vk.proxySmall, VK_IMAGE_LAYOUT_GENERAL);
 
-            if (!(superiorRuns
-                      ? SuperiorVk::Area(cmdBuffer, g_vk.proxy, g_vk.proxySmall, workWidth, workHeight)
-                      : g_vk.pass->Dispatch(cmdBuffer, down, workWidth, workHeight, g_vk.proxy.view, VK_NULL_HANDLE,
-                                            VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.proxySmall.view, VK_NULL_HANDLE,
-                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)))
+            bool downsampled = false;
+            if (superiorRuns)
             {
-                Fail(superiorRuns ? "the Superior Scaling Area dispatch failed" : "the downsample dispatch failed");
+                downsampled = SuperiorVk::Area(cmdBuffer, g_vk.proxy, g_vk.proxySmall, workWidth, workHeight);
+                if (!downsampled)
+                {
+                    SuperiorVk::GiveUp("its Area downsample failed");
+                    superiorRuns = false;
+                }
+            }
+            if (!downsampled &&
+                !g_vk.pass->Dispatch(cmdBuffer, down, workWidth, workHeight, g_vk.proxy.view, VK_NULL_HANDLE,
+                                     VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.proxySmall.view, VK_NULL_HANDLE,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+            {
+                Fail("the downsample dispatch failed");
                 return;
             }
         }
@@ -2527,19 +2541,22 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                                   ? DlssNr::GuideExtent { renderWidth, renderHeight }
                                                   : DlssNr::GuideExtent { outputWidth, outputHeight };
 
-        if (!SuperiorVk::MatchGuides(cmdBuffer, device, depth, motion, guides, width, height, workWidth, workHeight,
-                                     depthInverted, gameMvX, gameMvY, reference))
+        if (SuperiorVk::MatchGuides(cmdBuffer, device, depth, motion, guides, width, height, workWidth, workHeight,
+                                    depthInverted, gameMvX, gameMvY, reference))
         {
-            Fail("the Superior Scaling guide dispatch failed");
-            return;
+            superiorMatched = true;
+            modelDepth = &SuperiorVk::depth.ngx;
+            mvX = DlssNr::SuperiorScaling::MotionScale(gameMvX, workWidth, reference.width, guides.motion.width);
+            mvY = DlssNr::SuperiorScaling::MotionScale(gameMvY, workHeight, reference.height, guides.motion.height);
+            superiorMvX = mvX;
+            superiorMvY = mvY;
         }
-
-        superiorMatched = true;
-        modelDepth = &SuperiorVk::depth.ngx;
-        mvX = DlssNr::SuperiorScaling::MotionScale(gameMvX, workWidth, reference.width, guides.motion.width);
-        mvY = DlssNr::SuperiorScaling::MotionScale(gameMvY, workHeight, reference.height, guides.motion.height);
-        superiorMvX = mvX;
-        superiorMvY = mvY;
+        else
+        {
+            // The model gets the ordinary guides this frame and the ordinary composition follows.
+            SuperiorVk::GiveUp("its guide dispatch failed");
+            superiorRuns = false;
+        }
     }
     // The guides the model gets are ours at the model's raster: Compress screen edges' packed ones or Superior's
     // matched ones.
@@ -3044,14 +3061,24 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         superiorFrame.depthInverted = depthInverted;
         superiorFrame.haveDepth = SuperiorVk::depth.Valid() && superiorMatched && SuperiorVk::depthIsReal;
     }
-    if (superiorRuns ? !SuperiorVk::Compose(cmdBuffer, cfg, resolve, workScale, width, height, *resolveProxy,
-                                            *resolveAnswer, g_vk.keep, liveExposureView, resolveTarget, superiorFrame)
-                     : !g_vk.pass->Dispatch(cmdBuffer, resolve, width, height, resolveProxy->view, resolveAnswer->view,
-                                            g_vk.keep.view, liveExposureView, resolveTarget, VK_NULL_HANDLE,
-                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, fadeDepth))
+    bool resolved = false;
+    if (superiorRuns)
     {
-        Fail(superiorRuns ? "the Superior Scaling resolve dispatch failed" : "the resolve dispatch failed");
+        resolved = SuperiorVk::Compose(cmdBuffer, cfg, resolve, workScale, width, height, *resolveProxy, *resolveAnswer,
+                                       g_vk.keep, liveExposureView, resolveTarget, superiorFrame);
+        if (!resolved)
+        {
+            // The ordinary Matched residual resolve below takes this frame (the target is only written by a resolve).
+            SuperiorVk::GiveUp("its composition failed");
+            superiorRuns = false;
+        }
+    }
+    if (!resolved &&
+        !g_vk.pass->Dispatch(cmdBuffer, resolve, width, height, resolveProxy->view, resolveAnswer->view, g_vk.keep.view,
+                             liveExposureView, resolveTarget, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, fadeDepth))
+    {
+        Fail("the resolve dispatch failed");
         return;
     }
 

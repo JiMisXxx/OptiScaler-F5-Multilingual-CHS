@@ -275,6 +275,17 @@ bool DlssNrSuperior_Vk::CreateDummy(VkCommandBuffer cmdList)
     return true;
 }
 
+bool DlssNrSuperior_Vk::Build(VkCommandBuffer InCmdList, const Blob* InBlobs, size_t InCount)
+{
+    if (!Ready() || InCmdList == VK_NULL_HANDLE || !CreateDummy(InCmdList))
+        return false;
+
+    bool ok = true;
+    for (size_t i = 0; i < InCount; ++i)
+        ok = (PipelineOf(InBlobs[i]) != VK_NULL_HANDLE || Optional(InBlobs[i])) && ok;
+    return ok && Ready();
+}
+
 VkPipeline DlssNrSuperior_Vk::PipelineOf(Blob blob)
 {
     const size_t index = (size_t) blob;
@@ -290,7 +301,7 @@ VkPipeline DlssNrSuperior_Vk::PipelineOf(Blob blob)
         if (!CreateComputePipeline(_device, _pipelineLayout, &_blobs[index], bytes) || _blobs[index] == VK_NULL_HANDLE)
         {
             _blobs[index] = VK_NULL_HANDLE;
-            _blobsFailed = true;
+            _blobsFailed = _blobsFailed || !Optional(blob);
             LOG_WARN("DLSS-NR Vulkan Superior Scaling: the {} pass could not be built", code.name);
         }
     }

@@ -49,6 +49,8 @@ OwnedImage depth;  // the game's depth matched to the model's raster, R32F
 OwnedImage motion; // the game's motion matched the same way, RGBA32F (the model reads xy)
 OwnedImage low;    // the 1/8-size low field, RGBA16F
 unsigned int madeFor[2] = {};
+unsigned int failedFor[2] = {}; // the raster whose images could not be made: not tried again until the raster changes
+bool wasRunning = false;        // Superior ran last frame (EvaluateAtSeamVk: the model's history starts over on a change)
 bool depthIsReal = false;   // the last MatchGuides matched the game's depth (not the depthless surface guides)
 float depthPrecision = 0.f; // of the game's depth format, as the last MatchGuides saw it (the private DLSS's ghost field)
 
@@ -60,6 +62,7 @@ std::mutex statusLock;
 std::string status;
 Rule::Outcome lastOutcome = Rule::Outcome::NotSelected;
 bool outcomeSaid = false;
+bool everSelected = false; // "not selected" is only worth a line after it was
 
 std::string privateStatus; // what the private DLSS says (DlssNr_SuperiorPrivate_Vk.inl), under statusLock
 
@@ -85,6 +88,16 @@ void DestroyImages()
     madeFor[0] = madeFor[1] = 0;
 }
 
+// Drains the device unless the frame has drained it already (the resize block does, before anything here runs).
+void Drain(VkDevice device)
+{
+    if (device != VK_NULL_HANDLE && g_vkDrainedAt != g_vk.frames)
+    {
+        vkDeviceWaitIdle(device);
+        g_vkDrainedAt = g_vk.frames;
+    }
+}
+
 // The images for a model raster. Earlier frames may still read the old ones, so the device is drained first; that happens
 // on the first frame, on a size change (the resize block has just drained for the same reason) and after an idle release.
 bool EnsureImages(VkDevice device, unsigned int workW, unsigned int workH)
@@ -92,8 +105,12 @@ bool EnsureImages(VkDevice device, unsigned int workW, unsigned int workH)
     if (depth.Valid() && motion.Valid() && low.Valid() && madeFor[0] == workW && madeFor[1] == workH)
         return true;
 
-    if (HoldsImages() && device != VK_NULL_HANDLE)
-        vkDeviceWaitIdle(device);
+    // Failed at this raster: not retried every frame, only at another one (or after Superior is selected again).
+    if (failedFor[0] == workW && failedFor[1] == workH)
+        return false;
+
+    if (HoldsImages())
+        Drain(device);
 
     DestroyImages();
     const bool ok = CreateImage(depth, workW, workH, VK_FORMAT_R32_SFLOAT, true) &&
@@ -103,6 +120,10 @@ bool EnsureImages(VkDevice device, unsigned int workW, unsigned int workH)
     if (!ok)
     {
         DestroyImages();
+        failedFor[0] = workW;
+        failedFor[1] = workH;
+        LOG_WARN("DLSS-NR Vulkan Superior Scaling: its images could not be made at {}x{}; Matched residual is used at "
+                 "this size", workW, workH);
         return false;
     }
 
@@ -111,14 +132,31 @@ bool EnsureImages(VkDevice device, unsigned int workW, unsigned int workH)
     return true;
 }
 
-// The pass, made on first use; not retried once it failed.
-bool PassReady(VkDevice device, VkPhysicalDevice physicalDevice)
+// What the No DLSS composition dispatches (the private DLSS builds its own set when it is made).
+constexpr DlssNrSuperior_Vk::Blob kBaseBlobs[] = {
+    DlssNrSuperior_Vk::Blob::Area,
+    DlssNrSuperior_Vk::Blob::SurfaceGuides,
+    DlssNrSuperior_Vk::Blob::JointGuides,
+    DlssNrSuperior_Vk::Blob::JointMinifiedGuides,
+    DlssNrSuperior_Vk::Blob::JointGuidesQuantized,
+    DlssNrSuperior_Vk::Blob::JointMinifiedGuidesQuantized,
+    DlssNrSuperior_Vk::Blob::LowRaw,
+    DlssNrSuperior_Vk::Blob::ResolveGuidedRaw,
+};
+
+// The pass and all its pipelines, made at the first frame it is wanted; a build that fails (or a dispatch that fails
+// later, GiveUp) gives it up until Superior Scaling is selected again or NR is retried, so the frame runs the ordinary
+// Matched residual step instead of Neural Rendering stopping.
+bool PassReady(VkCommandBuffer cmd, VkDevice device, VkPhysicalDevice physicalDevice)
 {
-    if (!pass && !passFailed)
+    if (passFailed)
+        return false;
+
+    if (!pass)
     {
         pass = std::make_unique<DlssNrSuperior_Vk>("Superior Scaling", device, physicalDevice);
 
-        if (!pass->Ready())
+        if (!pass->Ready() || !pass->Build(cmd, kBaseBlobs, std::size(kBaseBlobs)))
         {
             pass.reset();
             passFailed = true;
@@ -127,6 +165,17 @@ bool PassReady(VkDevice device, VkPhysicalDevice physicalDevice)
     }
 
     return pass != nullptr && pass->Ready();
+}
+
+// A Superior dispatch failed while running: the frame falls back to the ordinary step (the caller), the rest of the
+// selection too, and the model's history starts over. Said once per selection.
+void GiveUp(const char* reason)
+{
+    if (!passFailed)
+        LOG_WARN("DLSS-NR Vulkan Superior Scaling: {}; Matched residual is used until Superior Scaling is selected again",
+                 reason);
+    passFailed = true;
+    g_vk.reset = true;
 }
 
 // The 310.8 runtime has one main network only, which changes the band gain tables (DlssNr_SuperiorScaling.h). Read from the
@@ -168,8 +217,8 @@ float DepthPrecision(VkFormat format)
 }
 
 // Decides this frame (and publishes and logs what changed). reduced: the model works on fewer pixels than the frame.
-Rule::Outcome Begin(const Config& cfg, VkDevice device, VkPhysicalDevice physicalDevice, bool reduced, bool packed,
-                    unsigned int passes, unsigned int workW, unsigned int workH)
+Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkPhysicalDevice physicalDevice,
+                    bool reduced, bool packed, unsigned int passes, unsigned int workW, unsigned int workH)
 {
     Rule::Frame frame;
     frame.selected = DlssNr::SuperiorScaling::Enabled(cfg);
@@ -195,12 +244,18 @@ Rule::Outcome Begin(const Config& cfg, VkDevice device, VkPhysicalDevice physica
     {
         static bool wasSelected = false;
         if (frame.selected && !wasSelected)
+        {
+            passFailed = false;
+            failedFor[0] = failedFor[1] = 0;
             Private::Reselected(device);
+        }
         wasSelected = frame.selected;
     }
 
     // Only a run that could go ahead builds anything; the images are the last thing that can fail.
-    if (outcome == Rule::Outcome::Runs && (!PassReady(device, physicalDevice) || !EnsureImages(device, workW, workH)))
+    if (outcome == Rule::Outcome::Runs && (!PassReady(cmd, device, physicalDevice) || !EnsureImages(device, workW, workH)))
+        outcome = Rule::Outcome::PassFailed;
+    if (frame.selected && passFailed)
         outcome = Rule::Outcome::PassFailed;
 
     Publish(Rule::Describe(outcome));
@@ -214,14 +269,17 @@ Rule::Outcome Begin(const Config& cfg, VkDevice device, VkPhysicalDevice physica
             LOG_INFO("DLSS-NR Vulkan Superior Scaling: running, the model works on {}x{}", workW, workH);
         else if (outcome != Rule::Outcome::NotSelected)
             LOG_INFO("DLSS-NR Vulkan Superior Scaling: {}", Rule::Describe(outcome));
-        else
+        else if (everSelected)
             LOG_INFO("DLSS-NR Vulkan Superior Scaling: not selected");
     }
+    everSelected = everSelected || outcome != Rule::Outcome::NotSelected;
 
     const auto now = std::chrono::steady_clock::now();
 
     if (outcome == Rule::Outcome::Runs)
         lastRan = now;
+    else if (lastRan == std::chrono::steady_clock::time_point {} && (pass || HoldsImages()) && frame.selected)
+        lastRan = now; // built but not run (a fallback right away): the idle clock still starts, so it is let go
     else if ((pass || HoldsImages() || Private::Holds()) && lastRan != std::chrono::steady_clock::time_point {} &&
              now - lastRan >= kIdleRelease && device != VK_NULL_HANDLE)
     {
@@ -380,7 +438,14 @@ bool Finish(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& resol
                            : (resolve.Passthrough != 0 ? B::ResolveSdr : B::ResolveHdr);
     }
 
-    return pass->Dispatch(cmd, blob, &resolve, sizeof(resolve), (width + 7) / 8, (height + 7) / 8, reads, target);
+    if (pass->Dispatch(cmd, blob, &resolve, sizeof(resolve), (width + 7) / 8, (height + 7) / 8, reads, target))
+        return true;
+
+    // A specialization that would not build: the generic residual resolve (D3D12 does the same).
+    if (DlssNrSuperior_Vk::Optional(blob))
+        return pass->Dispatch(cmd, resolve.Passthrough != 0 ? B::ResolveSdr : B::ResolveHdr, &resolve, sizeof(resolve),
+                              (width + 7) / 8, (height + 7) / 8, reads, target);
+    return false;
 }
 
 // Shutdown. deviceAlive: the device is idle and everything is destroyed; otherwise it went with the device and took every
@@ -402,6 +467,9 @@ void Release(bool deviceAlive)
     }
 
     passFailed = false;
+    failedFor[0] = failedFor[1] = 0;
+    wasRunning = false;
+    everSelected = false;
     lastRan = {};
     outcomeSaid = false;
     Publish("");

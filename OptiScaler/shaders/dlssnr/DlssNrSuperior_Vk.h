@@ -79,6 +79,14 @@ class DlssNrSuperior_Vk : public Shader_Vk
 
     bool Ready() const { return _init && !_blobsFailed; }
 
+    // Builds the pipelines of `blobs` and the placeholder image now, so a build that fails is known before any frame
+    // depends on them (the pass is then given up for the selection, not a frame's dispatch). False: one would not build.
+    bool Build(VkCommandBuffer InCmdList, const Blob* InBlobs, size_t InCount);
+
+    // The colour-mapping specializations of the residual resolve are an optimization of the generic resolve: one that
+    // would not build is skipped (the generic one runs) and does not give the pass up.
+    static constexpr bool Optional(Blob blob) { return blob >= Blob::NormalSdr && blob <= Blob::NormalHdr6; }
+
     // Whether this device can run the low field pass (its tile needs 29,376 bytes of shared memory).
     static bool DeviceCanRun(VkPhysicalDevice physicalDevice);
 
