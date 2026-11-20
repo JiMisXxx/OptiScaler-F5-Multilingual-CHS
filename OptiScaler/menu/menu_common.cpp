@@ -5680,6 +5680,58 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
     }
 
+    // F5Low on a native Vulkan swapchain has no XeFG card (that one needs a D3D12 swapchain): its switch and multiplier
+    if (state.activeFgOutput == FGOutput::F5Low && state.activeFgInput != FGInput::NoFG &&
+        state.currentVkFG != nullptr && state.currentVkFG->HasSwapchain())
+    {
+        ImGui::SeparatorText("Frame Generation (F5Low)");
+
+        const bool followsGame = config->FGFollowsGame();
+        const int maxCount = state.currentVkFG->GetMaxInterpolationCount();
+
+        ImGui::BeginDisabled(followsGame);
+        bool fgActive = config->IsFGEnabled();
+        if (ImGui::Checkbox("Active##f5lowvk", &fgActive))
+        {
+            config->FGEnabled = fgActive;
+
+            if (config->IsFGEnabled())
+                state.fgChanged = true;
+        }
+        ImGui::EndDisabled();
+        ShowHelpMarker(followsGame ? "Follows the game's DLSS FG setting" : "Turns frame generation on or off");
+
+        if (maxCount > 1)
+        {
+            ImGui::SameLine(0.0f, 16.0f);
+            ImGui::BeginDisabled(followsGame);
+
+            const int chosen =
+                std::clamp(config->FGInterpolationCount(config->FGXeFGInterpolationCount.value_or_default(), maxCount),
+                           1, maxCount);
+
+            ImGui::PushItemWidth(95.0f * menuResScale);
+            if (ImGui::BeginCombo("Multiplier##f5lowvk", (std::to_string(chosen + 1) + "X").c_str()))
+            {
+                for (int i = 1; i <= maxCount; i++)
+                {
+                    if (ImGui::Selectable((std::to_string(i + 1) + "X").c_str(), chosen == i))
+                        config->FGXeFGInterpolationCount = i;
+                }
+
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+
+            ShowHelpMarker(
+                "Frames shown per game frame (ini: [XeFG] InterpolationCount).\n"
+                "A lower value applies at once. A higher one needs spare swapchain images, which the game's\n"
+                "swapchain gets when it is made: after a raise, change the resolution or window mode once\n"
+                "(or restart) so the game makes a new swapchain.");
+        }
+    }
+
     // DLSSG controls
     if (state.activeFgOutput == FGOutput::DLSSG && state.activeFgInput != FGInput::NoFG &&
         state.FGSwapchainExists() && StreamlineProxy::LoadStreamline() && fgOutput)
