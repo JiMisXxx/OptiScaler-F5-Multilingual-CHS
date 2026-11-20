@@ -4590,6 +4590,13 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
         ImGui::TextDisabled("%s", status.text.c_str());
         break;
     }
+
+    // F5Low on a native Vulkan swapchain says why it is not generating
+    if (auto* vkFg = state.currentVkFG; vkFg != nullptr && state.activeFgOutput == FGOutput::F5Low)
+    {
+        if (const auto line = vkFg->StatusLine(); !line.empty())
+            ImGui::TextColored(toneMapColor({ 1.0f, 0.75f, 0.25f, 1.0f }), "%s", line.c_str());
+    }
 }
 
 // DLSS-G frame generation preset ([DLSSG] Preset). DLSS-G reads it from the driver profile once when it starts;

@@ -2,21 +2,24 @@
 #include "SysUtils.h"
 #include <framegen/IFGFeature_Vk.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 
-// FG Output F5Low (XeFG Tensor) on a native Vulkan game's own swapchain: no bridge, no D3D12 swapchain. The game keeps the
-// driver's VkSwapchain (made with spare images and copy usage); on each present the game's picture, motion and depth are
-// copied into images shared with a private D3D12 device, f5low.dll's "frames only" API (f5low_frames.h) makes the
-// generated frames there, and they are copied back into spare swapchain images and presented before the game's own
-// image. Everything runs on the game's present queue, no extra queue is reserved. Pacing is a CPU wait on the game's
-// present thread (version 1).
+// FG Output F5Low (XeFG Tensor) on a native Vulkan game's own swapchain: no bridge, no D3D12 swapchain. The game keeps
+// the driver's VkSwapchain (made with spare images and copy usage); on each present the game's picture, motion and
+// depth are copied into images shared with a private D3D12 device, f5low.dll's "frames only" API (f5low_frames.h) makes
+// the generated frames there, and they are copied back into spare swapchain images and presented before the game's own
+// image. The copy in and f5low's call run on the game thread (game queue); the presents run on a worker thread on one
+// extra present-capable queue (reserved in the constructor), paced by the measured game frame interval. Without that
+// queue the presents and their pacing run on the game thread as before.
 class F5Low_Vk : public virtual IFGFeature_Vk
 {
   public:
     struct Impl;
+    struct Job;
 
   private:
     std::unique_ptr<Impl> _impl;
@@ -27,7 +30,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     std::string _reason;
     mutable std::mutex _reasonMutex;
 
-    uint32_t _headroom = 0;                // swapchain images beyond the game's own
+    uint32_t _headroom = 0; // swapchain images beyond the game's own
     bool _hdr10 = false;
     VkColorSpaceKHR _colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 
@@ -44,19 +47,37 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     double _lastEntryMs = 0.0;
     uint64_t _generatedFrames = 0;
     int _failures = 0;
+    int _wanted = 1;     // generated frames per game frame the multiplier asks for
+    int _countLimit = 5; // lowered when f5low refuses a larger count
+    mutable std::string _nameCache;
 
     void SetReason(const std::string& reason);
     void UpdateCount();
 
-    // Makes (or remakes after a size or format change) what one frame needs: the D3D12 side, the shared images, f5low's
-    // context. False with the reason set when it cannot.
     bool Prepare(const Pending& pending, uint32_t count, bool& useHudless);
     bool EnsureSlots();
-    void WaitIdle();
 
-    // Copies the frame's inputs over, has f5low make the frames, presents them one by one and points `finalInfo` at the
-    // game's own present. False when nothing was submitted (the game's present then goes out as it came).
-    bool Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending& pending, VkPresentInfoKHR& finalInfo);
+    // Our own GPU work and the worker, so a size change or a teardown can go on: the worker drained, every fence of
+    // ours waited
+    void WaitOwnWork();
+    bool DrainWorker(DWORD timeoutMs);
+    void StartWorker();
+    void StopWorker(bool join);
+    void WorkerLoop();
+
+    // The generated frames of a job: acquire, copy, present, spaced. On the worker, or on the game thread without a
+    // present queue. Returns after the last generated frame was presented.
+    void RunGenerated(const Job& job, bool paced);
+    bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);
+    VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info);
+    VkResult DirectPresent(VkQueue queue, const VkPresentInfoKHR* info);
+
+    enum class Outcome
+    {
+        Direct, // the real present goes out on the game thread (finalInfo)
+        Queued  // the worker presents everything
+    };
+    Outcome Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending& pending, VkPresentInfoKHR& finalInfo);
     void ReleaseAll(const char* why);
 
   public:

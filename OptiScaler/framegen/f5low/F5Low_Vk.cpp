@@ -13,8 +13,11 @@
 
 #include <magic_enum.hpp>
 
-#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 using namespace F5LowVk;
@@ -23,7 +26,7 @@ namespace
 {
 constexpr VkImageUsageFlags kCopyUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 constexpr uint64_t kWaitFenceNs = 1'000'000'000ull;
-constexpr uint64_t kAcquireNs = 100'000'000ull;
+constexpr double kAcquireMs = 100.0;
 
 // The driver's swapchain calls, past our hooks (a hook would see them as the game's)
 template <typename PFN> PFN SwapchainFunction(const char* name, PFN fallback)
@@ -37,8 +40,8 @@ template <typename PFN> PFN SwapchainFunction(const char* name, PFN fallback)
 // A CPU wait until a time (Util::MillisecondsNow's clock): the timer for most of it, a spin for the rest
 void WaitUntil(double targetMs)
 {
-    static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                                 TIMER_ALL_ACCESS);
+    static HANDLE timer =
+        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
     for (;;)
     {
@@ -113,7 +116,7 @@ bool UsableLayout(VkImageLayout layout)
     return layout != VK_IMAGE_LAYOUT_UNDEFINED && layout != VK_IMAGE_LAYOUT_PREINITIALIZED;
 }
 
-// Motion vector formats that cross as they are (a copy cannot convert)
+// Motion vector formats that cross as they are (a copy cannot convert); f5low converts the float ones itself
 bool MotionFormat(VkFormat format, DXGI_FORMAT* dxgi)
 {
     switch (format)
@@ -123,6 +126,9 @@ bool MotionFormat(VkFormat format, DXGI_FORMAT* dxgi)
         return true;
     case VK_FORMAT_R32G32_SFLOAT:
         *dxgi = DXGI_FORMAT_R32G32_FLOAT;
+        return true;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+        *dxgi = DXGI_FORMAT_R16G16B16A16_FLOAT;
         return true;
     default:
         return false;
@@ -150,14 +156,20 @@ bool WaitFence12(ID3D12Fence* fence, uint64_t value, DWORD timeoutMs)
     CloseHandle(event);
     return done;
 }
-
-// A fence value nobody will signal (f5low refused the call): the GPU waits on it must not hang
-void SignalIfBehind(ID3D12Fence* fence, uint64_t value)
-{
-    if (fence != nullptr && fence->GetCompletedValue() < value)
-        fence->Signal(value);
-}
 } // namespace
+
+// One game frame's generated frames, for whoever presents them
+struct F5Low_Vk::Job
+{
+    uint32_t slot = 0;
+    uint32_t generated = 0;
+    uint64_t doneValue = 0;
+    uint32_t realIndex = 0;
+    VkSemaphore realWait = VK_NULL_HANDLE;
+    double intervalMs = 0.0;
+    bool hasPresentId = false;
+    uint64_t presentId = 0;
+};
 
 struct F5Low_Vk::Impl
 {
@@ -176,18 +188,19 @@ struct F5Low_Vk::Impl
     uint32_t contextWidth = 0, contextHeight = 0;
     bool d3dReady = false;
 
-    // The private D3D12 device (the frame source's) and what the depth needs on it
+    // The private D3D12 device (the frame source's) and the queue and list of the depth stage
     native::VkInterop interop;
     ComPtr<ID3D12Device> device12;
     ComPtr<ID3D12CommandQueue> queue12;
     ComPtr<ID3D12CommandAllocator> allocators[kSlots];
-    uint64_t allocatorValue[kSlots] {};
     ComPtr<ID3D12GraphicsCommandList> list;
 
-    // ready: the host's copies done (Vulkan signals it, the depth stage on D3D12 after it); consumed and done are
-    // f5low's. One fence each so every one only ever goes up.
+    // ready: Vulkan signals it when the copies in are done. depthDone: the D3D12 depth stage's own fence (one producer
+    // each). consumed and done are f5low's. Every value only ever goes up.
     native::SharedFenceVk ready, consumed, done;
-    uint64_t consumedPrevious = 0;
+    ComPtr<ID3D12Fence> depthDone;
+    FenceCounter depthCounter;
+    uint64_t allocatorValue[kSlots] {};
 
     native::SharedImageVk color, hudless, motion, depthImage;
     native::SharedImageVk out[kMaxGenerated];
@@ -201,7 +214,8 @@ struct F5Low_Vk::Impl
     // The swapchain's images, in the driver's order
     std::vector<VkImage> images;
 
-    // Per frame in flight
+    // Per frame in flight. The worker (or the game thread without one) uses the copy out parts of a slot while it is
+    // busy; the game thread the rest.
     struct Slot
     {
         VkCommandBuffer commands[kBatches] {};
@@ -211,21 +225,42 @@ struct F5Low_Vk::Impl
         VkSemaphore acquired[kMaxGenerated] {};
         VkSemaphore outDone[kMaxGenerated] {};
     };
-    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPool poolIn = VK_NULL_HANDLE;  // on the game's queue family
+    VkCommandPool poolOut = VK_NULL_HANDLE; // on the present queue's family
     Slot slots[kSlots];
     uint32_t cursor = 0;
+    int lastJobSlot = -1;
     bool slotsReady = false;
     bool deviceGone = false;
     bool warnedQueue = false;
     bool warnedNotReady = false;
+    bool warnedPNext = false;
+
+    // The present queue: our extra one when the device had a free queue, else the game's
+    VkQueue outQueue = VK_NULL_HANDLE;
+    uint32_t outFamily = UINT32_MAX;
+    bool ownQueue = false;
+
+    // The worker thread and its jobs. The swapchain is externally synchronised: swapchainMutex is held around every
+    // acquire and present on it (the game's too), never across a wait.
+    std::mutex swapchainMutex;
+    std::mutex jobMutex;
+    std::condition_variable jobCv;
+    std::deque<Job> jobs;
+    bool busy = false;
+    bool stop = false;
+    bool slotBusy[kSlots] {};
+    std::thread worker;
+    std::atomic<int> lastResult { VK_SUCCESS };
 
     ~Impl() = default;
 };
 
 F5Low_Vk::F5Low_Vk() : IFGFeature_Vk(), IFGFeature(), _impl(std::make_unique<Impl>())
 {
-    _maxInterpolationCount =
-        F5Low::MaxInterpolations(F5LOW_FRAMES_MAX_GENERATED, Config::Instance()->FGXeFGMaxInterpolations.value_or_default());
+    _maxInterpolationCount = F5Low::MaxInterpolations(F5LOW_FRAMES_MAX_GENERATED,
+                                                      Config::Instance()->FGXeFGMaxInterpolations.value_or_default());
+    _generationOff = true; // until a frame really was generated
     UpdateCount();
 
     if (F5Low::LatchedGenerator() != F5Low::Generator::XefgTensor)
@@ -261,6 +296,11 @@ F5Low_Vk::F5Low_Vk() : IFGFeature_Vk(), IFGFeature(), _impl(std::make_unique<Imp
         return;
     }
 
+    // The presents of the generated frames run on a queue of their own (PrepareDevice reserves it with the device)
+    _extraQueues.resize(1);
+    _extraQueues[0].flags = VK_QUEUE_GRAPHICS_BIT;
+    _extraQueues[0].present = true;
+
     LOG_INFO("F5Low (Vulkan): frames-only API found, up to {} generated frames per game frame", _maxInterpolationCount);
 }
 
@@ -275,9 +315,8 @@ feature_version F5Low_Vk::Version()
 
 const char* F5Low_Vk::Name()
 {
-    static std::string name;
-    name = _framesToInterpolate > 0 ? "F5Low " + std::to_string(_framesToInterpolate + 1) + "x" : "F5Low";
-    return name.c_str();
+    _nameCache = _framesToInterpolate > 0 ? "F5Low " + std::to_string(_framesToInterpolate + 1) + "x" : "F5Low";
+    return _nameCache.c_str();
 }
 
 void F5Low_Vk::SetReason(const std::string& reason)
@@ -305,14 +344,19 @@ std::string F5Low_Vk::StatusLine() const
 
 void F5Low_Vk::UpdateCount()
 {
-    const int target = Config::Instance()->FGInterpolationCount(Config::Instance()->FGXeFGInterpolationCount.value_or_default(),
-                                                                 _maxInterpolationCount);
+    const int target = Config::Instance()->FGInterpolationCount(
+        Config::Instance()->FGXeFGInterpolationCount.value_or_default(), _maxInterpolationCount);
 
-    if (target != _framesToInterpolate && target >= 1)
+    if (target >= 1 && target != _wanted)
     {
-        LOG_INFO("F5Low (Vulkan): interpolation count {} -> {}", _framesToInterpolate, target);
-        _framesToInterpolate = target;
+        LOG_INFO("F5Low (Vulkan): interpolation count {} -> {}", _wanted, target);
+        _wanted = target;
     }
+
+    // What the cap and the status read follows what really happens (Generate sets it); until a frame was generated it
+    // is the asked count
+    if (_framesToInterpolate < 0)
+        _framesToInterpolate = _wanted;
 }
 
 void F5Low_Vk::Activate()
@@ -331,7 +375,6 @@ void F5Low_Vk::Deactivate()
         LOG_DEBUG("");
 
     _isActive = false;
-    _pending = {};
 }
 
 void F5Low_Vk::EvaluateState(FG_Constants& fgConstants)
@@ -355,6 +398,166 @@ void F5Low_Vk::EvaluateState(FG_Constants& fgConstants)
 
     state.scChanged = false;
 }
+
+// ---- the worker and the swapchain lock ----
+
+bool F5Low_Vk::DrainWorker(DWORD timeoutMs)
+{
+    auto& s = *_impl;
+
+    if (!s.worker.joinable())
+        return true;
+
+    std::unique_lock lock(s.jobMutex);
+    return s.jobCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return s.jobs.empty() && !s.busy; });
+}
+
+void F5Low_Vk::StartWorker()
+{
+    auto& s = *_impl;
+
+    if (!s.ownQueue || s.worker.joinable())
+        return;
+
+    {
+        std::lock_guard lock(s.jobMutex);
+        s.stop = false;
+    }
+
+    s.worker = std::thread([this] { WorkerLoop(); });
+}
+
+void F5Low_Vk::StopWorker(bool join)
+{
+    auto& s = *_impl;
+
+    if (!s.worker.joinable())
+        return;
+
+    if (join)
+        DrainWorker(2000);
+
+    {
+        std::lock_guard lock(s.jobMutex);
+        s.stop = true;
+        s.jobs.clear();
+    }
+
+    s.jobCv.notify_all();
+
+    // At process exit nothing is joined (the loader lock is held)
+    if (join)
+        s.worker.join();
+    else
+        s.worker.detach();
+
+    std::lock_guard lock(s.jobMutex);
+    s.busy = false;
+
+    for (auto& busy : s.slotBusy)
+        busy = false;
+}
+
+void F5Low_Vk::WorkerLoop()
+{
+    auto& s = *_impl;
+
+    for (;;)
+    {
+        Job job;
+
+        {
+            std::unique_lock lock(s.jobMutex);
+            s.jobCv.wait(lock, [&] { return s.stop || !s.jobs.empty(); });
+
+            if (s.stop)
+                return;
+
+            job = s.jobs.front();
+            s.jobs.pop_front();
+            s.busy = true;
+        }
+
+        RunGenerated(job, true);
+
+        // The game's own image after the generated ones, with the game's present id
+        VkPresentIdKHR presentId { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
+        presentId.swapchainCount = 1;
+        presentId.pPresentIds = &job.presentId;
+
+        VkPresentInfoKHR real { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        real.pNext = job.hasPresentId ? &presentId : nullptr;
+        real.waitSemaphoreCount = 1;
+        real.pWaitSemaphores = &job.realWait;
+        real.swapchainCount = 1;
+        real.pSwapchains = &_swapchain;
+        real.pImageIndices = &job.realIndex;
+
+        s.lastResult = PresentOn(s.outQueue, real);
+
+        {
+            std::lock_guard lock(s.jobMutex);
+            s.busy = false;
+            s.slotBusy[job.slot] = false;
+        }
+
+        s.jobCv.notify_all();
+    }
+}
+
+VkResult F5Low_Vk::PresentOn(VkQueue queue, const VkPresentInfoKHR& info)
+{
+    const auto presentFn = SwapchainFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR", vkQueuePresentKHR);
+    std::lock_guard lock(_impl->swapchainMutex);
+    return presentFn(queue, &info);
+}
+
+// The real present on the game's thread: after the worker's jobs, so the order of the images holds
+VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info)
+{
+    DrainWorker(2000);
+    return PresentOn(queue, *info);
+}
+
+// The swapchain is externally synchronised and the worker presents to it while the game acquires: an acquire never
+// waits inside the lock (a game's blocking acquire would hold it while the images only come back through the worker's
+// presents), it polls.
+VkResult F5Low_Vk::AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
+                                    VkFence fence, uint32_t* pImageIndex)
+{
+    const auto acquireFn = SwapchainFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR", vkAcquireNextImageKHR);
+    const double startMs = Util::MillisecondsNow();
+
+    for (;;)
+    {
+        VkResult result;
+
+        {
+            std::lock_guard lock(_impl->swapchainMutex);
+            result = acquireFn(device, swapchain, 0, semaphore, fence, pImageIndex);
+        }
+
+        if (result != VK_NOT_READY && result != VK_TIMEOUT)
+            return result;
+
+        if (timeout == 0)
+            return VK_NOT_READY;
+
+        if (timeout != UINT64_MAX && (Util::MillisecondsNow() - startMs) * 1e6 >= static_cast<double>(timeout))
+            return VK_TIMEOUT;
+
+        std::this_thread::sleep_for(std::chrono::microseconds(300));
+    }
+}
+
+bool F5Low_Vk::AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs)
+{
+    const auto result =
+        AcquireNextImage(_device, _swapchain, static_cast<uint64_t>(timeoutMs * 1e6), semaphore, VK_NULL_HANDLE, index);
+    return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
+}
+
+// ---- the swapchain ----
 
 bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain)
@@ -390,13 +593,17 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     const auto imagesFn =
         SwapchainFunction<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR", vkGetSwapchainImagesKHR);
 
-    // Spare images for the frames we generate. The game's pNext chain (the latency mode among it) stays as it came.
+    UpdateCount();
+
+    // Spare images for the frames we generate (one per generated frame of the multiplier). The game's pNext chain (the
+    // latency mode among it) stays as it came.
     VkSwapchainCreateInfoKHR info = *pCreateInfo;
-    info.minImageCount = RequestedMinImageCount(pCreateInfo->minImageCount, static_cast<uint32_t>(_maxInterpolationCount),
-                                                caps.maxImageCount);
+    info.minImageCount =
+        RequestedMinImageCount(pCreateInfo->minImageCount, static_cast<uint32_t>(_wanted), caps.maxImageCount);
 
     auto result = createFn(device, &info, pAllocator, pSwapchain);
 
+    // The old swapchain stays the one to replace: a failed create still retires it, and it may be passed again
     if (result != VK_SUCCESS && info.minImageCount != pCreateInfo->minImageCount)
     {
         LOG_WARN("F5Low (Vulkan): {} swapchain images were refused ({}), trying the game's own count",
@@ -412,7 +619,12 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     }
 
     auto& s = *_impl;
+
+    // The worker is done with the old swapchain's images before they are replaced
+    DrainWorker(2000);
+
     s.deviceGone = false;
+    s.lastResult = VK_SUCCESS;
     uint32_t count = 0;
     imagesFn(device, *pSwapchain, &count, nullptr);
     s.images.assign(count, VK_NULL_HANDLE);
@@ -430,7 +642,12 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _failures = 0;
     _intervalMs = 0.0;
     _lastEntryMs = 0.0;
-    _pending = {};
+    _generationOff = true;
+
+    {
+        OwnedLockGuard lock(Mutex, 3);
+        _pending = {};
+    }
 
     if (_headroom == 0)
         SetReason("The swapchain has no spare images to generate into");
@@ -452,12 +669,21 @@ bool F5Low_Vk::DestroySwapchain(VkDevice device, VkSwapchainKHR swapchain, const
     Deactivate();
 
     // Our presents wait on our semaphores and show its images
-    if (device == _device && !_impl->deviceGone)
-        vkDeviceWaitIdle(device);
+    auto& s = *_impl;
+    StopWorker(true);
 
-    _impl->images.clear();
+    if (device == _device && !s.deviceGone)
+    {
+        WaitOwnWork();
+
+        if (s.outQueue != VK_NULL_HANDLE && s.outQueue != _gameQueue)
+            vkQueueWaitIdle(s.outQueue);
+    }
+
+    s.images.clear();
     _swapchain = VK_NULL_HANDLE;
     _headroom = 0;
+    _generationOff = true;
     return false;
 }
 
@@ -466,13 +692,6 @@ VkResult F5Low_Vk::GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain,
 {
     return SwapchainFunction<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR", vkGetSwapchainImagesKHR)(
         device, swapchain, pSwapchainImageCount, pSwapchainImages);
-}
-
-VkResult F5Low_Vk::AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
-                                    VkFence fence, uint32_t* pImageIndex)
-{
-    return SwapchainFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR", vkAcquireNextImageKHR)(
-        device, swapchain, timeout, semaphore, fence, pImageIndex);
 }
 
 void F5Low_Vk::SetHdrMetadata(VkDevice device, VkSwapchainKHR swapchain, const VkHdrMetadataEXT* pMetadata)
@@ -484,6 +703,8 @@ void F5Low_Vk::SetHdrMetadata(VkDevice device, VkSwapchainKHR swapchain, const V
     if (setHdr != nullptr)
         setHdr(device, 1, &swapchain, pMetadata);
 }
+
+// ---- per frame ----
 
 bool F5Low_Vk::Present()
 {
@@ -530,10 +751,8 @@ bool F5Low_Vk::Present()
 
 VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
-    const auto presentFn = SwapchainFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR", vkQueuePresentKHR);
-
-    // The time between two game presents, our own waits in it included: with them in, the output settles at the
-    // same cadence, the game's thread is just held less
+    // The time between two game presents. The game thread is not held by our pacing (the worker paces), so this is the
+    // game's own cadence.
     const double entryMs = Util::MillisecondsNow();
 
     if (_lastEntryMs > 0.0)
@@ -541,13 +760,20 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
 
     _lastEntryMs = entryMs;
 
-    Pending pending = std::move(_pending);
-    _pending = {};
+    Pending pending;
 
-    if (!pending.valid || !_blocked.empty() || pPresentInfo->swapchainCount != 1 ||
-        pPresentInfo->pSwapchains[0] != _swapchain || _failures >= 3)
     {
-        return presentFn(queue, pPresentInfo);
+        OwnedLockGuard lock(Mutex, 3);
+        pending = std::move(_pending);
+        _pending = {};
+    }
+
+    // No spare image: nothing to copy, nothing to ask of f5low
+    if (!pending.valid || !_blocked.empty() || pPresentInfo->swapchainCount != 1 ||
+        pPresentInfo->pSwapchains[0] != _swapchain || _failures >= 3 || _headroom == 0)
+    {
+        _generationOff = true;
+        return DirectPresent(queue, pPresentInfo);
     }
 
     if (queue != _gameQueue)
@@ -558,24 +784,46 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
             SetReason("The game presents from a different queue than its first graphics queue");
         }
 
-        return presentFn(queue, pPresentInfo);
+        _generationOff = true;
+        return DirectPresent(queue, pPresentInfo);
     }
 
     VkPresentInfoKHR finalInfo = *pPresentInfo;
-    Generate(queue, pPresentInfo, pending, finalInfo);
-    return presentFn(queue, &finalInfo);
+
+    if (Generate(queue, pPresentInfo, pending, finalInfo) == Outcome::Queued)
+        return static_cast<VkResult>(_impl->lastResult.load());
+
+    return DirectPresent(queue, &finalInfo);
 }
 
-void F5Low_Vk::WaitIdle()
+void F5Low_Vk::WaitOwnWork()
 {
     auto& s = *_impl;
 
-    if (_device != VK_NULL_HANDLE && !s.deviceGone)
-        vkDeviceWaitIdle(_device);
+    DrainWorker(2000);
 
-    WaitFence12(s.consumed.Fence12(), s.consumedPrevious, 5000);
+    if (_device != VK_NULL_HANDLE && !s.deviceGone)
+    {
+        for (auto& slot : s.slots)
+        {
+            VkFence waits[kBatches];
+            uint32_t count = 0;
+
+            for (uint32_t i = 0; i < kBatches; i++)
+            {
+                if (slot.used[i] && slot.fences[i] != VK_NULL_HANDLE)
+                    waits[count++] = slot.fences[i];
+            }
+
+            if (count > 0)
+                vkWaitForFences(_device, count, waits, VK_TRUE, kWaitFenceNs);
+        }
+    }
+
+    WaitFence12(s.consumed.Fence12(), s.consumed.Value(), 5000);
     WaitFence12(s.done.Fence12(), s.done.Value(), 5000);
     WaitFence12(s.ready.Fence12(), s.ready.Value(), 5000);
+    WaitFence12(s.depthDone.Get(), s.depthCounter.issued, 5000);
 }
 
 bool F5Low_Vk::EnsureSlots()
@@ -585,27 +833,40 @@ bool F5Low_Vk::EnsureSlots()
     if (s.slotsReady)
         return true;
 
+    // The present queue: the extra one PrepareDevice reserved, else the game's (the presents then run on the game
+    // thread)
+    VkQueue extra = _extraQueues.empty() ? VK_NULL_HANDLE : _extraQueues[0].queue;
+    s.ownQueue = extra != VK_NULL_HANDLE;
+    s.outQueue = s.ownQueue ? extra : _gameQueue;
+    s.outFamily = s.ownQueue ? _extraQueues[0].family : _gameQueueFamily;
+
+    if (s.ownQueue)
+        LOG_INFO("F5Low (Vulkan): presents on a worker thread, queue family {} index {}", _extraQueues[0].family,
+                 _extraQueues[0].index);
+    else
+        LOG_WARN("F5Low (Vulkan): no extra queue could be reserved, the presents and their pacing run on the game "
+                 "thread");
+
     VkCommandPoolCreateInfo poolInfo { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = _gameQueueFamily;
-
-    if (vkCreateCommandPool(_device, &poolInfo, nullptr, &s.pool) != VK_SUCCESS)
-    {
-        SetReason("Could not make a command pool on the game's queue family");
-        return false;
-    }
+    bool ok = vkCreateCommandPool(_device, &poolInfo, nullptr, &s.poolIn) == VK_SUCCESS;
+    poolInfo.queueFamilyIndex = s.outFamily;
+    ok = ok && vkCreateCommandPool(_device, &poolInfo, nullptr, &s.poolOut) == VK_SUCCESS;
 
     VkSemaphoreCreateInfo semaphoreInfo { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VkFenceCreateInfo fenceInfo { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    bool ok = true;
 
     for (auto& slot : s.slots)
     {
         VkCommandBufferAllocateInfo allocate { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-        allocate.commandPool = s.pool;
         allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocate.commandBufferCount = kBatches;
-        ok = ok && vkAllocateCommandBuffers(_device, &allocate, slot.commands) == VK_SUCCESS;
+        allocate.commandBufferCount = 1;
+        allocate.commandPool = s.poolIn;
+        ok = ok && vkAllocateCommandBuffers(_device, &allocate, &slot.commands[0]) == VK_SUCCESS;
+        allocate.commandPool = s.poolOut;
+        allocate.commandBufferCount = kMaxGenerated;
+        ok = ok && vkAllocateCommandBuffers(_device, &allocate, &slot.commands[1]) == VK_SUCCESS;
 
         for (auto& fence : slot.fences)
             ok = ok && vkCreateFence(_device, &fenceInfo, nullptr, &fence) == VK_SUCCESS;
@@ -628,6 +889,7 @@ bool F5Low_Vk::EnsureSlots()
         return false;
     }
 
+    StartWorker();
     return true;
 }
 
@@ -671,14 +933,16 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
             ok = ok &&
                  SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
 
-        ok = ok && SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.allocators[0].Get(), nullptr,
-                                                       IID_PPV_ARGS(&s.list)));
+        ok = ok && SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.allocators[0].Get(),
+                                                       nullptr, IID_PPV_ARGS(&s.list)));
 
         if (ok)
             s.list->Close();
 
         ok = ok && s.ready.Create(device, s.interop) && s.consumed.Create(device, s.interop) &&
-             s.done.Create(device, s.interop);
+             s.done.Create(device, s.interop) &&
+             SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s.depthDone)));
+        s.depthCounter = {};
 
         if (!ok)
         {
@@ -689,6 +953,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
             s.ready.Reset();
             s.consumed.Reset();
             s.done.Reset();
+            s.depthDone.Reset();
             s.list.Reset();
             s.queue12.Reset();
             s.device12.Reset();
@@ -707,7 +972,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
 
     if (!s.color.Matches(width, height, vkColor))
     {
-        WaitIdle();
+        WaitOwnWork();
         s.hudless.Reset();
 
         for (auto& image : s.out)
@@ -720,13 +985,13 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
         }
     }
 
-    if (s.context != nullptr && (s.contextWidth != width || s.contextHeight != height ||
-                                 s.contextFormat != dxgiColor ||
+    if (s.context != nullptr && (s.contextWidth != width || s.contextHeight != height || s.contextFormat != dxgiColor ||
                                  ((s.contextFlags ^ flags) & F5LOW_FRAMES_FLAG_HDR10) != 0))
     {
-        WaitIdle();
+        WaitOwnWork();
         const auto result = s.resize(s.context, width, height, dxgiColor, flags);
 
+        // A failed resize is permanent: the context is made again with the next frame
         if (result != F5LOW_FRAMES_OK)
         {
             SetReason(std::string("f5low could not resize its frames: ") + s.lastError(s.context));
@@ -752,8 +1017,8 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
         info.colorFormat = dxgiColor;
         info.maxGenerated = static_cast<uint32_t>(std::min<int>(_maxInterpolationCount, F5LOW_FRAMES_MAX_GENERATED));
         info.flags = flags;
-        info.renderWidth = p.velocity->width;
-        info.renderHeight = p.velocity->height;
+        info.renderWidth = std::min(p.velocity->width, width);
+        info.renderHeight = std::min(p.velocity->height, height);
 
         const auto result = s.create(&info, &s.context);
 
@@ -785,9 +1050,8 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
     }
 
     // The game's HUD-less picture, when it is the swapchain's size and format
-    if (const auto& hudless = p.hudless; hudless && hudless->image != VK_NULL_HANDLE &&
-                                         UsableLayout(hudless->layout) && hudless->imageWidth == width &&
-                                         hudless->imageHeight == height)
+    if (const auto& hudless = p.hudless; hudless && hudless->image != VK_NULL_HANDLE && UsableLayout(hudless->layout) &&
+                                         hudless->imageWidth == width && hudless->imageHeight == height)
     {
         DXGI_FORMAT hudlessDxgi = DXGI_FORMAT_UNKNOWN;
         VkFormat hudlessShared = VK_FORMAT_UNDEFINED;
@@ -796,7 +1060,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
         {
             if (!s.hudless.Matches(width, height, vkColor))
             {
-                WaitIdle();
+                WaitOwnWork();
 
                 if (!s.hudless.Create(s.device12.Get(), s.interop, width, height, dxgiColor, vkColor, false))
                 {
@@ -828,7 +1092,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
 
     if (!s.motion.Matches(velocity.imageWidth, velocity.imageHeight, velocity.format))
     {
-        WaitIdle();
+        WaitOwnWork();
 
         if (!s.motion.Create(s.device12.Get(), s.interop, velocity.imageWidth, velocity.imageHeight, motionDxgi,
                              velocity.format, false))
@@ -853,7 +1117,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
 
         if (!s.depthImage.Matches(depth.imageWidth, depth.imageHeight, depth.format))
         {
-            WaitIdle();
+            WaitOwnWork();
 
             if (!s.depthImage.Create(s.device12.Get(), s.interop, depth.imageWidth, depth.imageHeight,
                                      DXGI_FORMAT_R32_FLOAT, VK_FORMAT_R32_SFLOAT, false))
@@ -878,7 +1142,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
         if (s.depthSource != depth.format || s.depthWidth != depth.imageWidth || s.depthHeight != depth.imageHeight ||
             s.depthTexture == nullptr)
         {
-            WaitIdle();
+            WaitOwnWork();
             s.depthTexture.Reset();
 
             const uint64_t size =
@@ -923,39 +1187,197 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless)
     return true;
 }
 
-bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending& p, VkPresentInfoKHR& finalInfo)
+// The generated frames of one job, spaced by the game's frame interval: for each, acquire an image, copy the shared
+// output into it, present. The pacing waits are in here and nowhere that holds the swapchain lock.
+void F5Low_Vk::RunGenerated(const Job& job, bool paced)
+{
+    auto& s = *_impl;
+    auto& slot = s.slots[job.slot];
+    const double spacingMs = SpacingMs(job.intervalMs, job.generated);
+    const double baseMs = Util::MillisecondsNow();
+    bool complete = true;
+
+    VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    for (uint32_t k = 0; k < job.generated; k++)
+    {
+        if (paced && k > 0)
+            WaitUntil(baseMs + k * spacingMs);
+
+        uint32_t shownIndex = 0;
+
+        if (!AcquireImage(slot.acquired[k], &shownIndex, kAcquireMs) || shownIndex >= s.images.size())
+        {
+            LOG_WARN("F5Low (Vulkan): no swapchain image for generated frame {}", k);
+            complete = false;
+            break;
+        }
+
+        VkCommandBuffer cmd = slot.commands[1 + k];
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &begin);
+        RecordOutput(cmd, s.out[k], s.images[shownIndex], s.outFamily);
+        vkEndCommandBuffer(cmd);
+
+        const VkSemaphore waits[2] = { slot.acquired[k], s.done.Semaphore() };
+        const VkPipelineStageFlags stages[2] = { VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT };
+        const uint64_t waitValues[2] = { 0, job.doneValue };
+        const uint64_t signalValue = 0;
+
+        VkTimelineSemaphoreSubmitInfo timeline { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+        timeline.waitSemaphoreValueCount = 2;
+        timeline.pWaitSemaphoreValues = waitValues;
+        timeline.signalSemaphoreValueCount = 1;
+        timeline.pSignalSemaphoreValues = &signalValue;
+
+        VkSubmitInfo submit { VK_STRUCTURE_TYPE_SUBMIT_INFO, &timeline };
+        submit.waitSemaphoreCount = 2;
+        submit.pWaitSemaphores = waits;
+        submit.pWaitDstStageMask = stages;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &slot.outDone[k];
+
+        const auto submitted = vkQueueSubmit(s.outQueue, 1, &submit, slot.fences[1 + k]);
+        slot.used[1 + k] = submitted == VK_SUCCESS;
+
+        VkPresentInfoKHR shown { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        shown.waitSemaphoreCount = 1;
+        shown.swapchainCount = 1;
+        shown.pSwapchains = &_swapchain;
+        shown.pImageIndices = &shownIndex;
+
+        if (submitted != VK_SUCCESS)
+        {
+            // The acquired image goes back through a present (waiting for its acquire semaphore) so it is not lost
+            LOG_ERROR("F5Low (Vulkan): vkQueueSubmit for generated frame {} failed: {}", k,
+                      magic_enum::enum_name(submitted));
+            shown.pWaitSemaphores = &slot.acquired[k];
+            PresentOn(s.outQueue, shown);
+            complete = false;
+            break;
+        }
+
+        shown.pWaitSemaphores = &slot.outDone[k];
+
+        if (const auto presented = PresentOn(s.outQueue, shown);
+            presented != VK_SUCCESS && presented != VK_SUBOPTIMAL_KHR)
+        {
+            LOG_WARN("F5Low (Vulkan): presenting generated frame {} returned {}", k, magic_enum::enum_name(presented));
+            s.lastResult = presented;
+            complete = false;
+            break;
+        }
+    }
+
+    // The game's frame follows after the last generated one's slot
+    if (paced && complete)
+        WaitUntil(baseMs + job.generated * spacingMs);
+}
+
+F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending& p,
+                                     VkPresentInfoKHR& finalInfo)
 {
     auto& s = *_impl;
 
+    // Assumed off until a frame really was generated: the cap and the status follow what happens
+    _generationOff = true;
+
     if (!p.depth || !p.velocity || s.images.empty() || present->pImageIndices == nullptr)
-        return false;
+        return Outcome::Direct;
 
     const uint32_t imageIndex = present->pImageIndices[0];
 
     if (imageIndex >= s.images.size())
-        return false;
+        return Outcome::Direct;
 
     const VkImage source = s.images[imageIndex];
 
-    uint32_t count = GeneratedCount(_framesToInterpolate, static_cast<uint32_t>(_maxInterpolationCount), _headroom);
+    uint32_t count =
+        GeneratedCount(_wanted, static_cast<uint32_t>(std::min(_maxInterpolationCount, _countLimit)), _headroom);
 
     // Until the frame interval is known the generator only takes the frames as history
     if (!CanPace(_intervalMs, count))
         count = 0;
+
+    // Room in the worker's queue: a short wait, then this frame goes without generation (the real image after the
+    // worker is idle)
+    if (count > 0 && s.worker.joinable())
+    {
+        const double startMs = Util::MillisecondsNow();
+
+        for (;;)
+        {
+            std::unique_lock lock(s.jobMutex);
+
+            const auto action = OnQueue(static_cast<uint32_t>(s.jobs.size()), Util::MillisecondsNow() - startMs);
+
+            if (action == QueueAction::Push)
+                break;
+
+            if (action == QueueAction::Drain)
+            {
+                LOG_DEBUG("F5Low (Vulkan): the present worker is behind, this frame goes without generation");
+                return Outcome::Direct;
+            }
+
+            s.jobCv.wait_for(lock, std::chrono::microseconds(500));
+        }
+    }
 
     bool useHudless = false;
 
     if (!Prepare(p, count, useHudless) || !EnsureSlots())
     {
         _failures++;
-        return false;
+        return Outcome::Direct;
+    }
+
+    StartWorker();
+
+    // f5low's fences: the game queue never waits on a value that will not arrive (a removed device, a stuck generator)
+    {
+        const auto consumedDone = s.consumed.Fence12()->GetCompletedValue();
+        const auto doneDone = s.done.Fence12()->GetCompletedValue();
+
+        if (FenceBehind(consumedDone, s.consumed.Value()) || FenceBehind(doneDone, s.done.Value()))
+        {
+            if (consumedDone == UINT64_MAX || doneDone == UINT64_MAX)
+            {
+                SetReason("The D3D12 device was removed");
+                _failures = 3;
+            }
+            else
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    LOG_WARN("F5Low (Vulkan): f5low is more than a frame behind, passing frames through until it "
+                             "catches up");
+                }
+            }
+
+            return Outcome::Direct;
+        }
     }
 
     const uint32_t slotIndex = s.cursor;
     auto& slot = s.slots[slotIndex];
-    s.cursor = (s.cursor + 1) % kSlots;
 
     // The slot's last use is over: its command buffers and semaphores are ours again
+    {
+        std::unique_lock lock(s.jobMutex);
+
+        if (!s.jobCv.wait_for(lock, std::chrono::milliseconds(2000), [&] { return !s.slotBusy[slotIndex]; }))
+        {
+            SetReason("The present worker did not finish a frame in time");
+            return Outcome::Direct;
+        }
+    }
+
     {
         VkFence waits[kBatches];
         uint32_t waitCount = 0;
@@ -972,7 +1394,7 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
             {
                 SetReason("The GPU did not finish a frame's copies in time");
                 _failures++;
-                return false;
+                return Outcome::Direct;
             }
 
             vkResetFences(_device, waitCount, waits);
@@ -981,6 +1403,8 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
                 used = false;
         }
     }
+
+    s.cursor = (s.cursor + 1) % kSlots;
 
     const auto& velocity = *p.velocity;
     const auto& depth = *p.depth;
@@ -1022,9 +1446,10 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
 
     waitSemaphores.push_back(s.consumed.Semaphore());
     waitStages.push_back(VK_PIPELINE_STAGE_TRANSFER_BIT);
-    waitValues.push_back(s.consumedPrevious);
+    waitValues.push_back(s.consumed.Value());
 
-    const uint64_t copiedValue = s.ready.Next();
+    // Taken once the submit went through
+    const uint64_t copiedValue = s.ready.Value() + 1;
     const VkSemaphore signalSemaphores[2] = { s.ready.Semaphore(), slot.inDone };
     const uint64_t signalValues[2] = { copiedValue, 0 };
 
@@ -1047,9 +1472,10 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
     {
         SetReason(std::string("vkQueueSubmit failed: ") + std::string(magic_enum::enum_name(result)));
         _failures++;
-        return false;
+        return Outcome::Direct;
     }
 
+    s.ready.Next();
     slot.used[0] = true;
 
     // From here the game's present waits on our copy in, whatever else happens
@@ -1057,18 +1483,19 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
     finalInfo.pWaitSemaphores = &slot.inDone;
 
     uint64_t readyValue = copiedValue;
+    ID3D12Fence* readyFence = s.ready.Fence12();
 
-    // The depth buffer into its texture on the D3D12 side, after the copy in
+    // The depth buffer into its texture on the D3D12 side, after the copy in; its own fence tells f5low it is there
     if (s.depthViaBuffer)
     {
         auto* allocator = s.allocators[slotIndex].Get();
 
-        if (!WaitFence12(s.ready.Fence12(), s.allocatorValue[slotIndex], 5000) || FAILED(allocator->Reset()) ||
+        if (!WaitFence12(s.depthDone.Get(), s.allocatorValue[slotIndex], 5000) || FAILED(allocator->Reset()) ||
             FAILED(s.list->Reset(allocator, nullptr)))
         {
             SetReason("The D3D12 depth copy could not be recorded");
             _failures++;
-            return true;
+            return Outcome::Direct;
         }
 
         const auto transition = [&](D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
@@ -1092,9 +1519,40 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
         ID3D12CommandList* lists[] = { s.list.Get() };
         s.queue12->ExecuteCommandLists(1, lists);
 
-        readyValue = s.ready.Next();
-        s.queue12->Signal(s.ready.Fence12(), readyValue);
+        readyValue = s.depthCounter.Take();
+        s.queue12->Signal(s.depthDone.Get(), readyValue);
         s.allocatorValue[slotIndex] = readyValue;
+        readyFence = s.depthDone.Get();
+    }
+
+    // The previous job's copies out of the shared output images are done before f5low writes them again
+    if (count > 0 && s.lastJobSlot >= 0)
+    {
+        const uint32_t previous = static_cast<uint32_t>(s.lastJobSlot);
+        {
+            std::unique_lock lock(s.jobMutex);
+
+            if (!s.jobCv.wait_for(lock, std::chrono::milliseconds(2000), [&] { return !s.slotBusy[previous]; }))
+            {
+                SetReason("The present worker did not finish a frame in time");
+                return Outcome::Direct;
+            }
+        }
+
+        VkFence waits[kMaxGenerated];
+        uint32_t waitCount = 0;
+
+        for (uint32_t i = 0; i < kMaxGenerated; i++)
+        {
+            if (s.slots[previous].used[1 + i])
+                waits[waitCount++] = s.slots[previous].fences[1 + i];
+        }
+
+        if (waitCount > 0 && vkWaitForFences(_device, waitCount, waits, VK_TRUE, kWaitFenceNs) != VK_SUCCESS)
+        {
+            SetReason("The GPU did not finish the last generated frames in time");
+            return Outcome::Direct;
+        }
     }
 
     // f5low's call: the frames between the previous pair and this one
@@ -1102,11 +1560,11 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
     input.color = s.color.Res12();
     input.hudless = useHudless ? s.hudless.Res12() : nullptr;
     input.motion = s.motion.Res12();
-    input.motionWidth = std::min(velocity.width, velocity.imageWidth);
-    input.motionHeight = std::min(velocity.height, velocity.imageHeight);
+    input.motionWidth = std::min({ velocity.width, velocity.imageWidth, _swapchainExtent.width });
+    input.motionHeight = std::min({ velocity.height, velocity.imageHeight, _swapchainExtent.height });
     input.depth = s.depthViaBuffer ? s.depthTexture.Get() : s.depthImage.Res12();
-    input.depthWidth = std::min(depth.width, depth.imageWidth);
-    input.depthHeight = std::min(depth.height, depth.imageHeight);
+    input.depthWidth = std::min({ depth.width, depth.imageWidth, _swapchainExtent.width });
+    input.depthHeight = std::min({ depth.height, depth.imageHeight, _swapchainExtent.height });
 
     const int index = p.index;
     input.motionScale[0] = _mvScaleX[index] != 0.0f ? _mvScaleX[index] : 1.0f;
@@ -1120,10 +1578,10 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
     input.motionJittered = IsJitteredMVs() ? 1 : 0;
     input.reset = _reset[index] != 0 ? 1 : 0;
     input.frameId = p.frame;
-    input.readyFence = s.ready.Fence12();
+    input.readyFence = readyFence;
     input.readyValue = readyValue;
     input.consumedFence = s.consumed.Fence12();
-    input.consumedValue = s.consumed.Next();
+    input.consumedValue = s.consumed.Value() + 1;
 
     F5LowFramesOutput output {};
     output.count = count;
@@ -1132,130 +1590,100 @@ bool F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* present, Pending&
         output.targets[k] = s.out[k].Res12();
 
     output.doneFence = s.done.Fence12();
-    output.doneValue = s.done.Next();
+    output.doneValue = s.done.Value() + 1;
 
     const auto result = s.generate(s.context, &input, &output);
 
+    // f5low signals both fences for every answer (also NOT_READY and errors), in order on its queue
+    s.consumed.Next();
+    s.done.Next();
+
     if (result != F5LOW_FRAMES_OK)
     {
-        // Nothing may wait on values f5low will not signal
-        SignalIfBehind(s.consumed.Fence12(), input.consumedValue);
-        SignalIfBehind(s.done.Fence12(), output.doneValue);
-        s.consumedPrevious = input.consumedValue;
-
         if (result == F5LOW_FRAMES_NOT_READY)
         {
             if (!s.warnedNotReady)
             {
                 s.warnedNotReady = true;
-                LOG_INFO("F5Low (Vulkan): the generator is still being built, presenting the game's frames");
+                LOG_INFO("F5Low (Vulkan): the generator is still being built or busy, presenting the game's frames");
             }
+        }
+        else if (result == F5LOW_FRAMES_ERROR_UNSUPPORTED && count > 1)
+        {
+            _countLimit = 1;
+            LOG_WARN("F5Low (Vulkan): this generator only makes one frame per game frame, limiting to 2x");
         }
         else
         {
             _failures++;
             SetReason(std::format("f5low refused a frame ({}): {}", static_cast<int>(result), s.lastError(s.context)));
         }
-
-        return true;
+    }
+    else
+    {
+        _failures = 0;
+        SetReason(static_cast<uint32_t>(_wanted) > _headroom
+                      ? std::format("Only {} spare swapchain images: generating fewer frames than the multiplier asks "
+                                    "for until the game makes a new swapchain",
+                                    _headroom)
+                      : std::string());
     }
 
-    s.consumedPrevious = input.consumedValue;
-    _failures = 0;
-    SetReason("");
-
-    const uint32_t generated = std::min(output.generated, count);
+    const uint32_t generated = GeneratedAfter(result, output.generated, count);
 
     if (generated == 0)
-        return true;
+        return Outcome::Direct;
 
-    // The generated frames, one by one, then the game's own: spaced by the game's frame interval
-    const auto acquireFn =
-        SwapchainFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR", vkAcquireNextImageKHR);
-    const auto presentFn = SwapchainFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR", vkQueuePresentKHR);
-    const double spacingMs = SpacingMs(_intervalMs, generated);
-    const double baseMs = Util::MillisecondsNow();
-    bool stopped = false;
+    // What the cap and the status read
+    _framesToInterpolate = static_cast<int>(generated);
+    _generationOff = false;
 
-    for (uint32_t k = 0; k < generated; k++)
+    Job job;
+    job.slot = slotIndex;
+    job.generated = generated;
+    job.doneValue = output.doneValue;
+    job.realIndex = imageIndex;
+    job.realWait = slot.inDone;
+    job.intervalMs = _intervalMs;
+
+    for (auto* node = static_cast<const VkBaseInStructure*>(present->pNext); node != nullptr; node = node->pNext)
     {
-        if (k > 0)
-            WaitUntil(baseMs + k * spacingMs);
-
-        uint32_t shownIndex = 0;
-        const auto acquired =
-            acquireFn(_device, _swapchain, kAcquireNs, slot.acquired[k], VK_NULL_HANDLE, &shownIndex);
-
-        if ((acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) || shownIndex >= s.images.size())
+        if (node->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR)
         {
-            LOG_WARN("F5Low (Vulkan): no swapchain image for generated frame {} ({})", k,
-                     magic_enum::enum_name(acquired));
-            stopped = true;
-            break;
+            const auto* id = reinterpret_cast<const VkPresentIdKHR*>(node);
+
+            if (id->swapchainCount >= 1 && id->pPresentIds != nullptr)
+            {
+                job.hasPresentId = true;
+                job.presentId = id->pPresentIds[0];
+            }
         }
-
-        VkCommandBuffer outCmd = slot.commands[1 + k];
-        vkResetCommandBuffer(outCmd, 0);
-        vkBeginCommandBuffer(outCmd, &begin);
-        RecordOutput(outCmd, s.out[k], s.images[shownIndex], _gameQueueFamily);
-        vkEndCommandBuffer(outCmd);
-
-        const VkSemaphore outWaits[2] = { slot.acquired[k], s.done.Semaphore() };
-        const VkPipelineStageFlags outStages[2] = { VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT };
-        const uint64_t outWaitValues[2] = { 0, output.doneValue };
-        const uint64_t outSignalValue = 0;
-
-        VkTimelineSemaphoreSubmitInfo outTimeline { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-        outTimeline.waitSemaphoreValueCount = 2;
-        outTimeline.pWaitSemaphoreValues = outWaitValues;
-        outTimeline.signalSemaphoreValueCount = 1;
-        outTimeline.pSignalSemaphoreValues = &outSignalValue;
-
-        VkSubmitInfo outSubmit { VK_STRUCTURE_TYPE_SUBMIT_INFO, &outTimeline };
-        outSubmit.waitSemaphoreCount = 2;
-        outSubmit.pWaitSemaphores = outWaits;
-        outSubmit.pWaitDstStageMask = outStages;
-        outSubmit.commandBufferCount = 1;
-        outSubmit.pCommandBuffers = &outCmd;
-        outSubmit.signalSemaphoreCount = 1;
-        outSubmit.pSignalSemaphores = &slot.outDone[k];
-
-        if (const auto submitted = vkQueueSubmit(queue, 1, &outSubmit, slot.fences[1 + k]); submitted != VK_SUCCESS)
+        else if (!s.warnedPNext)
         {
-            LOG_ERROR("F5Low (Vulkan): vkQueueSubmit for generated frame {} failed: {}", k,
-                      magic_enum::enum_name(submitted));
-            stopped = true;
-            break;
-        }
-
-        slot.used[1 + k] = true;
-
-        VkPresentInfoKHR shown { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-        shown.waitSemaphoreCount = 1;
-        shown.pWaitSemaphores = &slot.outDone[k];
-        shown.swapchainCount = 1;
-        shown.pSwapchains = &_swapchain;
-        shown.pImageIndices = &shownIndex;
-
-        if (const auto presented = presentFn(queue, &shown);
-            presented != VK_SUCCESS && presented != VK_SUBOPTIMAL_KHR)
-        {
-            LOG_WARN("F5Low (Vulkan): presenting generated frame {} returned {}", k, magic_enum::enum_name(presented));
-            stopped = true;
-            break;
+            s.warnedPNext = true;
+            LOG_INFO("F5Low (Vulkan): a present extension struct ({}) is not carried over to the real present of "
+                     "generated frames",
+                     static_cast<int>(node->sType));
         }
     }
 
-    // The game's frame after the last generated one
-    if (!stopped)
-        WaitUntil(baseMs + generated * spacingMs);
+    s.lastJobSlot = static_cast<int>(slotIndex);
 
-    if (_generatedFrames == 0)
-        LOG_INFO("F5Low (Vulkan): generating {} frame(s) per game frame, frame interval {:.2f} ms", generated,
-                 _intervalMs);
+    if (s.worker.joinable())
+    {
+        {
+            std::lock_guard lock(s.jobMutex);
+            s.jobs.push_back(job);
+            s.slotBusy[slotIndex] = true;
+        }
 
-    _generatedFrames += generated;
-    return true;
+        s.jobCv.notify_all();
+        return Outcome::Queued;
+    }
+
+    // No present queue of our own: the presents and their pacing run here, the real image goes out after
+    RunGenerated(job, true);
+    return Outcome::Direct;
 }
 
 void F5Low_Vk::ReleaseAll(const char* why)
@@ -1264,7 +1692,12 @@ void F5Low_Vk::ReleaseAll(const char* why)
 
     // At exit nothing is waited for or destroyed
     if (State::Instance().isShuttingDown)
+    {
+        StopWorker(false);
         return;
+    }
+
+    StopWorker(true);
 
     if (s.context == nullptr && !s.slotsReady && !s.d3dReady)
         return;
@@ -1272,13 +1705,17 @@ void F5Low_Vk::ReleaseAll(const char* why)
     LOG_INFO("F5Low (Vulkan): releasing ({})", why);
 
     if (!s.deviceGone && _device != VK_NULL_HANDLE)
-        WaitIdle();
+    {
+        WaitOwnWork();
+
+        if (s.outQueue != VK_NULL_HANDLE && s.outQueue != _gameQueue)
+            vkQueueWaitIdle(s.outQueue);
+    }
 
     if (s.context != nullptr && s.destroy != nullptr)
         s.destroy(s.context);
 
     s.context = nullptr;
-    s.consumedPrevious = 0;
 
     if (!s.deviceGone && _device != VK_NULL_HANDLE)
     {
@@ -1305,13 +1742,20 @@ void F5Low_Vk::ReleaseAll(const char* why)
             slot = {};
         }
 
-        if (s.pool != VK_NULL_HANDLE)
-            vkDestroyCommandPool(_device, s.pool, nullptr);
+        if (s.poolIn != VK_NULL_HANDLE)
+            vkDestroyCommandPool(_device, s.poolIn, nullptr);
+
+        if (s.poolOut != VK_NULL_HANDLE)
+            vkDestroyCommandPool(_device, s.poolOut, nullptr);
     }
 
-    s.pool = VK_NULL_HANDLE;
+    s.poolIn = VK_NULL_HANDLE;
+    s.poolOut = VK_NULL_HANDLE;
     s.slotsReady = false;
     s.cursor = 0;
+    s.lastJobSlot = -1;
+    s.outQueue = VK_NULL_HANDLE;
+    s.ownQueue = false;
 
     s.color.Reset();
     s.hudless.Reset();
@@ -1328,6 +1772,8 @@ void F5Low_Vk::ReleaseAll(const char* why)
     s.ready.Reset();
     s.consumed.Reset();
     s.done.Reset();
+    s.depthDone.Reset();
+    s.depthCounter = {};
     s.list.Reset();
 
     for (auto& allocator : s.allocators)

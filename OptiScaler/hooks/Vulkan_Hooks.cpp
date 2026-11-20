@@ -1863,8 +1863,9 @@ static VkResult hkvkAcquireNextImage2KHR(VkDevice device, const VkAcquireNextIma
 VALIDATE_HOOK(hkvkWaitForPresentKHR, PFN_vkWaitForPresentKHR)
 static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
 {
+    // An output with the driver's own swapchain (F5Low) keeps the game's present ids meaningful, they go to the driver
     if (auto fg = State::Instance().currentVkFG;
-        fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
+        fg != nullptr && fg->OwnsSwapchain(swapchain) && !fg->HasDriverSwapchain() && !FromFGOutput(_ReturnAddress()))
     {
         return VK_SUCCESS;
     }
