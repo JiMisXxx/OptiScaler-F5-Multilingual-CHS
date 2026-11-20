@@ -45,6 +45,8 @@ class DlssNrSuperior_Vk : public Shader_Vk
         NormalHdr4,
         NormalHdr6,
         PrivateEncode, // carrier (0.5 + answer - proxy) and the exact private motion
+        PrivateFade,   // the carrier decode blended toward the current edit (the CNN's D/E switch and preset fade)
+        CnnMotion,     // the CNN's motion probe: 576 vectors -> a moving count
         GhostClear,    // the Transformer's disocclusion field: clear, scatter (coarse 1), age (coarse 2), references,
         GhostCoarse1,  // dilation, the bias mask for the DLSS, the decode that seeds the rings, the in-place feather
         GhostCoarse2,
@@ -77,7 +79,13 @@ class DlssNrSuperior_Vk : public Shader_Vk
     DlssNrSuperior_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InPhysicalDevice);
     ~DlssNrSuperior_Vk();
 
-    bool Ready() const { return _init && !_blobsFailed; }
+    // The No DLSS composition's passes are built and usable.
+    bool Ready() const { return _init && !_baseFailed; }
+    // The private DLSS's passes did not fail to build (their failure leaves Ready() alone: Superior then runs No DLSS).
+    bool PrivateReady() const { return !_privateFailed; }
+
+    // Whether `blob` belongs to the private DLSS (its failure does not give the pass up).
+    static constexpr bool IsPrivate(Blob blob) { return blob >= Blob::Generic; }
 
     // Builds the pipelines of `blobs` and the placeholder image now, so a build that fails is known before any frame
     // depends on them (the pass is then given up for the selection, not a frame's dispatch). False: one would not
@@ -110,7 +118,8 @@ class DlssNrSuperior_Vk : public Shader_Vk
 
     std::array<VkPipeline, (size_t) Blob::Count> _blobs {};
     std::array<bool, (size_t) Blob::Count> _blobTried {};
-    bool _blobsFailed = false; // a blob that could not be built: the pass is given up, not retried every frame
+    bool _baseFailed = false; // a No DLSS blob that could not be built: the pass is given up, not retried every frame
+    bool _privateFailed = false; // a private DLSS blob that could not: the private DLSS is given up (No DLSS runs)
 
     VkImage _dummyImage = VK_NULL_HANDLE;
     VkDeviceMemory _dummyMemory = VK_NULL_HANDLE;

@@ -16,7 +16,9 @@
 #include "superior/precompile_vk/host_normal_sdr_Shader_Vk.h"
 #include "superior/precompile_vk/host_resolve_hdr_Shader_Vk.h"
 #include "superior/precompile_vk/host_resolve_sdr_Shader_Vk.h"
+#include "superior/precompile_vk/private_cnn_motion_Shader_Vk.h"
 #include "superior/precompile_vk/private_encode_Shader_Vk.h"
+#include "superior/precompile_vk/private_fade_Shader_Vk.h"
 #include "superior/precompile_vk/private_ghost_bias_Shader_Vk.h"
 #include "superior/precompile_vk/private_ghost_clear_Shader_Vk.h"
 #include "superior/precompile_vk/private_ghost_coarse_1_Shader_Vk.h"
@@ -91,6 +93,10 @@ BlobCode CodeOf(DlssNrSuperior_Vk::Blob blob)
         return { host_normal_hdr6_spv, sizeof(host_normal_hdr6_spv), "residual resolve (HDR mapping 6)" };
     case B::PrivateEncode:
         return { private_encode_spv, sizeof(private_encode_spv), "private encode" };
+    case B::PrivateFade:
+        return { private_fade_spv, sizeof(private_fade_spv), "private fade" };
+    case B::CnnMotion:
+        return { private_cnn_motion_spv, sizeof(private_cnn_motion_spv), "CNN motion probe" };
     case B::GhostClear:
         return { private_ghost_clear_spv, sizeof(private_ghost_clear_spv), "ghost clear" };
     case B::GhostCoarse1:
@@ -283,7 +289,7 @@ bool DlssNrSuperior_Vk::Build(VkCommandBuffer InCmdList, const Blob* InBlobs, si
     bool ok = true;
     for (size_t i = 0; i < InCount; ++i)
         ok = (PipelineOf(InBlobs[i]) != VK_NULL_HANDLE || Optional(InBlobs[i])) && ok;
-    return ok && Ready();
+    return ok;
 }
 
 VkPipeline DlssNrSuperior_Vk::PipelineOf(Blob blob)
@@ -301,7 +307,8 @@ VkPipeline DlssNrSuperior_Vk::PipelineOf(Blob blob)
         if (!CreateComputePipeline(_device, _pipelineLayout, &_blobs[index], bytes) || _blobs[index] == VK_NULL_HANDLE)
         {
             _blobs[index] = VK_NULL_HANDLE;
-            _blobsFailed = _blobsFailed || !Optional(blob);
+            if (!Optional(blob))
+                (IsPrivate(blob) ? _privateFailed : _baseFailed) = true;
             LOG_WARN("DLSS-NR Vulkan Superior Scaling: the {} pass could not be built", code.name);
         }
     }
