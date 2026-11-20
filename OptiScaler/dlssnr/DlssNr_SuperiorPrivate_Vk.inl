@@ -551,6 +551,18 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
                                           cfg.DlssNrModelResolutionAuto.value_or_default(),
                                           cfg.DlssNrWorkingScale.value_or_default(), workScale);
 
+    // The NGX core went before we could release (a shutdown from inside the NR pass): its objects are gone with it, so
+    // they are forgotten, never released or evaluated, and the next frame makes them again.
+    if ((feature != nullptr || params != nullptr) && !NVNGXProxy::IsVulkanInited())
+    {
+        feature = nullptr;
+        params = nullptr;
+        phase = Phase::None;
+        waited = failures = 0;
+        resetNext = true;
+        LOG_INFO("DLSS-NR Vulkan Superior Scaling: the NGX runtime shut down under the private DLSS; it is made again");
+    }
+
     if (preset == Sup::NoPrivateDlss)
     {
         // Nothing wanted (or no longer): what was made goes, with the device drained once.
