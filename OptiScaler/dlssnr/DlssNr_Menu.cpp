@@ -4755,9 +4755,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             "NVIDIA residual: only the changes, NVIDIA's way; with Upscale Method Bilinear, also kept on "
             "their side of edges.\n"
             "Superior Scaling: its own Area downsample, frequency shaping and optional private DLSS to steady NR "
-            "over time, including at 100% with Compress screen edges. On native Vulkan it runs below 100% with No "
-            "DLSS, "
-            "CNN or Transformer, one model pass, without Compress screen edges or Reuse detail; where it "
+            "over time, including at 100% with Compress screen edges. On native Vulkan it runs with No DLSS, CNN or "
+            "Transformer below 100% and with CNN or Transformer at 100% and above (Also at 100% and above), one model "
+            "pass, without Compress screen edges or Reuse detail; where it "
             "cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
             "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
@@ -4783,7 +4783,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "different artifacts of its own.");
 
             ImGui::BeginDisabled(
-                nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable() ||
+                (!nr.vulkan && DlssNr::SuperiorScaling::SrUnavailable()) ||
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) ==
                     DlssNr::SuperiorScaling::NoPrivateDlss);
             bool atNative = config->DlssNrSuperiorAtNative.value_or_default();
@@ -4795,7 +4795,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 "On: it also runs at 100% and above. Above 100% NR still works at the larger size; its result "
                 "is brought back to the screen's size first and the DLSS steadies that. Costs the DLSS's time at "
                 "full screen size. Not with Compress screen edges, which has its own rule. Like below 100%, "
-                "Superior's own composition then leaves out Depth fade. Not available on native Vulkan yet.");
+                "Superior's own composition then leaves out Depth fade. On native Vulkan too, in one NR pass.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)

@@ -2308,9 +2308,25 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // it does not. It replaces the ordinary downsample, guides and resolve below; everything else is the ordinary path.
     // A Superior dispatch that fails below gives it up (SuperiorVk::GiveUp) and the frame goes on with the ordinary
     // step, so it is not const.
+    // [DlssNr] SuperiorAtNative, as D3D12 (DlssNr_Dx12.cpp): the private DLSS at 100% and above. Above 100% it works at
+    // native, on the pair after the supersample down-leg, while the model keeps its supersampled raster and its
+    // ordinary guides; Superior's own raster (images, matched guides, the private DLSS) is then the frame's.
+    const bool superiorAtNative =
+        DlssNr::SuperiorScaling::Enabled(cfg) &&
+        DlssNr::SuperiorScaling::StabilizeAtNative(cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
+                                                   cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                                   SuperiorVk::Private::srUnavailable);
+    const bool superiorSupersample =
+        DlssNr::SuperiorScaling::StabilizeSupersampled(superiorAtNative, width, height, workWidth, workHeight);
+    const uint32_t superiorW = superiorSupersample ? width : workWidth;
+    const uint32_t superiorH = superiorSupersample ? height : workHeight;
     bool superiorRuns =
-        SuperiorVk::Begin(cmdBuffer, cfg, device, physicalDevice, workWidth < width || workHeight < height, spatial,
-                          passes, workWidth, workHeight) == DlssNr::SuperiorScaling::VkRule::Outcome::Runs;
+        SuperiorVk::Begin(cmdBuffer, cfg, device, physicalDevice, workWidth < width || workHeight < height,
+                          superiorAtNative, spatial, passes, superiorW, superiorH,
+                          superiorSupersample ? SuperiorVk::Raster::Supersampled
+                          : superiorAtNative
+                              ? SuperiorVk::Raster::Native
+                              : SuperiorVk::Raster::Model) == DlssNr::SuperiorScaling::VkRule::Outcome::Runs;
     // Another kind of picture and guides for the model from here (or back): its history starts over, as on D3D12.
     if (superiorRuns != SuperiorVk::wasRunning)
     {
@@ -2383,7 +2399,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             Transition(cmdBuffer, g_vk.proxySmall, VK_IMAGE_LAYOUT_GENERAL);
 
             bool downsampled = false;
-            if (superiorRuns)
+            if (superiorRuns && !superiorSupersample)
             {
                 downsampled = SuperiorVk::Area(cmdBuffer, g_vk.proxy, g_vk.proxySmall, workWidth, workHeight);
                 if (!downsampled)
@@ -2542,7 +2558,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     // Superior Scaling hands the model the game's depth and motion matched to its own raster (as D3D12 does,
     // SuperiorRun::MatchGuides), with the vector scale taken from the matched grid.
-    bool superiorMatched = false;
+    bool superiorMatched = false;               // the model takes Superior's matched guides
+    bool superiorGuidesReady = false;           // Superior's matched guides exist (the private DLSS takes them)
     float superiorMvX = 1.f, superiorMvY = 1.f; // the matched guides' vector scale, for the private DLSS
     if (superiorRuns)
     {
@@ -2550,15 +2567,23 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                                                   ? DlssNr::GuideExtent { renderWidth, renderHeight }
                                                   : DlssNr::GuideExtent { outputWidth, outputHeight };
 
-        if (SuperiorVk::MatchGuides(cmdBuffer, device, depth, motion, guides, width, height, workWidth, workHeight,
+        if (SuperiorVk::MatchGuides(cmdBuffer, device, depth, motion, guides, width, height, superiorW, superiorH,
                                     depthInverted, gameMvX, gameMvY, reference))
         {
-            superiorMatched = true;
-            modelDepth = &SuperiorVk::depth.ngx;
-            mvX = DlssNr::SuperiorScaling::MotionScale(gameMvX, workWidth, reference.width, guides.motion.width);
-            mvY = DlssNr::SuperiorScaling::MotionScale(gameMvY, workHeight, reference.height, guides.motion.height);
-            superiorMvX = mvX;
-            superiorMvY = mvY;
+            superiorGuidesReady = true;
+            superiorMvX =
+                DlssNr::SuperiorScaling::MotionScale(gameMvX, superiorW, reference.width, guides.motion.width);
+            superiorMvY =
+                DlssNr::SuperiorScaling::MotionScale(gameMvY, superiorH, reference.height, guides.motion.height);
+            // Supersampling under SuperiorAtNative: the matched guides are the private DLSS's native ones, not the
+            // model's (it keeps its ordinary guides and vector scale).
+            if (!superiorSupersample)
+            {
+                superiorMatched = true;
+                modelDepth = &SuperiorVk::depth.ngx;
+                mvX = superiorMvX;
+                mvY = superiorMvY;
+            }
         }
         else
         {
@@ -2903,6 +2928,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // filter so the resolve composites a native answer against the native proxy 1:1 -- not the single
     // bilinear tap the Nx answer would otherwise get, which aliases the model's detail into noise. On
     // failure it falls back to the Nx pair (modelInput + output), the old behaviour.
+    bool superDownOk = false;
     OwnedImage* resolveProxy = ordinaryProxy;
     OwnedImage* resolveAnswer = ordinaryAnswer;
 
@@ -3034,6 +3060,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     }
     else if (workScale > 1.0f && g_vk.superDown && g_vk.superDown->IsInit() && g_vk.outputNative.Valid())
     {
+        // (superDownOk: Superior needs the native pair; without it the ordinary resolve below takes the frame)
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmdBuffer, g_vk.outputNative, VK_IMAGE_LAYOUT_GENERAL);
 
@@ -3044,8 +3071,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             resolveProxy = &g_vk.proxy;
             resolveAnswer = &g_vk.outputNative;
+            superDownOk = true;
         }
     }
+
+    // Supersampling under SuperiorAtNative steadies the pair the down-leg averaged to native; without it the ordinary
+    // resolve takes the supersampled pair for this frame, as D3D12 does.
+    if (superiorRuns && superiorSupersample && !superDownOk)
+        superiorRuns = false;
 
     Transition(cmdBuffer, *resolveProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmdBuffer, *resolveAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -3070,7 +3103,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         superiorFrame.frameMs = frameMs;
         superiorFrame.reset = superiorReset;
         superiorFrame.depthInverted = depthInverted;
-        superiorFrame.haveDepth = SuperiorVk::depth.Valid() && superiorMatched && SuperiorVk::depthIsReal;
+        superiorFrame.haveDepth = SuperiorVk::depth.Valid() && superiorGuidesReady && SuperiorVk::depthIsReal;
         superiorFrame.gameMotion = motion;
         superiorFrame.gameMvX = gameMvX;
         superiorFrame.gameMvY = gameMvY;

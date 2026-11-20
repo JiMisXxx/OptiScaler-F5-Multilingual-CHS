@@ -218,12 +218,24 @@ float DepthPrecision(VkFormat format)
 }
 
 // Decides this frame (and publishes and logs what changed). reduced: the model works on fewer pixels than the frame.
+// How Superior's raster relates to the model's (for the log): the model's own, native (100% with the private DLSS), or
+// native over a supersampled model (above 100%).
+enum class Raster
+{
+    Model,
+    Native,
+    Supersampled
+};
+Raster lastRaster = Raster::Model;
+
 Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkPhysicalDevice physicalDevice,
-                    bool reduced, bool packed, unsigned int passes, unsigned int workW, unsigned int workH)
+                    bool reduced, bool atNative, bool packed, unsigned int passes, unsigned int workW,
+                    unsigned int workH, Raster raster = Raster::Model)
 {
     Rule::Frame frame;
     frame.selected = DlssNr::SuperiorScaling::Enabled(cfg);
     frame.reduced = reduced;
+    frame.atNative = atNative;
     frame.packed = packed;
     frame.passes = passes;
     // Reuse detail takes the frame only when it would actually run: its own gate (route, minimum frame rate, frame
@@ -272,13 +284,20 @@ Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkP
 
     Publish(Rule::Describe(outcome));
 
-    if (!outcomeSaid || lastOutcome != outcome)
+    if (!outcomeSaid || lastOutcome != outcome || (outcome == Rule::Outcome::Runs && lastRaster != raster))
     {
         outcomeSaid = true;
         lastOutcome = outcome;
+        lastRaster = raster;
 
         if (outcome == Rule::Outcome::Runs)
-            LOG_INFO("DLSS-NR Vulkan Superior Scaling: running, the model works on {}x{}", workW, workH);
+            LOG_INFO("DLSS-NR Vulkan Superior Scaling: running, {}",
+                     raster == Raster::Model ? "the model works on " + std::to_string(workW) + "x" + std::to_string(workH)
+                     : raster == Raster::Native
+                         ? "at native " + std::to_string(workW) + "x" + std::to_string(workH) +
+                               " (Also at 100% and above): the private DLSS steadies the native raster"
+                         : "above 100%: the model supersamples, the private DLSS steadies the native " +
+                               std::to_string(workW) + "x" + std::to_string(workH) + " pair after the down-leg");
         else if (outcome != Rule::Outcome::NotSelected)
             LOG_INFO("DLSS-NR Vulkan Superior Scaling: {}", Rule::Describe(outcome));
         else if (everSelected)

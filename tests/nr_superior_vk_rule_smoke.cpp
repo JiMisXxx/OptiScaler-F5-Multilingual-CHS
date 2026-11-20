@@ -45,6 +45,30 @@ int main()
     native.reduced = false;
     check(Decide(native) == Outcome::NotReduced, "100% and above: the ordinary composition");
 
+    // SuperiorAtNative (the D3D12 rule, StabilizeAtNative): at 100% and above it runs when the private DLSS steadies native.
+    Frame atNative = native;
+    atNative.atNative = true;
+    check(Decide(atNative) == Outcome::Runs, "100% and above with the private DLSS at native: runs");
+    atNative.packed = true;
+    check(Decide(atNative) == Outcome::Packed, "at native but packed: Matched residual");
+    atNative.packed = false;
+    atNative.passes = 2;
+    check(Decide(atNative) == Outcome::MorePasses, "at native, two passes: Matched residual");
+    atNative.passes = 1;
+    atNative.detailReuse = true;
+    check(Decide(atNative) == Outcome::DetailReuse, "at native with Reuse detail running: Matched residual");
+    // StabilizeAtNative itself: which frames give atNative on (the same function D3D12 calls).
+    check(StabilizeAtNative(true, 1.0f, false, 1u, false), "100%, CNN: at native");
+    check(StabilizeAtNative(true, 1.2f, false, 11u, false), "120%, Transformer: at native");
+    check(!StabilizeAtNative(true, 1.0f, false, 0u, false), "No DLSS: Matched residual at 100%");
+    check(!StabilizeAtNative(false, 1.0f, false, 1u, false), "Also at 100% off: Matched residual");
+    check(!StabilizeAtNative(true, 1.0f, true, 1u, false), "Compress screen edges: its own rule");
+    check(!StabilizeAtNative(true, 1.0f, false, 1u, true), "no NGX DLSS: Matched residual");
+    check(!StabilizeAtNative(true, 0.8f, false, 1u, false), "below 100%: the reduced path, not at native");
+    check(StabilizeSupersampled(true, 1920, 1080, 2304, 1296) && !StabilizeSupersampled(true, 1920, 1080, 1920, 1080) &&
+              !StabilizeSupersampled(false, 1920, 1080, 2304, 1296),
+          "supersampling only above native, under at native");
+
     Frame packed = f;
     packed.packed = true;
     check(Decide(packed) == Outcome::Packed, "packed: Matched residual");

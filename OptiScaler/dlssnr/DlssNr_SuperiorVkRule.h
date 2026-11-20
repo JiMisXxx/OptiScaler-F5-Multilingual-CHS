@@ -15,7 +15,7 @@ enum class Outcome : uint8_t
 {
     NotSelected,  // another Upscale Mode
     Runs,         // the No DLSS composition runs
-    NotReduced,   // 100% and above: the ordinary composition (Also at 100% and above is not on Vulkan yet)
+    NotReduced,   // 100% and above without the private DLSS at native (No DLSS, Also at 100% and above off, ...)
     Packed,       // Compress screen edges packs the model's picture
     MorePasses,   // more than one model pass
     DetailReuse,  // Reuse detail is on
@@ -27,7 +27,11 @@ struct Frame
 {
     bool selected = false;
     bool reduced = false; // the model works on fewer pixels than the frame (below 100%)
-    bool packed = false;  // Compress screen edges is packing this frame
+    // [DlssNr] SuperiorAtNative applies (StabilizeAtNative: 100% and above, a private DLSS wanted and available, no
+    // Compress screen edges): the private DLSS steadies the native raster, above 100% the pair the supersample down-leg
+    // averaged to native.
+    bool atNative = false;
+    bool packed = false; // Compress screen edges is packing this frame
     unsigned passes = 1;
     bool detailReuse = false;
     bool deviceCanRun = true;
@@ -36,14 +40,14 @@ struct Frame
 
 constexpr Outcome Decide(const Frame& f)
 {
-    return !f.selected       ? Outcome::NotSelected
-           : f.packed        ? Outcome::Packed
-           : !f.reduced      ? Outcome::NotReduced
-           : f.passes > 1    ? Outcome::MorePasses
-           : f.detailReuse   ? Outcome::DetailReuse
-           : !f.deviceCanRun ? Outcome::DeviceLimits
-           : !f.passBuilt    ? Outcome::PassFailed
-                             : Outcome::Runs;
+    return !f.selected                 ? Outcome::NotSelected
+           : f.packed                  ? Outcome::Packed
+           : !f.reduced && !f.atNative ? Outcome::NotReduced
+           : f.passes > 1              ? Outcome::MorePasses
+           : f.detailReuse             ? Outcome::DetailReuse
+           : !f.deviceCanRun           ? Outcome::DeviceLimits
+           : !f.passBuilt              ? Outcome::PassFailed
+                                       : Outcome::Runs;
 }
 
 // The low field pass keeps a 36 x 68 tile of RGB floats in shared memory (superior/RawLow.hlsl). D3D12 packs a float3
@@ -65,8 +69,8 @@ constexpr const char* Describe(Outcome outcome)
     case Outcome::Runs:
         return "";
     case Outcome::NotReduced:
-        return "On Vulkan, Superior Scaling works below 100% Model resolution; at 100% and above the Matched residual "
-               "composition is used.";
+        return "On Vulkan, Superior Scaling works below 100% Model resolution, and at 100% and above with CNN or "
+               "Transformer while Also at 100% and above is on; otherwise the Matched residual composition is used.";
     case Outcome::Packed:
         return "Superior Scaling does not run with Compress screen edges on Vulkan yet; Matched residual is used.";
     case Outcome::MorePasses:
