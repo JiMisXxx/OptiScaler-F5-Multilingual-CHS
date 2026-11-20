@@ -4729,8 +4729,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         const bool reduced = modelScale < 0.999f;
         const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
-        // Superior's private DLSS needs NVIDIA's DLSS SR through NGX (D3D12 or a D3D12 bridge); on native Vulkan it
-        // runs below 100% Model resolution.
+        // Superior's private DLSS needs NVIDIA's DLSS SR through NGX (D3D12, a D3D12 bridge or native Vulkan); it runs
+        // below 100% Model resolution, and at 100% and above under Also at 100% and above.
         static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
         const int enlarge = superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
@@ -4777,7 +4777,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             const auto selected =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default());
             int preset = selected == choices[0] ? 0 : selected == choices[2] ? 2 : 1;
-            ImGui::BeginDisabled(!nr.vulkan && DlssNr::SuperiorScaling::SrUnavailable());
+            const bool srUnavailable =
+                nr.vulkan ? DlssNr::SuperiorSrUnavailableVk() : DlssNr::SuperiorScaling::SrUnavailable();
+            ImGui::BeginDisabled(srUnavailable);
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
                 config->DlssNrSuperiorScalingPreset = choices[preset];
             ImGui::EndDisabled();
@@ -4789,10 +4791,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
                        "different artifacts of its own.");
 
-            ImGui::BeginDisabled(
-                (!nr.vulkan && DlssNr::SuperiorScaling::SrUnavailable()) ||
-                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) ==
-                    DlssNr::SuperiorScaling::NoPrivateDlss);
+            ImGui::BeginDisabled(srUnavailable || DlssNr::SuperiorScaling::Preset(
+                                                      config->DlssNrSuperiorScalingPreset.value_or_default()) ==
+                                                      DlssNr::SuperiorScaling::NoPrivateDlss);
             bool atNative = config->DlssNrSuperiorAtNative.value_or_default();
             if (ImGui::Checkbox("Also at 100% and above", &atNative))
                 config->DlssNrSuperiorAtNative = atNative;

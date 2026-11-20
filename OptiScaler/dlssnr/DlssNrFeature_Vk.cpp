@@ -295,9 +295,10 @@ std::mutex g_vkMutex;
 // before the first. The game's Vulkan route can move Neural Rendering to the D3D12 bridge at run time, after which this
 // path is never entered again but g_vk.feature stays; IsRunningVk reads this to tell the two apart.
 std::atomic<long long> g_vkSeamStamp { 0 };
-// The NR frame (g_vk.frames) on which the device was last drained, so the several places that free images after a size
-// change drain it once, not once each. ~0 before the first.
+// The seam call (g_vkSeamCalls) on which the device was last drained, so the several places that free images after a
+// size change drain it once, not once each. ~0 before the first.
 unsigned long long g_vkDrainedAt = ~0ull;
+unsigned long long g_vkSeamCalls = 0; // EvaluateAtSeamVk entries (g_vk.frames only counts the ones that evaluate)
 constexpr long long kVkSeamStaleMs = 1000;
 
 long long SteadyMs()
@@ -861,6 +862,8 @@ Spatial::Published EdgeCompressionStatusVk() { return EdgeCompressionVk::Publish
 
 std::string SuperiorStatusVk() { return SuperiorVk::Status(); }
 
+bool SuperiorSrUnavailableVk() { return SuperiorVk::Private::srUnavailable.load(); }
+
 unsigned long long VkFrameClock()
 {
     const unsigned long long presents = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
@@ -1025,6 +1028,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         return;
     }
 
+    ++g_vkSeamCalls;
     // The native Vulkan path is the one running NR (menu: IsRunningVk); it stays so while NR is switched off, until the
     // off release lets the model go (kOffReleaseVk).
     g_vkSeamStamp.store(SteadyMs(), std::memory_order_relaxed);
@@ -1534,7 +1538,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (g_vk.device != VK_NULL_HANDLE)
         {
             vkDeviceWaitIdle(g_vk.device);
-            g_vkDrainedAt = g_vk.frames;
+            g_vkDrainedAt = g_vkSeamCalls;
         }
 
         if (g_vk.feature != nullptr && g_vk.release != nullptr)
@@ -2311,11 +2315,27 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // [DlssNr] SuperiorAtNative, as D3D12 (DlssNr_Dx12.cpp): the private DLSS at 100% and above. Above 100% it works at
     // native, on the pair after the supersample down-leg, while the model keeps its supersampled raster and its
     // ordinary guides; Superior's own raster (images, matched guides, the private DLSS) is then the frame's.
-    const bool superiorAtNative =
-        DlssNr::SuperiorScaling::Enabled(cfg) &&
-        DlssNr::SuperiorScaling::StabilizeAtNative(cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
-                                                   cfg.DlssNrSuperiorScalingPreset.value_or_default(),
-                                                   SuperiorVk::Private::srUnavailable);
+    const bool superiorAtNativeWanted = DlssNr::SuperiorScaling::Enabled(cfg) &&
+                                        DlssNr::SuperiorScaling::StabilizeAtNative(
+                                            cfg.DlssNrSuperiorAtNative.value_or_default(), workScale, spatial,
+                                            cfg.DlssNrSuperiorScalingPreset.value_or_default(),
+                                            SuperiorVk::Private::srUnavailable || SuperiorVk::Private::privateBroken);
+    // Above 100% Superior needs the ordinary down-leg to average the supersampled answer to native. Its scaler and the
+    // native image are made here when they can be, so that where the down-leg cannot run this is known before anything
+    // of Superior's is decided or recorded (status, history, guides), not after.
+    bool downLegReady = true;
+    if (superiorAtNativeWanted &&
+        DlssNr::SuperiorScaling::StabilizeSupersampled(true, width, height, workWidth, workHeight))
+    {
+        const Scaler downScaler = cfg.DlssNrScalingDownscaler.value_or_default();
+        if (g_vk.nrScaler == downScaler && !g_vk.superDown)
+            g_vk.superDown =
+                std::make_unique<OS_Vk>("DLSS-NR VK supersample down", device, physicalDevice, false, downScaler);
+        // (a changed scaler is rebuilt by the up-leg below, which cannot fail the way this can)
+        downLegReady =
+            g_vk.outputNative.Valid() && (g_vk.nrScaler != downScaler || (g_vk.superDown && g_vk.superDown->IsInit()));
+    }
+    const bool superiorAtNative = superiorAtNativeWanted && downLegReady;
     const bool superiorSupersample =
         DlssNr::SuperiorScaling::StabilizeSupersampled(superiorAtNative, width, height, workWidth, workHeight);
     const uint32_t superiorW = superiorSupersample ? width : workWidth;
@@ -3078,7 +3098,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // Supersampling under SuperiorAtNative steadies the pair the down-leg averaged to native; without it the ordinary
     // resolve takes the supersampled pair for this frame, as D3D12 does.
     if (superiorRuns && superiorSupersample && !superDownOk)
+    {
+        SuperiorVk::GiveUp("its down-leg to native failed");
         superiorRuns = false;
+    }
 
     Transition(cmdBuffer, *resolveProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmdBuffer, *resolveAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -3319,6 +3342,7 @@ void ShutdownVk(bool deviceAlive)
         DetailReuseVk::Release(false);
         EdgeCompressionVk::Release(false);
         SuperiorVk::Release(false);
+        SuperiorVk::Private::ShutdownOwnCore(false, VK_NULL_HANDLE);
         DepthFadeVk::Release(false);
         // The model's kernels went with the device without their destroy calls.
         DlssNrNative::VkDeviceLost();
@@ -3371,6 +3395,9 @@ void ShutdownVk(bool deviceAlive)
         g_vk.capabilityParams = nullptr;
         g_vk.paramsFromCore = false;
     }
+
+    // A core Superior started itself goes down with the device (nobody else will), after everything made under it.
+    SuperiorVk::Private::ShutdownOwnCore(true, g_vk.device);
 
     if (g_vk.queryPool != VK_NULL_HANDLE && g_vk.device != VK_NULL_HANDLE)
     {

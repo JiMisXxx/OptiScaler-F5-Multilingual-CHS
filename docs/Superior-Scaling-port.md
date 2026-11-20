@@ -47,7 +47,7 @@ model-mapping update.
 Gains use the v59 resolution correction and Structure * Intensity. High/medium multiply within a block; low is the block's arithmetic mean.
 An inter-pass runs before the next pass only if the absolute high/low gap would both increase and exceed 0.15.
 Final shaping uses only the tail after the last successful inter-pass. Carrier K=1, fixed linear 0.5 encoding, guided radius 1, range sigma .015, spatial sigma 3, strength 1.
-No K/headroom analysis is introduced. Native Vulkan runs the same composition from the same shader sources (built for Vulkan), below 100% Model resolution.
+No K/headroom analysis is introduced. Native Vulkan runs the same composition from the same shader sources (built for Vulkan), below 100% Model resolution and, with CNN or Transformer, at 100% and above.
 
 ### When Superior cannot run
 

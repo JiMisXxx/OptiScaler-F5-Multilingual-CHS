@@ -13,9 +13,9 @@
 // The private DLSS (CNN or Transformer, or none: No DLSS) is DlssNr_SuperiorPrivate_Vk.inl; Compose runs it between the
 // model and the resolve, and falls back to the raw answer (No DLSS) while it is being made or when it cannot run.
 //
-// Runs below 100% Model resolution, unpacked, in one pass and without Reuse detail (DlssNr_SuperiorVkRule.h decides, and
-// words each case it does not); otherwise the Matched residual composition the Vulkan path always had runs, as D3D12 runs
-// it at 100% and above.
+// Runs below 100% Model resolution, and at 100% and above with a private DLSS (CNN or Transformer) under [DlssNr]
+// SuperiorAtNative, as D3D12 does; unpacked, in one pass and without Reuse detail while that runs (DlssNr_SuperiorVkRule.h
+// decides, and words each case it does not); otherwise the Matched residual composition the Vulkan path always had runs.
 //
 // Vulkan differences from D3D12, and why:
 //   - Layouts instead of resource states: our own images are moved with Transition; the game's depth and motion are read
@@ -37,8 +37,9 @@ namespace Sp = DlssNr::Spatial;
 namespace Private
 {
 bool Holds();
-void Rebuild(VkDevice device);
+void Rebuild(VkDevice device, bool ngxGone = false);
 void Release(bool deviceAlive);
+void ShutdownOwnCore(bool deviceAlive, VkDevice device);
 void Reselected(VkDevice device);
 } // namespace Private
 
@@ -91,10 +92,10 @@ void DestroyImages()
 // Drains the device unless the frame has drained it already (the resize block does, before anything here runs).
 void Drain(VkDevice device)
 {
-    if (device != VK_NULL_HANDLE && g_vkDrainedAt != g_vk.frames)
+    if (device != VK_NULL_HANDLE && g_vkDrainedAt != g_vkSeamCalls)
     {
         vkDeviceWaitIdle(device);
-        g_vkDrainedAt = g_vk.frames;
+        g_vkDrainedAt = g_vkSeamCalls;
     }
 }
 
@@ -218,6 +219,23 @@ float DepthPrecision(VkFormat format)
 }
 
 // Decides this frame (and publishes and logs what changed). reduced: the model works on fewer pixels than the frame.
+// Reuse detail's gate comes and goes with the frame rate and frame generation; Superior (and its history) must not follow a
+// flicker, so a change of what the gate says is only followed once it has held for kReuseHoldFrames frames in a row.
+constexpr unsigned kReuseHoldFrames = 8;
+bool ReuseTakesFrame(bool raw)
+{
+    static bool held = false;
+    static unsigned differing = 0;
+    if (raw == held)
+        differing = 0;
+    else if (++differing >= kReuseHoldFrames)
+    {
+        held = raw;
+        differing = 0;
+    }
+    return held;
+}
+
 // How Superior's raster relates to the model's (for the log): the model's own, native (100% with the private DLSS), or
 // native over a supersampled model (above 100%).
 enum class Raster
@@ -242,7 +260,7 @@ Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkP
     // generation, textures) said so on its last frame. The ini switch alone does not block Superior. Its gate sits in
     // DetailReuseVk::BeforeModel, after this point, so this reads what it decided last frame (published for the menu)
     // rather than moving the passes; the frame it flips costs one frame of the other composition.
-    frame.detailReuse = cfg.DlssNrDetailReuse.value_or_default() && DetailReuseVk::Published().why.empty();
+    frame.detailReuse = ReuseTakesFrame(cfg.DlssNrDetailReuse.value_or_default() && DetailReuseVk::Published().why.empty());
     if (frame.selected)
     {
         // The device's limits do not change; asked once per device handle.
@@ -316,7 +334,7 @@ Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkP
     {
         // Not run for a while (another Upscale Mode, 100%, a fallback): the images and passes go, with the device drained
         // once. A quick switch back finds them still here.
-        vkDeviceWaitIdle(device);
+        Drain(device);
         Private::Rebuild(device);
         DestroyImages();
         pass.reset();

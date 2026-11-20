@@ -5,10 +5,10 @@
 // says when it does not. A pure rule, so the host test (tests/nr_superior_vk_rule_smoke.cpp) can state every case.
 //
 // The Vulkan path runs Superior's composition (Area downsample, matched guides, the private DLSS CNN or Transformer or
-// none, low field, guided resolve), unpacked, in one model pass, below 100% Model resolution: the cases D3D12 runs the
-// same way. Where it does not run, the ordinary Matched residual composition stays, as it was before Superior had a
-// Vulkan path. What the private DLSS itself says (making it, falling back to No DLSS) is its own line, not an outcome
-// here.
+// none, low field, guided resolve), unpacked, in one model pass, below 100% Model resolution, and at 100% and above
+// when [DlssNr] SuperiorAtNative applies (the private DLSS at native): the cases D3D12 runs the same way. Where it does
+// not run, the ordinary Matched residual composition stays, as it was before Superior had a Vulkan path. What the
+// private DLSS itself says (making it, falling back to No DLSS) is its own line, not an outcome here.
 namespace DlssNr::SuperiorScaling::VkRule
 {
 enum class Outcome : uint8_t

@@ -90,6 +90,8 @@ Spatial::Published EdgeCompressionStatusVk();
 // The line the Upscale Mode card shows under Superior Scaling on native Vulkan: why it falls back to Matched residual,
 // or that CNN / Transformer run as No DLSS here. Empty when there is nothing to say. Safe from the menu thread.
 std::string SuperiorStatusVk();
+// No usable NVIDIA DLSS SR for Superior's private DLSS on native Vulkan (latched until Superior is selected again).
+bool SuperiorSrUnavailableVk();
 
 // Whether the game offers an exposure texture on this path. Observed only: it is not read, because
 // binding the game's image means naming a layout this side cannot know. For the menu, and to settle

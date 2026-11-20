@@ -71,11 +71,20 @@ unsigned waited = 0, failures = 0;
 unsigned wantedPreset = 0, actualPreset = 0;
 uint32_t builtW = 0, builtH = 0;
 bool builtInverted = false;
-bool srUnavailable = false; // no usable NGX DLSS SR here: not tried again until Superior is selected again
+std::atomic<bool> srUnavailable { false }; // no usable NGX DLSS SR here: not tried again until Superior is selected again
+std::string privateBrokenSaid; // what the status line says for privateBroken, when it is not the passes (menu thread: statusLock)
 bool privateBroken = false; // the private DLSS's own passes would not build: No DLSS, until Superior is selected again
 bool resetNext = true;      // this generation's history starts over (the DLSS Reset flag, the ghost history)
 Sup::PrivatePresetChoice choice;
 VkDevice ownerDevice = VK_NULL_HANDLE;
+// The NGX Vulkan core: started by Superior itself when the game's own DLSS had not (then it is shut down with the device,
+// DLSSEnabled or not), which device it was started for, and which start the objects below were made under.
+VkDevice coreOwnerDevice = VK_NULL_HANDLE;
+uint64_t coreOwnerEpoch = 0; // the core's start count right after Superior started it: another start is not ours
+uint64_t builtEpoch = 0;
+// Handles whose creation was recorded in a command buffer that may never be submitted: released only after a drain.
+std::vector<NVSDK_NGX_Handle*> parkedFeatures;
+std::vector<NVSDK_NGX_Parameter*> parkedParams;
 
 OwnedImage carrier, temporalOutput, temporalMotion, unit;
 
@@ -101,6 +110,7 @@ struct MotionSample
     bool busy = false;
     double measuredAt = 0;
     uint64_t context = 0;
+    unsigned waited = 0; // probe updates seen while busy: a slot whose copy never ran (a dropped recording) is let go
 };
 struct MotionProbe
 {
@@ -192,9 +202,30 @@ void ResetResident(bool deviceAlive)
     presetFade = Pol::Fade {};
 }
 
+// A feature (and its parameter block) whose creation sits in the command buffer being recorded: never released here, since
+// that buffer may be discarded unsubmitted; the next Rebuild (the device drained) releases it.
+void Park(NVSDK_NGX_Handle*& handle, NVSDK_NGX_Parameter*& block)
+{
+    if (handle != nullptr)
+        parkedFeatures.push_back(handle);
+    if (block != nullptr)
+        parkedParams.push_back(block);
+    handle = nullptr;
+    block = nullptr;
+}
+
 // Releases the NGX objects. The device must be idle. Only when the NGX Vulkan core is still up (never after it).
 void ReleaseNgx()
 {
+    if (NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
+        for (auto* handle : parkedFeatures)
+            NVNGXProxy::VULKAN_ReleaseFeature()(handle);
+    if (NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_DestroyParameters() != nullptr)
+        for (auto* block : parkedParams)
+            NVNGXProxy::VULKAN_DestroyParameters()(block);
+    parkedFeatures.clear();
+    parkedParams.clear();
+
     if (resident.feature != nullptr && NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
         NVNGXProxy::VULKAN_ReleaseFeature()(resident.feature);
     if (resident.params != nullptr && NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_DestroyParameters() != nullptr)
@@ -210,18 +241,31 @@ void ReleaseNgx()
     params = nullptr;
 }
 
-bool Holds()
+bool HoldsNgx()
 {
-    return feature != nullptr || params != nullptr || resident.feature != nullptr || carrier.Valid() || ghost.Holds() ||
-           probe.samples[0].result.Valid();
+    return feature != nullptr || params != nullptr || resident.feature != nullptr || resident.params != nullptr ||
+           !parkedFeatures.empty() || !parkedParams.empty();
 }
 
+bool Holds() { return HoldsNgx() || carrier.Valid() || ghost.Holds() || probe.samples[0].result.Valid(); }
+
 // A preset change, a new raster or the end of the pass: the device is drained, then the feature and the images go.
-void Rebuild(VkDevice device)
+// ngxGone: the NGX core these objects were made under is gone (shut down, restarted, another device): every handle is
+// forgotten with no NGX call at all.
+void Rebuild(VkDevice device, bool ngxGone)
 {
     if (Holds())
         Drain(device);
 
+    if (ngxGone)
+    {
+        feature = nullptr;
+        params = nullptr;
+        resident.feature = nullptr;
+        resident.params = nullptr;
+        parkedFeatures.clear();
+        parkedParams.clear();
+    }
     ReleaseNgx();
     ResetResident(true);
     DestroyImages();
@@ -240,6 +284,7 @@ void Reselected(VkDevice device)
 {
     srUnavailable = false;
     privateBroken = false;
+    privateBrokenSaid.clear();
     if (phase == Phase::Failed)
         Rebuild(device);
 }
@@ -256,6 +301,8 @@ void Release(bool deviceAlive)
         // The device took its images, its event and every NGX handle with it.
         feature = nullptr;
         params = nullptr;
+        parkedFeatures.clear();
+        parkedParams.clear();
         ResetResident(false);
         for (OwnedImage* img : { &carrier, &temporalOutput, &temporalMotion, &unit, &ghost.reconstructed,
                                  &ghost.state[0], &ghost.state[1], &ghost.raw[0], &ghost.raw[1], &ghost.reference[0],
@@ -273,7 +320,34 @@ void Release(bool deviceAlive)
     choice = {};
     srUnavailable = false;
     privateBroken = false;
+    ghostFormatsChecked = false;
+    ownerDevice = VK_NULL_HANDLE;
     Say("");
+}
+
+// The NGX core Superior started itself (the game's DLSS had not) goes down with the device, whatever DLSSEnabled says:
+// nobody else will. A core the game started is the game's. Called with the device idle and the objects above already
+// released, or with the device gone (then the core is only forgotten: it cannot be shut down on a dead device).
+void ShutdownOwnCore(bool deviceAlive, VkDevice device)
+{
+    if (coreOwnerDevice == VK_NULL_HANDLE)
+        return;
+
+    // Only the start Superior made: if the game started it again since (its own Init), it is the game's now.
+    const bool still = NVNGXProxy::IsVulkanInited() && NVNGXProxy::VulkanDevice() == coreOwnerDevice &&
+                       NVNGXProxy::VulkanEpoch() == coreOwnerEpoch;
+    if (deviceAlive && still)
+    {
+        if (NVNGXProxy::VULKAN_Shutdown1() != nullptr)
+            NVNGXProxy::VULKAN_Shutdown1()(device != VK_NULL_HANDLE ? device : coreOwnerDevice);
+        else if (NVNGXProxy::VULKAN_Shutdown() != nullptr)
+            NVNGXProxy::VULKAN_Shutdown()();
+        LOG_INFO("DLSS-NR Vulkan Superior Scaling: its NGX runtime was shut down with the device");
+    }
+
+    if (still)
+        NVNGXProxy::SetVulkanInited(false);
+    coreOwnerDevice = VK_NULL_HANDLE;
 }
 
 // D3D12's creation parameters (Pipeline.inl SetCreationParameters + CreateFeature).
@@ -310,23 +384,26 @@ NVSDK_NGX_Result CreateFeature(VkCommandBuffer cmd, unsigned preset)
     return CreateFeatureOn(cmd, params, feature, preset);
 }
 
-// Whether the images this needs can be storage images on this device (the field and the bias mask are R16F).
+// Whether the images this needs can be storage images on this device (the field and the bias mask are R32F).
 bool GhostFormatsOk(VkPhysicalDevice physicalDevice)
 {
     if (!ghostFormatsChecked)
     {
         ghostFormatsChecked = true;
-        const auto storage = [&](VkFormat format, bool filtered)
+        const auto storage = [&](VkFormat format, VkFormatFeatureFlags extra)
         {
             VkFormatProperties props {};
             vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
-            const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                                              (filtered ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0u);
+            const VkFormatFeatureFlags need =
+                VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | extra;
             return (props.optimalTilingFeatures & need) == need;
         };
-        // The field is read with the linear sampler (the decode); the integer images are only loaded.
-        ghostFormatsOk = storage(VK_FORMAT_R16_SFLOAT, true) && storage(VK_FORMAT_R32_UINT, false) &&
-                         storage(VK_FORMAT_R32G32B32A32_UINT, false);
+        // The field is read with the linear sampler (the decode); the depth scratch takes an atomic max; the state is only
+        // loaded and stored. All of them core storage formats (no extended-format feature).
+        ghostFormatsOk = storage(VK_FORMAT_R32_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) &&
+                         storage(VK_FORMAT_R32_UINT, VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) &&
+                         storage(VK_FORMAT_R32G32B32A32_UINT, 0u) && storage(VK_FORMAT_R32G32B32A32_SFLOAT, 0u) &&
+                         storage(VK_FORMAT_R16G16B16A16_SFLOAT, 0u);
         if (!ghostFormatsOk)
             LOG_WARN("DLSS-NR Vulkan Superior Scaling: this GPU cannot use the Transformer's disocclusion field formats; "
                      "the Transformer runs without it");
@@ -356,10 +433,29 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
 
     if (!NVNGXProxy::IsVulkanInited())
     {
-        // The game's own DLSS may not be the upscaler in use; the proxy's loader does what DLSSFeatureVk does.
+        // The game's own DLSS may not be the upscaler in use; the proxy's loader does what DLSSFeatureVk does. A core
+        // started here is ours to shut down with the device (ShutdownOwnCore).
         NVNGXProxy::InitVulkan(in.instance, in.physicalDevice, in.device, ::vkGetInstanceProcAddr,
                                ::vkGetDeviceProcAddr);
+        if (NVNGXProxy::IsVulkanInited())
+        {
+            coreOwnerDevice = in.device;
+            coreOwnerEpoch = NVNGXProxy::VulkanEpoch();
+        }
     }
+    else if (NVNGXProxy::VulkanDevice() != VK_NULL_HANDLE && NVNGXProxy::VulkanDevice() != in.device)
+    {
+        // The core is up for another device (the game started it there): its objects cannot be used on this one, and
+        // starting it a second time on this one is not something NGX is asked to do.
+        phase = Phase::Failed;
+        privateBroken = true;
+        privateBrokenSaid = "NVIDIA DLSS runs on another device here. Using the current NR edit.";
+        LOG_WARN("DLSS-NR Vulkan Superior Scaling: the NGX runtime is up for another Vulkan device; running No DLSS "
+                 "(select Superior Scaling again to retry)");
+        Say("NVIDIA DLSS runs on another device here. Using the current NR edit.");
+        return false;
+    }
+    builtEpoch = NVNGXProxy::VulkanEpoch();
 
     if (!NgxUsable())
     {
@@ -387,6 +483,7 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
             // Superior itself is fine: it runs No DLSS, and does not try the private passes again this selection.
             phase = Phase::Failed;
             privateBroken = true;
+            privateBrokenSaid.clear();
             LOG_WARN("DLSS-NR Vulkan Superior Scaling: the private DLSS passes could not be built; running No DLSS "
                      "(select Superior Scaling again to retry)");
             Say("The private DLSS's passes could not be built on this GPU. Using the current NR edit.");
@@ -444,6 +541,10 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
 
     if (result != NVSDK_NGX_Result_Success || feature == nullptr)
     {
+        // Whatever the failed call handed back sits in the unsubmitted recording: kept for the next drained rebuild.
+        if (feature != nullptr)
+            parkedFeatures.push_back(feature);
+        feature = nullptr;
         // A runtime without the requested preset (newer 310.x DLLs dropped the CNN presets A-E): its default.
         LOG_WARN("DLSS-NR Vulkan Superior Scaling: private DLSS preset {} unavailable ({:X}); using the runtime's default "
                  "preset", preset, (unsigned) result);
@@ -461,7 +562,7 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
     default:
         LOG_WARN("DLSS-NR Vulkan Superior Scaling: private DLSS creation failed (NGX result {:X}){}", (unsigned) result,
                  srUnavailable ? "; not tried again this session" : "");
-        ReleaseNgx();
+        Park(feature, params); // the creation is in this recording: released after a drain, not now
         phase = Phase::Failed;
         Say(srUnavailable ? "NVIDIA DLSS is not available here. Using the current NR edit."
                           : "Private DLSS could not be created. Using the current NR edit.");
@@ -491,10 +592,10 @@ bool EnsureGhost(unsigned workW, unsigned workH)
     DestroyGhost();
     const unsigned qw = (workW + 3) / 4, qh = (workH + 3) / 4;
     bool ok = CreateImage(ghost.reconstructed, qw, qh, VK_FORMAT_R32_UINT, true) &&
-              CreateImage(ghost.field, qw, qh, VK_FORMAT_R16_SFLOAT, true) &&
+              CreateImage(ghost.field, qw, qh, VK_FORMAT_R32_SFLOAT, true) &&
               CreateImage(ghost.expanded, qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true) &&
               CreateImage(ghost.rings, qw, qh, VK_FORMAT_R32G32B32A32_SFLOAT, true) &&
-              CreateImage(ghost.bias, workW, workH, VK_FORMAT_R16_SFLOAT, true);
+              CreateImage(ghost.bias, workW, workH, VK_FORMAT_R32_SFLOAT, true);
     for (unsigned i = 0; i < 2 && ok; ++i)
         ok = CreateImage(ghost.state[i], qw, qh, VK_FORMAT_R32G32B32A32_UINT, true) &&
              CreateImage(ghost.raw[i], qw, qh, VK_FORMAT_R16G16B16A16_SFLOAT, true) &&
@@ -663,27 +764,26 @@ void UpdateResident(VkCommandBuffer cmd, const Frame& in)
             resident.params = nullptr;
             return;
         }
+        // The event first: a creation recorded without a way to tell when it ran is never started.
+        VkEventCreateInfo info { VK_STRUCTURE_TYPE_EVENT_CREATE_INFO };
+        if (vkCreateEvent(in.device, &info, nullptr, &resident.created) != VK_SUCCESS)
+        {
+            resident.created = VK_NULL_HANDLE;
+            NVNGXProxy::VULKAN_DestroyParameters()(resident.params); // nothing was recorded with it
+            resident.params = nullptr;
+            return;
+        }
         SetCreationParameters(resident.params, builtW, builtH, in.depthInverted);
         resident.params->Set(NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 1);
         const auto result = CreateFeatureOn(cmd, resident.params, resident.feature, Sup::CnnE);
-        VkEventCreateInfo info { VK_STRUCTURE_TYPE_EVENT_CREATE_INFO };
         // An aliased handle still belongs to the primary instance.
         if (resident.feature == feature)
             resident.feature = nullptr;
-        if (result != NVSDK_NGX_Result_Success || resident.feature == nullptr ||
-            vkCreateEvent(in.device, &info, nullptr, &resident.created) != VK_SUCCESS)
+        if (result != NVSDK_NGX_Result_Success || resident.feature == nullptr)
         {
             LOG_WARN("DLSS-NR Vulkan Superior Scaling: resident CNN E unavailable ({:X}), keeping CNN D", (unsigned) result);
-            if (resident.feature != nullptr && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
-            {
-                vkDeviceWaitIdle(in.device);
-                NVNGXProxy::VULKAN_ReleaseFeature()(resident.feature);
-            }
-            resident.feature = nullptr;
-            if (resident.params != nullptr)
-                NVNGXProxy::VULKAN_DestroyParameters()(resident.params);
-            resident.params = nullptr;
-            resident.created = VK_NULL_HANDLE;
+            // Its creation may be in this recording: released with the next drained rebuild, not now.
+            Park(resident.feature, resident.params);
             return;
         }
         vkCmdSetEvent(cmd, resident.created, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
@@ -753,6 +853,17 @@ void UpdateMotion(VkCommandBuffer cmd, const Frame& in, double now, bool hold)
     if (suspended)
         return;
 
+    // A slot whose readback was recorded in a command buffer that never ran must not stay busy for good (eight of them
+    // would pin the CNN on D): after a while it is let go (its event is reset; a late run would only write a stale reading).
+    constexpr unsigned kSampleWaitUpdates = 240;
+    for (auto& s : probe.samples)
+        if (s.busy && vkGetEventStatus(in.device, s.done) != VK_EVENT_SET && ++s.waited > kSampleWaitUpdates)
+        {
+            vkResetEvent(in.device, s.done);
+            s.busy = false;
+            s.waited = 0;
+        }
+
     // What the GPU has finished, in recording order.
     std::array<MotionSample*, 8> complete {};
     unsigned count = 0;
@@ -805,6 +916,7 @@ void UpdateMotion(VkCommandBuffer cmd, const Frame& in, double now, bool hold)
     vkCmdSetEvent(cmd, slot->done, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     Transition(cmd, slot->result, VK_IMAGE_LAYOUT_GENERAL);
     slot->busy = true;
+    slot->waited = 0;
     slot->measuredAt = now;
     slot->context = probe.context;
 }
@@ -836,36 +948,33 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
                                           cfg.DlssNrModelResolutionAuto.value_or_default(),
                                           cfg.DlssNrWorkingScale.value_or_default(), workScale);
 
-    // The NGX core went before we could release (a shutdown from inside the NR pass): its objects are gone with it, so
-    // they are forgotten, never released or evaluated, and the next frame makes them again.
-    if ((feature != nullptr || params != nullptr) && !NVNGXProxy::IsVulkanInited())
+    // The NGX core these objects were made under went (a shutdown from inside the NR pass, a restart, another device):
+    // every handle, the resident E's and the parked ones too, is forgotten with no NGX call, the images and the probe go
+    // with the device drained, the preset latch starts over (D3D12's NgxShutdown clears its PresetChoice too), and the next
+    // frame makes it all again.
+    if (HoldsNgx() && (!NVNGXProxy::IsVulkanInited() || NVNGXProxy::VulkanEpoch() != builtEpoch ||
+                       (NVNGXProxy::VulkanDevice() != VK_NULL_HANDLE && NVNGXProxy::VulkanDevice() != in.device)))
     {
-        feature = nullptr;
-        params = nullptr;
-        phase = Phase::None;
-        waited = failures = 0;
-        resetNext = true;
-        LOG_INFO("DLSS-NR Vulkan Superior Scaling: the NGX runtime shut down under the private DLSS; it is made again");
-    }
-
-    if (preset == Sup::NoPrivateDlss)
-    {
-        // Nothing wanted (or no longer): what was made goes, with the device drained once.
-        if (Holds())
-            Rebuild(in.device);
+        Rebuild(in.device, true);
+        choice = {};
+        LOG_INFO("DLSS-NR Vulkan Superior Scaling: the NGX runtime shut down or restarted under the private DLSS; it is "
+                 "made again");
         Say("");
         return nullptr;
     }
 
-    if (srUnavailable)
+    const bool wantNone = preset == Sup::NoPrivateDlss;
+
+    if (srUnavailable && !wantNone)
     {
         Say("NVIDIA DLSS is not available here. Using the current NR edit.");
         return nullptr;
     }
 
-    if (privateBroken)
+    if (privateBroken && !wantNone)
     {
-        Say("The private DLSS's passes could not be built on this GPU. Using the current NR edit.");
+        Say(privateBrokenSaid.empty() ? "The private DLSS's passes could not be built on this GPU. Using the current NR edit."
+                                      : privateBrokenSaid.c_str());
         return nullptr;
     }
 
@@ -873,7 +982,9 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     // is only being changed keeps running while it fades to the current edit over 0.3 s (D3D12 does the same), then goes.
     const bool geometryChanged = builtW != workW || builtH != workH || builtInverted != in.depthInverted ||
                                  ownerDevice != in.device;
-    const bool selectionChanged = phase != Phase::None && wantedPreset != preset;
+    // Going to No DLSS counts as a change of selection (D3D12: previous->temporal != temporal), so a running CNN fades out
+    // to the current edit over 0.3 s instead of cutting.
+    const bool selectionChanged = phase != Phase::None && (wantNone || wantedPreset != preset);
     bool fading = false;
     if (phase == Phase::Ready && !geometryChanged && in.haveDepth &&
         (actualPreset == Sup::CnnD || actualPreset == Sup::CnnE))
@@ -884,6 +995,13 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
         if (ownerDevice != in.device && ownerDevice != VK_NULL_HANDLE)
             LOG_INFO("DLSS-NR Vulkan Superior Scaling: new device, the private DLSS starts over");
         ownerDevice = in.device;
+        ghostFormatsChecked = false; // the physical device may be another one
+    }
+
+    if (wantNone && !fading)
+    {
+        Say("");
+        return nullptr; // nothing wanted, and nothing left running
     }
 
     if (!in.haveDepth)
@@ -937,7 +1055,7 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     if (resident.ready)
     {
         const double now = NowSeconds();
-        UpdateMotion(cmd, in, now, reset);
+        UpdateMotion(cmd, in, now, in.reset); // the frame's own reset only (D3D12: hold || reset), not a generation's
         if (probe.selection.Advance(now))
         {
             reset = true;
