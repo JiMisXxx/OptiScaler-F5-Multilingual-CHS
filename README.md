@@ -1,6 +1,49 @@
-# 这仅仅是一个汉化版本，目前支持中英双语言切换
-> **📥 快速下载**：前往 [最新 Release](../../releases/latest) 下载汉化补丁。
 
+# OptiScaler 中英双语汉化包
+
+> 本仓库**仅提供汉化版本**，目前支持中 / 英双语切换。
+
+## 一、下载准备
+
+请按以下顺序下载两个文件，缺一不可：
+
+1. **原版插件** —— [Download the latest version](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass/releases/latest)
+2. **本汉化包** —— [最新 Release](../../releases/latest)
+
+## 二、安装指引
+
+> 以《巫师 3》DX12 为例，其他游戏同理：**找到 `d3dcompiler_47.dll` 所在的目录**即可。
+
+### 步骤 1：确认目标目录与文件
+
+找到你已部署、并改过名的原版 `OptiScaler.dll`（本例中为 `dxgi.dll`）：
+
+```text
+E:\SteamLibrary\steamapps\common\The Witcher 3\bin\x64_dx12
+├─ dxgi.dll          ← 就是 OptiScaler.dll，需要先改名 / 备份
+└─ OptiScaler.ini    ← 保留你原来的配置即可，不需要动
+```
+
+### 步骤 2：替换文件
+
+1. **关闭游戏**，并在任务管理器中确认 `witcher3.exe` / `witcher3_dx12.exe` 已完全退出。
+2. 把旧的 `dxgi.dll` 改名为 `dxgi.dll.bak`（或直接移到其他目录备份）。
+3. 将本汉化包中的 `OptiScaler.dll` 复制到该目录，并改名为 `dxgi.dll`。
+
+### 步骤 3：切换语言
+
+1. 启动游戏，打开 OptiScaler 菜单。
+2. 进入 **Overlay & Look（叠加层与外观）→ Language（语言）**。
+3. 选择所需语言，切换即时生效。
+
+## 三、注意事项
+
+- 文件名必须改成与原部署一致（如 `dxgi.dll`），否则汉化包不会加载。
+- `OptiScaler.ini` 无需修改，原有配置可以继续沿用。
+- 如需回退，删除新的 `dxgi.dll`，把 `dxgi.dll.bak` 改回 `dxgi.dll` 即可。
+
+#
+#
 # 以下是作者原版介绍：
 # OptiScaler Neural Rendering
 
