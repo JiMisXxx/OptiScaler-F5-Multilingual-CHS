@@ -563,12 +563,16 @@ static void ApplyFinishedColor(ID3D12Resource* picture, ID3D12CommandQueue* queu
         Config::Instance()->DlssNrColourEncoding.value_or_default(), screenPq || screenScrgb || screenSdr,
         screenPq ? Screen::Pq : screenScrgb ? Screen::Scrgb : Screen::Sdr,
         desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
-        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+        // BGRA too (RDR2 on D3D12, most 8-bit swapchains): with RGBA8, RGB10A2 and RGBA16F these are every format a
+        // flip-model swapchain can have. The pass reads the picture through views, which order the channels, and its
+        // scratch copies take the picture's own format, as for native input below.
+        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+            desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
     DlssNr::ReportColourEncoding(screenChoice.choice, DiagFormatName(desc.Format), "finished picture", true);
     if (!screenChoice.supported)
     {
         Late::Cancel();
-        Late::Say("This screen colour format is not supported.");
+        Late::Say((std::string("This screen colour format is not supported (") + DiagFormatName(desc.Format) + ").").c_str());
         return;
     }
     const bool pq = screenChoice.screen == Screen::Pq;
@@ -904,7 +908,7 @@ static bool ApplyFinishedPictureInput(ID3D12CommandQueue* queue, ID3D12GraphicsC
     DlssNr::ReportColourEncoding(screenChoice.choice, DiagFormatName(desc.Format), "native input", true);
     if (!screenChoice.supported)
     {
-        Late::Say("This screen colour format is not supported.");
+        Late::Say((std::string("This screen colour format is not supported (") + DiagFormatName(desc.Format) + ").").c_str());
         return false;
     }
     const bool pq = screenChoice.screen == Screen::Pq;
