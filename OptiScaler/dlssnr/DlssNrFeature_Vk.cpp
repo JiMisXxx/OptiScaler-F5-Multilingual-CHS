@@ -3071,6 +3071,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         superiorFrame.reset = superiorReset;
         superiorFrame.depthInverted = depthInverted;
         superiorFrame.haveDepth = SuperiorVk::depth.Valid() && superiorMatched && SuperiorVk::depthIsReal;
+        superiorFrame.gameMotion = motion;
+        superiorFrame.gameMvX = gameMvX;
+        superiorFrame.gameMvY = gameMvY;
+        superiorFrame.reference = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0
+                                      ? DlssNr::GuideExtent { renderWidth, renderHeight }
+                                      : DlssNr::GuideExtent { outputWidth, outputHeight };
+        superiorFrame.outputWidth = outputWidth;
+        superiorFrame.outputHeight = outputHeight;
     }
     bool resolved = false;
     if (superiorRuns)

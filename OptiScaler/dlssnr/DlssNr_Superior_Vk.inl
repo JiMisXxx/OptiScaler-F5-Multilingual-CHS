@@ -253,6 +253,13 @@ Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkP
             passFailed = false;
             failedFor[0] = failedFor[1] = 0;
             Private::Reselected(device);
+            // Private passes that would not build are tried afresh: the pass (and its flags) is made again.
+            if (pass && !pass->PrivateReady())
+            {
+                Drain(device);
+                Private::Rebuild(device);
+                pass.reset();
+            }
         }
         wasSelected = frame.selected;
     }
@@ -325,7 +332,8 @@ bool MatchGuides(VkCommandBuffer cmd, VkDevice device, const NVSDK_NGX_Resource_
                  unsigned int height, unsigned int workW, unsigned int workH, bool depthInverted, float gameMvX,
                  float gameMvY, DlssNr::GuideExtent reference)
 {
-    const auto depthRead = EdgeCompressionVk::DepthRead(device, gameDepth);
+    // Superior reads a depth held as a colour image too (as D3D12 reads any texture); Compress screen edges does not.
+    const auto depthRead = EdgeCompressionVk::DepthRead(device, gameDepth, true);
     const bool haveDepth = depthRead.view != VK_NULL_HANDLE && guides.depth.valid();
 
     Sp::Layout layout {};

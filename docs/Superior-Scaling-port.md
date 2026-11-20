@@ -53,8 +53,10 @@ No K/headroom analysis is introduced. Native Vulkan runs the same composition fr
 
 Superior runs on DirectX 12, compatible bridges and native Vulkan (No DLSS, CNN and Transformer). On native Vulkan it
 needs a model resolution below 100%, one NR pass, no Compress screen edges and no Reuse detail that is actually running;
-in those cases, and where its passes cannot be built or fail, Matched residual runs instead and the menu says why. The
-CNN on Vulkan runs D only (no resident E and motion probe), and **Also at 100% and above** is not available there yet.
+in those cases, and where its passes cannot be built or fail, Matched residual runs instead and the menu says why. If
+only the private DLSS's passes cannot be built, Superior runs like **No DLSS**. The CNN on Vulkan picks D or E and
+swaps in still scenes like on DirectX 12 (resident E, motion probe, fade); **Also at 100% and above** is not available
+there yet.
 With **No DLSS**, the current NR answer supplies the guided reconstruction directly, including when it is packed.
 CNN uses D or E under the existing guided range rule. When D is selected and E is resident, the camera motion probe
 checks 576 vectors against 0.1 pixel per 60 Hz frame in 1080p-height units (about 6 pixels per second at any frame

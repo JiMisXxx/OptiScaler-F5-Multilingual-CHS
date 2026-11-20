@@ -15,8 +15,9 @@
 //   - The NGX Vulkan runtime shuts down AFTER us (ShutdownVkForDevice runs before the core goes), so the feature is
 //     released there with the core alive; on a lost device the handles are only forgotten. NGX is never called when its
 //     core is gone.
-//   - The CNN's resident E and its motion probe (D3D12 swaps D for E while the picture is still) are not ported: D runs
-//     alone, which is what D3D12 runs while the probe has not seen a still picture.
+//   - The CNN's resident E, its motion probe and the preset fade are the D3D12 ones (D runs in motion, a second feature,
+//     E, takes over once the picture has been still for a moment, the output fades between them). The probe's result
+//     comes back through a host-visible buffer behind a VkEvent instead of a readback fence.
 //   - The ghost field's state images are RGBA32 UINT / RGBA32F instead of R32G32 (not a storage format every device
 //     offers), declared by the shaders as they were written.
 namespace SuperiorVk
@@ -42,6 +43,11 @@ struct Frame
     bool reset = false;         // the model's history was reset this frame
     bool depthInverted = false;
     bool haveDepth = false;
+    // For the CNN's motion probe: the game's own motion, its scale, and the extents its vectors are in.
+    const NVSDK_NGX_Resource_VK* gameMotion = nullptr;
+    float gameMvX = 1.f, gameMvY = 1.f;
+    DlssNr::GuideExtent reference {}; // the render (or output) extent the game's vectors are in
+    unsigned outputWidth = 0, outputHeight = 0;
 };
 
 // Frames to wait for the creation to have run before giving up on it.
@@ -66,11 +72,47 @@ unsigned wantedPreset = 0, actualPreset = 0;
 uint32_t builtW = 0, builtH = 0;
 bool builtInverted = false;
 bool srUnavailable = false; // no usable NGX DLSS SR here: not tried again until Superior is selected again
+bool privateBroken = false; // the private DLSS's own passes would not build: No DLSS, until Superior is selected again
 bool resetNext = true;      // this generation's history starts over (the DLSS Reset flag, the ghost history)
 Sup::PrivatePresetChoice choice;
 VkDevice ownerDevice = VK_NULL_HANDLE;
 
 OwnedImage carrier, temporalOutput, temporalMotion, unit;
+
+// The CNN D's second feature, E, kept ready for still pictures (PrivateEffects.inl UpdateResidentCnn).
+struct Resident
+{
+    NVSDK_NGX_Parameter* params = nullptr;
+    NVSDK_NGX_Handle* feature = nullptr;
+    VkEvent created = VK_NULL_HANDLE;
+    unsigned waited = 0;
+    bool attempted = false, ready = false, gaveUp = false;
+};
+Resident resident;
+
+// One reading of the motion probe: a 1x1 result, copied to a host-visible buffer, with an event behind the copy.
+struct MotionSample
+{
+    OwnedImage result;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint32_t* mapped = nullptr;
+    VkEvent done = VK_NULL_HANDLE;
+    bool busy = false;
+    double measuredAt = 0;
+    uint64_t context = 0;
+};
+struct MotionProbe
+{
+    std::array<MotionSample, 8> samples;
+    Pol::CnnMotion selection;
+    double nextSample = 0;
+    uint64_t context = 0;
+    bool suspended = false;
+};
+MotionProbe probe;
+Pol::Fade presetFade; // the running CNN fades to the current edit while another preset replaces it
+double NowSeconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 struct Ghost
 {
@@ -117,9 +159,49 @@ void DestroyImages()
     builtW = builtH = 0;
 }
 
+void DestroySample(MotionSample& s)
+{
+    if (g_vk.device != VK_NULL_HANDLE)
+    {
+        DestroyImage(s.result);
+        if (s.done != VK_NULL_HANDLE)
+            vkDestroyEvent(g_vk.device, s.done, nullptr);
+        if (s.memory != VK_NULL_HANDLE)
+        {
+            vkUnmapMemory(g_vk.device, s.memory);
+            vkFreeMemory(g_vk.device, s.memory, nullptr);
+        }
+        if (s.buffer != VK_NULL_HANDLE)
+            vkDestroyBuffer(g_vk.device, s.buffer, nullptr);
+    }
+    s = MotionSample {};
+}
+
+// The probe and the resident E go with the generation (the device is idle) or are forgotten (it is gone).
+void ResetResident(bool deviceAlive)
+{
+    if (deviceAlive)
+    {
+        for (auto& s : probe.samples)
+            DestroySample(s);
+        if (resident.created != VK_NULL_HANDLE && g_vk.device != VK_NULL_HANDLE)
+            vkDestroyEvent(g_vk.device, resident.created, nullptr);
+    }
+    probe = MotionProbe {};
+    resident = Resident {};
+    presetFade = Pol::Fade {};
+}
+
 // Releases the NGX objects. The device must be idle. Only when the NGX Vulkan core is still up (never after it).
 void ReleaseNgx()
 {
+    if (resident.feature != nullptr && NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
+        NVNGXProxy::VULKAN_ReleaseFeature()(resident.feature);
+    if (resident.params != nullptr && NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_DestroyParameters() != nullptr)
+        NVNGXProxy::VULKAN_DestroyParameters()(resident.params);
+    resident.feature = nullptr;
+    resident.params = nullptr;
+
     if (feature != nullptr && NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
         NVNGXProxy::VULKAN_ReleaseFeature()(feature);
     if (params != nullptr && NVNGXProxy::IsVulkanInited() && NVNGXProxy::VULKAN_DestroyParameters() != nullptr)
@@ -128,7 +210,11 @@ void ReleaseNgx()
     params = nullptr;
 }
 
-bool Holds() { return feature != nullptr || params != nullptr || carrier.Valid() || ghost.Holds(); }
+bool Holds()
+{
+    return feature != nullptr || params != nullptr || resident.feature != nullptr || carrier.Valid() || ghost.Holds() ||
+           probe.samples[0].result.Valid();
+}
 
 // A preset change, a new raster or the end of the pass: the device is drained, then the feature and the images go.
 void Rebuild(VkDevice device)
@@ -137,6 +223,7 @@ void Rebuild(VkDevice device)
         Drain(device);
 
     ReleaseNgx();
+    ResetResident(true);
     DestroyImages();
     if (created != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
     {
@@ -152,6 +239,7 @@ void Rebuild(VkDevice device)
 void Reselected(VkDevice device)
 {
     srUnavailable = false;
+    privateBroken = false;
     if (phase == Phase::Failed)
         Rebuild(device);
 }
@@ -168,6 +256,7 @@ void Release(bool deviceAlive)
         // The device took its images, its event and every NGX handle with it.
         feature = nullptr;
         params = nullptr;
+        ResetResident(false);
         for (OwnedImage* img : { &carrier, &temporalOutput, &temporalMotion, &unit, &ghost.reconstructed,
                                  &ghost.state[0], &ghost.state[1], &ghost.raw[0], &ghost.raw[1], &ghost.reference[0],
                                  &ghost.reference[1], &ghost.field, &ghost.expanded, &ghost.rings, &ghost.bias })
@@ -183,6 +272,7 @@ void Release(bool deviceAlive)
 
     choice = {};
     srUnavailable = false;
+    privateBroken = false;
     Say("");
 }
 
@@ -202,7 +292,8 @@ void SetCreationParameters(NVSDK_NGX_Parameter* p, uint32_t w, uint32_t h, bool 
     p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
 }
 
-NVSDK_NGX_Result CreateFeature(VkCommandBuffer cmd, unsigned preset)
+NVSDK_NGX_Result CreateFeatureOn(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, NVSDK_NGX_Handle*& feature,
+                                 unsigned preset)
 {
     for (const char* key :
          { NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
@@ -212,6 +303,11 @@ NVSDK_NGX_Result CreateFeature(VkCommandBuffer cmd, unsigned preset)
         params->Set(key, preset);
     feature = nullptr;
     return NVNGXProxy::VULKAN_CreateFeature()(cmd, NVSDK_NGX_Feature_SuperSampling, params, &feature);
+}
+
+NVSDK_NGX_Result CreateFeature(VkCommandBuffer cmd, unsigned preset)
+{
+    return CreateFeatureOn(cmd, params, feature, preset);
 }
 
 // Whether the images this needs can be storage images on this device (the field and the bias mask are R16F).
@@ -277,17 +373,23 @@ bool Create(VkCommandBuffer cmd, const Frame& in, unsigned preset)
 
     // Every pass it dispatches is built now: one that will not build is a private DLSS that cannot be made, said here.
     {
-        std::vector<Blob> blobs { Blob::Generic,     Blob::CarrierDecode, Blob::LowSigned, Blob::ResolveHdr,
-                                  Blob::ResolveSdr,  Blob::PrivateEncode };
+        std::vector<Blob> blobs { Blob::Generic,    Blob::CarrierDecode, Blob::LowSigned,
+                                  Blob::ResolveHdr, Blob::ResolveSdr,    Blob::PrivateEncode };
+        if (!Sup::NeedsGhostField(preset))
+            for (const Blob b : { Blob::PrivateFade, Blob::CnnMotion })
+                blobs.push_back(b);
         if (Sup::NeedsGhostField(preset))
             for (const Blob b : { Blob::GhostClear, Blob::GhostCoarse1, Blob::GhostCoarse2, Blob::GhostReference,
                                   Blob::GhostDilate, Blob::GhostBias, Blob::GhostDecodeSeed, Blob::GhostRingsInPlace })
                 blobs.push_back(b);
         if (!pass->Build(cmd, blobs.data(), blobs.size()))
         {
+            // Superior itself is fine: it runs No DLSS, and does not try the private passes again this selection.
             phase = Phase::Failed;
-            LOG_WARN("DLSS-NR Vulkan Superior Scaling: the private DLSS passes could not be built; running No DLSS");
-            Say("Private DLSS could not be created. Using the current NR edit.");
+            privateBroken = true;
+            LOG_WARN("DLSS-NR Vulkan Superior Scaling: the private DLSS passes could not be built; running No DLSS "
+                     "(select Superior Scaling again to retry)");
+            Say("The private DLSS's passes could not be built on this GPU. Using the current NR edit.");
             return false;
         }
     }
@@ -542,6 +644,172 @@ bool RepairTransformer(VkCommandBuffer cmd, const Frame& in, OwnedImage& proxy, 
 }
 
 // ---------------------------------------------------------------------------------------------
+// The CNN's resident E and its motion probe (PrivateEffects.inl UpdateResidentCnn, UpdateMotion)
+// ---------------------------------------------------------------------------------------------
+
+// While D runs, makes E once (same parameters, FreeMemOnRelease) and waits for the GPU to have run its creation; then the
+// probe exists and E may take over.
+void UpdateResident(VkCommandBuffer cmd, const Frame& in)
+{
+    if (actualPreset != Sup::CnnD)
+        return;
+
+    if (!resident.attempted)
+    {
+        resident.attempted = true;
+        if (NVNGXProxy::VULKAN_AllocateParameters()(&resident.params) != NVSDK_NGX_Result_Success ||
+            resident.params == nullptr)
+        {
+            resident.params = nullptr;
+            return;
+        }
+        SetCreationParameters(resident.params, builtW, builtH, in.depthInverted);
+        resident.params->Set(NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 1);
+        const auto result = CreateFeatureOn(cmd, resident.params, resident.feature, Sup::CnnE);
+        VkEventCreateInfo info { VK_STRUCTURE_TYPE_EVENT_CREATE_INFO };
+        // An aliased handle still belongs to the primary instance.
+        if (resident.feature == feature)
+            resident.feature = nullptr;
+        if (result != NVSDK_NGX_Result_Success || resident.feature == nullptr ||
+            vkCreateEvent(in.device, &info, nullptr, &resident.created) != VK_SUCCESS)
+        {
+            LOG_WARN("DLSS-NR Vulkan Superior Scaling: resident CNN E unavailable ({:X}), keeping CNN D", (unsigned) result);
+            if (resident.feature != nullptr && NVNGXProxy::VULKAN_ReleaseFeature() != nullptr)
+            {
+                vkDeviceWaitIdle(in.device);
+                NVNGXProxy::VULKAN_ReleaseFeature()(resident.feature);
+            }
+            resident.feature = nullptr;
+            if (resident.params != nullptr)
+                NVNGXProxy::VULKAN_DestroyParameters()(resident.params);
+            resident.params = nullptr;
+            resident.created = VK_NULL_HANDLE;
+            return;
+        }
+        vkCmdSetEvent(cmd, resident.created, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        resident.waited = 0;
+        return;
+    }
+
+    if (resident.feature == nullptr || resident.ready || resident.gaveUp)
+        return;
+
+    if (vkGetEventStatus(in.device, resident.created) == VK_EVENT_SET)
+        resident.ready = true;
+    else if (++resident.waited > kCreationWaitFrames)
+    {
+        // Never run: E is not used (its objects are released with the generation).
+        resident.gaveUp = true;
+        LOG_WARN("DLSS-NR Vulkan Superior Scaling: resident CNN E creation was never run, keeping CNN D");
+    }
+}
+
+bool MakeSample(MotionSample& s, VkDevice device)
+{
+    VkBufferCreateInfo info { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    info.size = 16;
+    info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkEventCreateInfo event { VK_STRUCTURE_TYPE_EVENT_CREATE_INFO };
+    if (!CreateImage(s.result, 1, 1, VK_FORMAT_R32G32B32A32_UINT, true) ||
+        vkCreateBuffer(device, &info, nullptr, &s.buffer) != VK_SUCCESS || vkCreateEvent(device, &event, nullptr, &s.done) != VK_SUCCESS)
+        return false;
+
+    VkMemoryRequirements req {};
+    vkGetBufferMemoryRequirements(device, s.buffer, &req);
+    VkMemoryAllocateInfo alloc { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex =
+        FindMemoryTypeIndex(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    void* mapped = nullptr;
+    if (alloc.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &alloc, nullptr, &s.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(device, s.buffer, s.memory, 0) != VK_SUCCESS ||
+        vkMapMemory(device, s.memory, 0, 16, 0, &mapped) != VK_SUCCESS)
+        return false;
+    s.mapped = static_cast<uint32_t*>(mapped);
+    return true;
+}
+
+// 576 vectors of the game's motion counted against 0.1 pixel per 60 Hz frame (1080p-height units), 30 times a second:
+// read three frames later without waiting, and fed to the D/E selection (D3D12 UpdateMotion, same rules and constants).
+void UpdateMotion(VkCommandBuffer cmd, const Frame& in, double now, bool hold)
+{
+    const auto& region = in.guides->motion;
+    const float normal = in.outputHeight ? 1080.f / float(in.outputHeight) : 0.f;
+    const float perSecond = Pol::PerSecondScale(in.frameMs);
+    const float sx = Sup::MotionScale(in.gameMvX, in.outputWidth, in.reference.width, region.width) * normal * perSecond;
+    const float sy = Sup::MotionScale(in.gameMvY, in.outputHeight, in.reference.height, region.height) * normal * perSecond;
+    const bool suspended = hold || in.gameMotion == nullptr || !region.valid() || !std::isfinite(sx) ||
+                           !std::isfinite(sy) || sx == 0.f || sy == 0.f;
+    // A reading is a count out of 576 over whatever region and scale that frame had, so a moving render size or frame
+    // time does not invalidate readings; only a suspension (a reset frame, no vectors) does.
+    if (probe.suspended != suspended)
+    {
+        ++probe.context;
+        probe.selection.Invalidate();
+        probe.suspended = suspended;
+        probe.nextSample = 0;
+    }
+    if (suspended)
+        return;
+
+    // What the GPU has finished, in recording order.
+    std::array<MotionSample*, 8> complete {};
+    unsigned count = 0;
+    for (auto& s : probe.samples)
+        if (s.busy && vkGetEventStatus(in.device, s.done) == VK_EVENT_SET)
+            complete[count++] = &s;
+    std::sort(complete.begin(), complete.begin() + count, [](auto* a, auto* b) { return a->measuredAt < b->measuredAt; });
+    for (unsigned i = 0; i < count; ++i)
+    {
+        auto& s = *complete[i];
+        vkResetEvent(in.device, s.done);
+        s.busy = false;
+        if (s.context != probe.context || now - s.measuredAt > Pol::FreshSeconds)
+            continue;
+        if (s.mapped[0] == Pol::MotionSamples && s.mapped[1] <= Pol::MotionSamples)
+            probe.selection.Observe(s.mapped[1], s.measuredAt);
+        else
+            probe.selection.Invalidate();
+    }
+
+    if (now < probe.nextSample)
+        return;
+    probe.nextSample = now + 1. / 30.; // enough readings to resolve the 50 ms dwell
+    auto slot = std::find_if(probe.samples.begin(), probe.samples.end(), [](const auto& s) { return !s.busy; });
+    if (slot == probe.samples.end())
+        return;
+    if (!slot->result.Valid() && !MakeSample(*slot, in.device))
+    {
+        DestroySample(*slot);
+        return;
+    }
+
+    Constants c {};
+    Fields::SetPrivateMotion(c, region.x, region.y, region.width, region.height, sx, sy);
+    Transition(cmd, slot->result, VK_IMAGE_LAYOUT_GENERAL);
+    Reads reads {};
+    reads[0] = { in.gameMotion->Resource.ImageViewInfo.ImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    if (!pass->Dispatch(cmd, Blob::CnnMotion, &c, sizeof(c), 1, 1, reads, slot->result.view))
+        return;
+    Transition(cmd, slot->result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy copy {};
+    copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.imageExtent = { 1, 1, 1 };
+    vkCmdCopyImageToBuffer(cmd, slot->result.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot->buffer, 1, &copy);
+    VkMemoryBarrier toHost { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0,
+                         nullptr);
+    vkCmdSetEvent(cmd, slot->done, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    Transition(cmd, slot->result, VK_IMAGE_LAYOUT_GENERAL);
+    slot->busy = true;
+    slot->measuredAt = now;
+    slot->context = probe.context;
+}
+
+// ---------------------------------------------------------------------------------------------
 // One frame (Pipeline.inl Stabilize)
 // ---------------------------------------------------------------------------------------------
 
@@ -595,10 +863,22 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
         return nullptr;
     }
 
-    // Another preset, raster or depth convention: a new feature (the D3D12 generation change).
-    if ((phase != Phase::None && (wantedPreset != preset || builtW != workW || builtH != workH ||
-                                  builtInverted != in.depthInverted)) ||
-        ownerDevice != in.device)
+    if (privateBroken)
+    {
+        Say("The private DLSS's passes could not be built on this GPU. Using the current NR edit.");
+        return nullptr;
+    }
+
+    // Another preset, raster or depth convention: a new feature (the D3D12 generation change). A running CNN whose preset
+    // is only being changed keeps running while it fades to the current edit over 0.3 s (D3D12 does the same), then goes.
+    const bool geometryChanged = builtW != workW || builtH != workH || builtInverted != in.depthInverted ||
+                                 ownerDevice != in.device;
+    const bool selectionChanged = phase != Phase::None && wantedPreset != preset;
+    bool fading = false;
+    if (phase == Phase::Ready && !geometryChanged && in.haveDepth &&
+        (actualPreset == Sup::CnnD || actualPreset == Sup::CnnE))
+        fading = presetFade.Advance(!selectionChanged, NowSeconds()) > 0.f && selectionChanged;
+    if (((phase != Phase::None && geometryChanged) || (selectionChanged && !fading)) || ownerDevice != in.device)
     {
         Rebuild(in.device);
         if (ownerDevice != in.device && ownerDevice != VK_NULL_HANDLE)
@@ -646,8 +926,23 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     }
 
     // ---- Ready: encode, (field), evaluate, decode ----
-    const bool reset = resetNext || in.reset;
+    bool reset = resetNext || in.reset;
     const bool repair = Sup::NeedsGhostField(actualPreset);
+
+    // CNN D with its resident E: the probe says whether the picture is still, and E takes over (D back in motion); the
+    // output fades between them, and the one that comes in starts its history over (Pipeline.inl Stabilize).
+    UpdateResident(cmd, in);
+    float mix = presetFade.weight;
+    bool idle = false;
+    if (resident.ready)
+    {
+        const double now = NowSeconds();
+        UpdateMotion(cmd, in, now, reset);
+        if (probe.selection.Advance(now))
+            reset = true;
+        idle = probe.selection.idle;
+        mix *= probe.selection.fade.weight;
+    }
 
     Transition(cmd, proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmd, answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -687,7 +982,8 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
         Transition(cmd, *bias, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     // D3D12's evaluate parameters (Pipeline.inl Stabilize).
-    auto* p = params;
+    auto* p = idle ? resident.params : params;
+    auto* const handle = idle ? resident.feature : feature;
     if (repair)
     {
         p->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, haveField ? &bias->ngx : nullptr);
@@ -711,7 +1007,7 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
     p->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.0f);
     p->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
 
-    const NVSDK_NGX_Result result = NVNGXProxy::VULKAN_EvaluateFeature()(cmd, feature, p, nullptr);
+    const NVSDK_NGX_Result result = NVNGXProxy::VULKAN_EvaluateFeature()(cmd, handle, p, nullptr);
     if (result != NVSDK_NGX_Result_Success)
     {
         LOG_WARN("DLSS-NR Vulkan Superior Scaling: private DLSS evaluate failed (NGX result {:X})", (unsigned) result);
@@ -728,15 +1024,23 @@ OwnedImage* Step(VkCommandBuffer cmd, const Config& cfg, const Frame& in, OwnedI
         decoded = RepairTransformer(cmd, in, proxy, answer, workW, workH);
     else
     {
-        // CNN (and a Transformer without a field): the plain decode, Mode 38 (D3D12's read-only decode, no preset fade).
+        // CNN (and a Transformer without a field): the stable decode, Mode 38; only a fade needs the current edit (Mode 40).
         Constants decode {};
         decode.Mode = DlssNr::Superior::DlssNrMode_SuperiorCarrierDecode;
         decode.Width = workW;
         decode.Height = workH;
+        const bool fade = mix < 1.f && !repair;
+        if (fade)
+            Fields::SetPrivateFade(decode, 1.f - mix);
         reads = {};
         reads[0] = Rd(temporalOutput);
-        decoded = pass->Dispatch(cmd, Blob::CarrierDecode, &decode, sizeof(decode), Groups(workW, 8), Groups(workH, 8),
-                                 reads, carrier.view);
+        if (fade)
+        {
+            reads[2] = Rd(proxy);
+            reads[4] = Rd(answer);
+        }
+        decoded = pass->Dispatch(cmd, fade ? Blob::PrivateFade : Blob::CarrierDecode, &decode, sizeof(decode),
+                                 Groups(workW, 8), Groups(workH, 8), reads, carrier.view);
     }
 
     if (!decoded)
