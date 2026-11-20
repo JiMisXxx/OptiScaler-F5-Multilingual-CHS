@@ -84,13 +84,13 @@ int main()
           "the shared memory the low field pass needs (29376 bytes)");
     static_assert(VkRule::kLowFieldSharedBytes == 29376);
 
-    // Words: only a running pass with a private preset asked for, and each fallback, say something; the rest is silent.
-    check(std::strlen(VkRule::Describe(Outcome::NotSelected, true)) == 0, "not selected is silent");
-    check(std::strlen(VkRule::Describe(Outcome::Runs, false)) == 0, "No DLSS running is silent");
-    check(std::strstr(VkRule::Describe(Outcome::Runs, true), "No DLSS") != nullptr, "CNN/Transformer asked: says No DLSS");
+    // Words: each fallback says something and names what runs instead; running and not selected are silent (the private
+    // DLSS's own state is a line of its own).
+    check(std::strlen(VkRule::Describe(Outcome::NotSelected)) == 0, "not selected is silent");
+    check(std::strlen(VkRule::Describe(Outcome::Runs)) == 0, "running is silent");
     for (const Outcome o : { Outcome::NotReduced, Outcome::Packed, Outcome::MorePasses, Outcome::DetailReuse,
                              Outcome::DeviceLimits, Outcome::PassFailed })
-        check(std::strstr(VkRule::Describe(o, false), "Matched residual") != nullptr,
+        check(std::strstr(VkRule::Describe(o), "Matched residual") != nullptr,
               "a fallback names what runs instead");
 
     // The combo: Superior is selectable on Vulkan (no argument for it any more); the other modes follow the scale.

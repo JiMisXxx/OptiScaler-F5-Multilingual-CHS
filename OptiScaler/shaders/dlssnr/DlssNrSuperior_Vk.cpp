@@ -6,6 +6,25 @@
 #include <dlssnr/DlssNr_SuperiorVkRule.h>
 
 #include "superior/precompile_vk/dlssnr_superior_area_Shader_Vk.h"
+#include "superior/precompile_vk/dlssnr_superior_carrier_Shader_Vk.h"
+#include "superior/precompile_vk/dlssnr_superior_generic_Shader_Vk.h"
+#include "superior/precompile_vk/dlssnr_superior_low_Shader_Vk.h"
+#include "superior/precompile_vk/host_normal_hdr0_Shader_Vk.h"
+#include "superior/precompile_vk/host_normal_hdr2_Shader_Vk.h"
+#include "superior/precompile_vk/host_normal_hdr4_Shader_Vk.h"
+#include "superior/precompile_vk/host_normal_hdr6_Shader_Vk.h"
+#include "superior/precompile_vk/host_normal_sdr_Shader_Vk.h"
+#include "superior/precompile_vk/host_resolve_hdr_Shader_Vk.h"
+#include "superior/precompile_vk/host_resolve_sdr_Shader_Vk.h"
+#include "superior/precompile_vk/private_encode_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_bias_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_clear_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_coarse_1_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_coarse_2_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_decode_seed_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_dilate_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_reference_Shader_Vk.h"
+#include "superior/precompile_vk/private_ghost_rings_inplace_Shader_Vk.h"
 #include "superior/precompile_vk/host_low_raw_Shader_Vk.h"
 #include "superior/precompile_vk/host_resolve_guided_raw_Shader_Vk.h"
 #include "superior/precompile_vk/host_uniform_joint_guides_Shader_Vk.h"
@@ -50,6 +69,44 @@ BlobCode CodeOf(DlssNrSuperior_Vk::Blob blob)
         return { host_low_raw_spv, sizeof(host_low_raw_spv), "low field" };
     case B::ResolveGuidedRaw:
         return { host_resolve_guided_raw_spv, sizeof(host_resolve_guided_raw_spv), "guided resolve" };
+    case B::Generic:
+        return { dlssnr_superior_generic_spv, sizeof(dlssnr_superior_generic_spv), "unit exposure" };
+    case B::CarrierDecode:
+        return { dlssnr_superior_carrier_spv, sizeof(dlssnr_superior_carrier_spv), "carrier decode" };
+    case B::LowSigned:
+        return { dlssnr_superior_low_spv, sizeof(dlssnr_superior_low_spv), "residual low field" };
+    case B::ResolveHdr:
+        return { host_resolve_hdr_spv, sizeof(host_resolve_hdr_spv), "residual resolve (HDR)" };
+    case B::ResolveSdr:
+        return { host_resolve_sdr_spv, sizeof(host_resolve_sdr_spv), "residual resolve (SDR)" };
+    case B::NormalSdr:
+        return { host_normal_sdr_spv, sizeof(host_normal_sdr_spv), "residual resolve (SDR mapping)" };
+    case B::NormalHdr0:
+        return { host_normal_hdr0_spv, sizeof(host_normal_hdr0_spv), "residual resolve (HDR mapping 0)" };
+    case B::NormalHdr2:
+        return { host_normal_hdr2_spv, sizeof(host_normal_hdr2_spv), "residual resolve (HDR mapping 2)" };
+    case B::NormalHdr4:
+        return { host_normal_hdr4_spv, sizeof(host_normal_hdr4_spv), "residual resolve (HDR mapping 4)" };
+    case B::NormalHdr6:
+        return { host_normal_hdr6_spv, sizeof(host_normal_hdr6_spv), "residual resolve (HDR mapping 6)" };
+    case B::PrivateEncode:
+        return { private_encode_spv, sizeof(private_encode_spv), "private encode" };
+    case B::GhostClear:
+        return { private_ghost_clear_spv, sizeof(private_ghost_clear_spv), "ghost clear" };
+    case B::GhostCoarse1:
+        return { private_ghost_coarse_1_spv, sizeof(private_ghost_coarse_1_spv), "ghost scatter" };
+    case B::GhostCoarse2:
+        return { private_ghost_coarse_2_spv, sizeof(private_ghost_coarse_2_spv), "ghost age" };
+    case B::GhostReference:
+        return { private_ghost_reference_spv, sizeof(private_ghost_reference_spv), "ghost reference" };
+    case B::GhostDilate:
+        return { private_ghost_dilate_spv, sizeof(private_ghost_dilate_spv), "ghost dilate" };
+    case B::GhostBias:
+        return { private_ghost_bias_spv, sizeof(private_ghost_bias_spv), "ghost bias mask" };
+    case B::GhostDecodeSeed:
+        return { private_ghost_decode_seed_spv, sizeof(private_ghost_decode_seed_spv), "ghost decode" };
+    case B::GhostRingsInPlace:
+        return { private_ghost_rings_inplace_spv, sizeof(private_ghost_rings_inplace_spv), "ghost feather" };
     default:
         return { nullptr, 0, "" };
     }
@@ -75,8 +132,8 @@ DlssNrSuperior_Vk::DlssNrSuperior_Vk(std::string InName, VkDevice InDevice, VkPh
     const VkDeviceSize alignment = std::max<VkDeviceSize>(props.limits.minUniformBufferOffsetAlignment, 1);
     _slotStride = ((sizeof(::DlssNrConstants) + alignment - 1) / alignment) * alignment;
 
-    if (!CreateBufferResource(_device, _physicalDevice, &_constantBuffer, &_constantBufferMemory,
-                              _slotStride * kSlots, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    if (!CreateBufferResource(_device, _physicalDevice, &_constantBuffer, &_constantBufferMemory, _slotStride * kSlots,
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
         vkMapMemory(_device, _constantBufferMemory, 0, _slotStride * kSlots, 0, &_mappedConstantBuffer) != VK_SUCCESS)
     {
@@ -96,6 +153,7 @@ DlssNrSuperior_Vk::DlssNrSuperior_Vk(std::string InName, VkDevice InDevice, VkPh
         CreateBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
         CreateBinding(7, VK_DESCRIPTOR_TYPE_SAMPLER),
         CreateBinding(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        CreateBinding(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
     };
 
     CreateLayouts(bindings);
@@ -159,8 +217,8 @@ bool DlssNrSuperior_Vk::DeviceCanRun(VkPhysicalDevice physicalDevice)
            props.limits.maxComputeWorkGroupInvocations >= 128;
 }
 
-// One RGBA16F pixel in GENERAL, legal for both a sampled read and a storage write; its content is never read. It stands in
-// for every binding a pass does not use.
+// One RGBA16F pixel in GENERAL, legal for both a sampled read and a storage write; its content is never read. It stands
+// in for every binding a pass does not use.
 bool DlssNrSuperior_Vk::CreateDummy(VkCommandBuffer cmdList)
 {
     if (_dummyReady)
@@ -277,10 +335,10 @@ VkDescriptorSet DlssNrSuperior_Vk::Prepare(VkCommandBuffer cmdList, const void* 
                                     VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo sampler { _textureSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
 
-    // Bindings 0, 1-4 (t0-t3), 5-6, 7, 8.
-    VkWriteDescriptorSet writes[9] {};
-    const uint32_t bindingOf[9] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-    for (uint32_t i = 0; i < 9; ++i)
+    // Bindings 0, 1-4 (t0-t3), 5-6, 7, 8 (t5), 9 (t4).
+    VkWriteDescriptorSet writes[10] {};
+    const uint32_t bindingOf[10] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    for (uint32_t i = 0; i < 10; ++i)
     {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
@@ -301,9 +359,11 @@ VkDescriptorSet DlssNrSuperior_Vk::Prepare(VkCommandBuffer cmdList, const void* 
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[7].pImageInfo = &sampler;
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[8].pImageInfo = &readInfo[4];
+    writes[8].pImageInfo = &readInfo[5];
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[9].pImageInfo = &readInfo[4];
 
-    vkUpdateDescriptorSets(_device, 9, writes, 0, nullptr);
+    vkUpdateDescriptorSets(_device, 10, writes, 0, nullptr);
     return set;
 }
 
@@ -323,9 +383,9 @@ void DlssNrSuperior_Vk::Record(VkCommandBuffer cmdList, VkPipeline pipeline, VkD
                          &barrier, 0, nullptr, 0, nullptr);
 }
 
-bool DlssNrSuperior_Vk::Dispatch(VkCommandBuffer InCmdList, Blob InBlob, const void* InConstants, size_t InConstantBytes,
-                                 uint32_t InGroupsX, uint32_t InGroupsY, const Reads& InReads, VkImageView InOut0,
-                                 VkImageView InOut1)
+bool DlssNrSuperior_Vk::Dispatch(VkCommandBuffer InCmdList, Blob InBlob, const void* InConstants,
+                                 size_t InConstantBytes, uint32_t InGroupsX, uint32_t InGroupsY, const Reads& InReads,
+                                 VkImageView InOut0, VkImageView InOut1)
 {
     if (InGroupsX == 0 || InGroupsY == 0)
         return false;
@@ -353,7 +413,8 @@ bool DlssNrSuperior_Vk::DispatchGuides(VkCommandBuffer InCmdList, Blob InPrimary
     const bool correct = InCorrection != Blob::Count;
     const VkPipeline primary = PipelineOf(InPrimary);
     const VkPipeline correction = correct ? PipelineOf(InCorrection) : VK_NULL_HANDLE;
-    if (primary == VK_NULL_HANDLE || (correct && (correction == VK_NULL_HANDLE || InCorrectionX == 0 || InCorrectionY == 0)))
+    if (primary == VK_NULL_HANDLE ||
+        (correct && (correction == VK_NULL_HANDLE || InCorrectionX == 0 || InCorrectionY == 0)))
         return false;
 
     const VkDescriptorSet set = Prepare(InCmdList, InConstants, InConstantBytes, InReads, InOut0, InOut1);

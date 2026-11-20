@@ -10,7 +10,8 @@
 //   4. The 1/8-size low field of the answer minus the model's input (host_low_raw), when the band gains are not both 1.
 //   5. The resolve: the live composition (host_resolve_guided_raw) with the radius-one guided estimator reading the model's
 //      raster, shaped by the low field.
-// There is no private DLSS yet (a later story), so the saved CNN / Transformer preset runs as No DLSS here, and says so.
+// The private DLSS (CNN or Transformer, or none: No DLSS) is DlssNr_SuperiorPrivate_Vk.inl; Compose runs it between the
+// model and the resolve, and falls back to the raw answer (No DLSS) while it is being made or when it cannot run.
 //
 // Runs below 100% Model resolution, unpacked, in one pass and without Reuse detail (DlssNr_SuperiorVkRule.h decides, and
 // words each case it does not); otherwise the Matched residual composition the Vulkan path always had runs, as D3D12 runs
@@ -32,6 +33,15 @@ namespace SuperiorVk
 namespace Rule = DlssNr::SuperiorScaling::VkRule;
 namespace Sp = DlssNr::Spatial;
 
+// The private DLSS (DlssNr_SuperiorPrivate_Vk.inl, included after this file).
+namespace Private
+{
+bool Holds();
+void Rebuild(VkDevice device);
+void Release(bool deviceAlive);
+void Reselected(VkDevice device);
+} // namespace Private
+
 std::unique_ptr<DlssNrSuperior_Vk> pass;
 bool passFailed = false;
 
@@ -39,6 +49,8 @@ OwnedImage depth;  // the game's depth matched to the model's raster, R32F
 OwnedImage motion; // the game's motion matched the same way, RGBA32F (the model reads xy)
 OwnedImage low;    // the 1/8-size low field, RGBA16F
 unsigned int madeFor[2] = {};
+bool depthIsReal = false;   // the last MatchGuides matched the game's depth (not the depthless surface guides)
+float depthPrecision = 0.f; // of the game's depth format, as the last MatchGuides saw it (the private DLSS's ghost field)
 
 // When the pass last ran, for letting go of its images and passes once it has not for a while.
 std::chrono::steady_clock::time_point lastRan {};
@@ -47,13 +59,14 @@ constexpr auto kIdleRelease = std::chrono::seconds(5);
 std::mutex statusLock;
 std::string status;
 Rule::Outcome lastOutcome = Rule::Outcome::NotSelected;
-bool lastPrivateWanted = false;
 bool outcomeSaid = false;
+
+std::string privateStatus; // what the private DLSS says (DlssNr_SuperiorPrivate_Vk.inl), under statusLock
 
 std::string Status()
 {
     std::lock_guard<std::mutex> lock(statusLock);
-    return status;
+    return status.empty() ? privateStatus : privateStatus.empty() ? status : status + " " + privateStatus;
 }
 
 void Publish(const std::string& text)
@@ -178,31 +191,29 @@ Rule::Outcome Begin(const Config& cfg, VkDevice device, VkPhysicalDevice physica
     }
     Rule::Outcome outcome = Rule::Decide(frame);
 
+    // Selecting Superior Scaling again retries what a failure gave up (no DLSS here, a creation that failed).
+    {
+        static bool wasSelected = false;
+        if (frame.selected && !wasSelected)
+            Private::Reselected(device);
+        wasSelected = frame.selected;
+    }
+
     // Only a run that could go ahead builds anything; the images are the last thing that can fail.
     if (outcome == Rule::Outcome::Runs && (!PassReady(device, physicalDevice) || !EnsureImages(device, workW, workH)))
         outcome = Rule::Outcome::PassFailed;
 
-    const bool privateWanted =
-        DlssNr::SuperiorScaling::Preset(cfg.DlssNrSuperiorScalingPreset.value_or_default()) !=
-        DlssNr::SuperiorScaling::NoPrivateDlss;
-    Publish(Rule::Describe(outcome, privateWanted));
+    Publish(Rule::Describe(outcome));
 
-    if (!outcomeSaid || lastOutcome != outcome || lastPrivateWanted != privateWanted)
+    if (!outcomeSaid || lastOutcome != outcome)
     {
         outcomeSaid = true;
         lastOutcome = outcome;
-        lastPrivateWanted = privateWanted;
 
         if (outcome == Rule::Outcome::Runs)
-        {
-            LOG_INFO("DLSS-NR Vulkan Superior Scaling: running (No DLSS), the model works on {}x{}", workW, workH);
-
-            if (privateWanted)
-                LOG_INFO("DLSS-NR Vulkan Superior Scaling: CNN/Transformer private DLSS on Vulkan: not yet, running "
-                         "No DLSS");
-        }
+            LOG_INFO("DLSS-NR Vulkan Superior Scaling: running, the model works on {}x{}", workW, workH);
         else if (outcome != Rule::Outcome::NotSelected)
-            LOG_INFO("DLSS-NR Vulkan Superior Scaling: {}", Rule::Describe(outcome, privateWanted));
+            LOG_INFO("DLSS-NR Vulkan Superior Scaling: {}", Rule::Describe(outcome));
         else
             LOG_INFO("DLSS-NR Vulkan Superior Scaling: not selected");
     }
@@ -211,12 +222,13 @@ Rule::Outcome Begin(const Config& cfg, VkDevice device, VkPhysicalDevice physica
 
     if (outcome == Rule::Outcome::Runs)
         lastRan = now;
-    else if ((pass || HoldsImages()) && lastRan != std::chrono::steady_clock::time_point {} &&
+    else if ((pass || HoldsImages() || Private::Holds()) && lastRan != std::chrono::steady_clock::time_point {} &&
              now - lastRan >= kIdleRelease && device != VK_NULL_HANDLE)
     {
         // Not run for a while (another Upscale Mode, 100%, a fallback): the images and passes go, with the device drained
         // once. A quick switch back finds them still here.
         vkDeviceWaitIdle(device);
+        Private::Rebuild(device);
         DestroyImages();
         pass.reset();
         lastRan = {};
@@ -270,7 +282,9 @@ bool MatchGuides(VkCommandBuffer cmd, VkDevice device, const NVSDK_NGX_Resource_
         c.depthRect[2] = c.depthRect[3] = 1.f;
     }
     c.unused = depthInverted ? 1.f : 0.f;
-    Sp::SetDepthPrecision(c, haveDepth ? DepthPrecision(gameDepth->Resource.ImageViewInfo.Format) : 0.f);
+    depthIsReal = haveDepth;
+    depthPrecision = haveDepth ? DepthPrecision(gameDepth->Resource.ImageViewInfo.Format) : 0.f;
+    Sp::SetDepthPrecision(c, depthPrecision);
 
     using Blob = DlssNrSuperior_Vk::Blob;
     const bool quantized = c.warp.reserved != 0;
@@ -298,10 +312,12 @@ bool MatchGuides(VkCommandBuffer cmd, VkDevice device, const NVSDK_NGX_Resource_
 }
 
 // 4 and 5. The low field (unless both gains are 1) and the resolve. `proxy` and `answer` are the model's input and answer
-// at the model's raster, readable. `resolve` is the composition's constants, as the ordinary resolve would take them.
-bool Compose(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& resolveIn, float workScale,
-             unsigned int width, unsigned int height, OwnedImage& proxy, OwnedImage& answer, OwnedImage& keep,
-             VkImageView exposureView, VkImageView target)
+// at the model's raster, readable; with signedResidual the second is the private DLSS's decoded signed residual instead
+// of the model's raw answer (the D3D12 resolve's "decoded signed DLSS residual" case). `resolve` is the composition's
+// constants, as the ordinary resolve would take them.
+bool Finish(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& resolveIn, float workScale,
+            unsigned int width, unsigned int height, OwnedImage& proxy, OwnedImage& answer, bool signedResidual,
+            OwnedImage& keep, VkImageView exposureView, VkImageView target)
 {
     DlssNrConstants resolve = resolveIn; // the band gains and flags below are Superior's, not the ordinary resolve's
     // The same gains D3D12 reads for one pass over the frame's native size: no pass has run before this one.
@@ -314,7 +330,7 @@ bool Compose(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& reso
     {
         DlssNr::Superior::DlssNrConstants c {};
         c.Mode = DlssNr::Superior::DlssNrMode_GuidedResidualLow;
-        c.Transfer = 0u; // the model's answer is raw, not a decoded signed residual
+        c.Transfer = signedResidual ? 1u : 0u; // a raw model answer, or the decoded signed residual
         c.DirectResolveFlags = DlssNr::SuperiorScaling::ShaderFlag;
         c.Width = (proxy.width + 7) / 8;
         c.Height = (proxy.height + 7) / 8;
@@ -326,7 +342,8 @@ bool Compose(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& reso
         DlssNrSuperior_Vk::Reads reads {};
         reads[0] = { proxy.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         reads[1] = { answer.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        if (!pass->Dispatch(cmd, DlssNrSuperior_Vk::Blob::LowRaw, &c, sizeof(c), (c.Width + 7) / 8,
+        if (!pass->Dispatch(cmd, signedResidual ? DlssNrSuperior_Vk::Blob::LowSigned : DlssNrSuperior_Vk::Blob::LowRaw,
+                            &c, sizeof(c), (c.Width + 7) / 8,
                             (c.Height + DlssNr::SuperiorScaling::LowGroupHeight - 1) /
                                 DlssNr::SuperiorScaling::LowGroupHeight,
                             reads, low.view))
@@ -337,7 +354,7 @@ bool Compose(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& reso
 
     DlssNr::Superior::Fields::SetBandGains(resolve, gains.high, gains.low);
     DlssNr::SuperiorScaling::SetGuidedRange(resolve, workScale);
-    DlssNr::Superior::Fields::SetResolveFlags(resolve, wantLow, true);
+    DlssNr::Superior::Fields::SetResolveFlags(resolve, wantLow, !signedResidual);
 
     Transition(cmd, proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmd, answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -348,15 +365,29 @@ bool Compose(VkCommandBuffer cmd, const Config& cfg, const DlssNrConstants& reso
     reads[1] = { answer.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     reads[2] = { keep.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     reads[3] = { exposureView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-    reads[4] = { wantLow ? low.view : VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-    return pass->Dispatch(cmd, DlssNrSuperior_Vk::Blob::ResolveGuidedRaw, &resolve, sizeof(resolve), (width + 7) / 8,
-                          (height + 7) / 8, reads, target);
+    reads[5] = { wantLow ? low.view : VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+    using B = DlssNrSuperior_Vk::Blob;
+    B blob = B::ResolveGuidedRaw;
+    if (signedResidual)
+    {
+        // The D3D12 choice (SuperiorResolvePipeline): the specialization for the colour mapping in force, else the generic
+        // resolve for SDR or HDR.
+        const int normal = DlssNr::SuperiorScaling::NormalResolveVariant(false, false, resolve.Passthrough,
+                                                                       resolve.ReversibleMode, resolve.DebugView,
+                                                                       resolve.CompareMode, resolve.ApplyModel);
+        blob = normal >= 0 ? (B) ((uint32_t) B::NormalSdr + (uint32_t) normal)
+                           : (resolve.Passthrough != 0 ? B::ResolveSdr : B::ResolveHdr);
+    }
+
+    return pass->Dispatch(cmd, blob, &resolve, sizeof(resolve), (width + 7) / 8, (height + 7) / 8, reads, target);
 }
 
 // Shutdown. deviceAlive: the device is idle and everything is destroyed; otherwise it went with the device and took every
 // handle, so they are only forgotten.
 void Release(bool deviceAlive)
 {
+    Private::Release(deviceAlive);
     if (deviceAlive)
     {
         DestroyImages();

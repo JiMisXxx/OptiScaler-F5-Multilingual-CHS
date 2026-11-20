@@ -36,6 +36,8 @@
 #include <shaders/dlssnr/superior/Fields.h>
 #include "DlssNr_SuperiorGains.h"
 #include "DlssNr_SuperiorVkRule.h"
+#include "DlssNr_SuperiorPrivatePolicy.h"
+#include <proxies/NVNGX_Proxy.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
@@ -711,6 +713,7 @@ std::optional<std::filesystem::path> FindSnippet()
 #include "DlssNr_DetailReuse_Vk.inl"
 #include "DlssNr_Spatial_Vk.inl"
 #include "DlssNr_Superior_Vk.inl"
+#include "DlssNr_SuperiorPrivate_Vk.inl"
 
 // The game's depth for the resolve's depth fade (shaders/dlssnr/DlssNr_DepthFade.h). Read as a sampled image in
 // SHADER_READ_ONLY_OPTIMAL and never moved, as the detail reuse and Compress screen edges read it, through a depth-only
@@ -2517,6 +2520,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // Superior Scaling hands the model the game's depth and motion matched to its own raster (as D3D12 does,
     // SuperiorRun::MatchGuides), with the vector scale taken from the matched grid.
     bool superiorMatched = false;
+    float superiorMvX = 1.f, superiorMvY = 1.f; // the matched guides' vector scale, for the private DLSS
     if (superiorRuns)
     {
         const DlssNr::GuideExtent reference = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0
@@ -2534,6 +2538,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         modelDepth = &SuperiorVk::depth.ngx;
         mvX = DlssNr::SuperiorScaling::MotionScale(gameMvX, workWidth, reference.width, guides.motion.width);
         mvY = DlssNr::SuperiorScaling::MotionScale(gameMvY, workHeight, reference.height, guides.motion.height);
+        superiorMvX = mvX;
+        superiorMvY = mvY;
     }
     // The guides the model gets are ours at the model's raster: Compress screen edges' packed ones or Superior's
     // matched ones.
@@ -2773,6 +2779,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     // Steady a full frame's answer and save this frame's history (DlssNr_DetailReuse_Vk.inl).
     DetailReuseVk::AfterModel(reuseFrame, reusePlan, evaluated == 1, answer);
 
+    // The model's history was reset this frame (the private DLSS starts over with it)
+    const bool superiorReset = g_vk.reset;
     g_vk.reset = false;
     g_vk.frames++;
 
@@ -3019,8 +3027,25 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         Transition(cmdBuffer, g_vk.preColor, VK_IMAGE_LAYOUT_GENERAL);
     const VkImageView resolveTarget = beforeSr ? g_vk.preColor.view : colour->Resource.ImageViewInfo.ImageView;
     // Superior's composition, on the model's own pair (no depth fade: its resolve leaves it out, as on D3D12).
+    SuperiorVk::Private::Frame superiorFrame;
+    if (superiorRuns)
+    {
+        superiorFrame.instance = instance;
+        superiorFrame.physicalDevice = physicalDevice;
+        superiorFrame.device = device;
+        superiorFrame.guides = &guides;
+        superiorFrame.mvX = superiorMvX;
+        superiorFrame.mvY = superiorMvY;
+        float frameMs = 0.f; // the game's own, as D3D12 reads it
+        if (params->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frameMs) != NVSDK_NGX_Result_Success)
+            frameMs = 0.f;
+        superiorFrame.frameMs = frameMs;
+        superiorFrame.reset = superiorReset;
+        superiorFrame.depthInverted = depthInverted;
+        superiorFrame.haveDepth = SuperiorVk::depth.Valid() && superiorMatched && SuperiorVk::depthIsReal;
+    }
     if (superiorRuns ? !SuperiorVk::Compose(cmdBuffer, cfg, resolve, workScale, width, height, *resolveProxy,
-                                            *resolveAnswer, g_vk.keep, liveExposureView, resolveTarget)
+                                            *resolveAnswer, g_vk.keep, liveExposureView, resolveTarget, superiorFrame)
                      : !g_vk.pass->Dispatch(cmdBuffer, resolve, width, height, resolveProxy->view, resolveAnswer->view,
                                             g_vk.keep.view, liveExposureView, resolveTarget, VK_NULL_HANDLE,
                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,

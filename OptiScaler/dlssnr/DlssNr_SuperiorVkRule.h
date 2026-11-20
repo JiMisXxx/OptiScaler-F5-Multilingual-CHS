@@ -1,12 +1,14 @@
 #pragma once
 #include <cstdint>
 
-// Superior Scaling on native Vulkan (dlssnr/DlssNr_Superior_Vk.inl): when the Vulkan path runs it, and what the menu says
-// when it does not. A pure rule, so the host test (tests/nr_superior_vk_rule_smoke.cpp) can state every case.
+// Superior Scaling on native Vulkan (dlssnr/DlssNr_Superior_Vk.inl): when the Vulkan path runs it, and what the menu
+// says when it does not. A pure rule, so the host test (tests/nr_superior_vk_rule_smoke.cpp) can state every case.
 //
-// Today the Vulkan path runs Superior's No DLSS composition (Area downsample, matched guides, raw low field, guided
-// resolve), unpacked, in one model pass, below 100% Model resolution: the cases D3D12 runs the same way. Where it does not
-// run, the ordinary Matched residual composition stays, as it was before Superior had a Vulkan path.
+// The Vulkan path runs Superior's composition (Area downsample, matched guides, the private DLSS CNN or Transformer or
+// none, low field, guided resolve), unpacked, in one model pass, below 100% Model resolution: the cases D3D12 runs the
+// same way. Where it does not run, the ordinary Matched residual composition stays, as it was before Superior had a
+// Vulkan path. What the private DLSS itself says (making it, falling back to No DLSS) is its own line, not an outcome
+// here.
 namespace DlssNr::SuperiorScaling::VkRule
 {
 enum class Outcome : uint8_t
@@ -51,18 +53,15 @@ constexpr bool SharedMemoryEnough(uint32_t maxComputeSharedMemorySize)
     return maxComputeSharedMemorySize >= kLowFieldSharedBytes;
 }
 
-// The line under the Upscale Mode controls. privateWanted: the saved preset asks for CNN or Transformer, which Vulkan does
-// not have yet. Empty when nothing needs saying.
-constexpr const char* Describe(Outcome outcome, bool privateWanted)
+// The line under the Upscale Mode controls. Empty when nothing needs saying.
+constexpr const char* Describe(Outcome outcome)
 {
     switch (outcome)
     {
     case Outcome::NotSelected:
         return "";
     case Outcome::Runs:
-        return privateWanted ? "On Vulkan, Superior Scaling runs without a private DLSS for now (No DLSS): CNN and "
-                               "Transformer come in an update."
-                             : "";
+        return "";
     case Outcome::NotReduced:
         return "Superior Scaling works below 100% Model resolution; at 100% and above the Matched residual composition "
                "is used, as on DirectX 12.";
