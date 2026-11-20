@@ -15,7 +15,7 @@ enum class Outcome : uint8_t
 {
     NotSelected,  // another Upscale Mode
     Runs,         // the No DLSS composition runs
-    NotReduced,   // 100% and above: the ordinary composition, as on D3D12
+    NotReduced,   // 100% and above: the ordinary composition (Also at 100% and above is not on Vulkan yet)
     Packed,       // Compress screen edges packs the model's picture
     MorePasses,   // more than one model pass
     DetailReuse,  // Reuse detail is on
@@ -46,8 +46,10 @@ constexpr Outcome Decide(const Frame& f)
                              : Outcome::Runs;
 }
 
-// The low field pass keeps a 36 x 68 tile of RGB floats in shared memory (superior/RawLow.hlsl).
-constexpr uint32_t kLowFieldSharedBytes = 36u * 68u * 3u * 4u;
+// The low field pass keeps a 36 x 68 tile of RGB floats in shared memory (superior/RawLow.hlsl). D3D12 packs a float3 in
+// 12 bytes (29,376); the std430 bound for a SPIR-V float3 array is the 16-byte stride, which is what a Vulkan driver may
+// reserve, so the device must offer that.
+constexpr uint32_t kLowFieldSharedBytes = 36u * 68u * 4u * 4u;
 constexpr bool SharedMemoryEnough(uint32_t maxComputeSharedMemorySize)
 {
     return maxComputeSharedMemorySize >= kLowFieldSharedBytes;
@@ -63,8 +65,8 @@ constexpr const char* Describe(Outcome outcome)
     case Outcome::Runs:
         return "";
     case Outcome::NotReduced:
-        return "Superior Scaling works below 100% Model resolution; at 100% and above the Matched residual composition "
-               "is used, as on DirectX 12.";
+        return "On Vulkan, Superior Scaling works below 100% Model resolution; at 100% and above the Matched residual "
+               "composition is used.";
     case Outcome::Packed:
         return "Superior Scaling does not run with Compress screen edges on Vulkan yet; Matched residual is used.";
     case Outcome::MorePasses:

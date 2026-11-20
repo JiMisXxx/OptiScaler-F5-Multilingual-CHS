@@ -56,8 +56,8 @@ function Build([string]$source, [string]$entry, [string[]]$defines, [string]$ste
 
 try {
     $superior = Join-Path $shaders "superior"
-    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1", "-D", "DLSSNR_SUPERIOR_AREA=1") "dlssnr_superior_area"
-    Build (Join-Path $superior "RawLow_vk.hlsl") "RawLowMain" @() "host_low_raw"
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1", "-D", "DLSSNR_SUPERIOR_AREA=1", "-D", "VK_TARGET_RGBA16F=1") "dlssnr_superior_area"
+    Build (Join-Path $superior "RawLow_vk.hlsl") "RawLowMain" @("-D", "VK_TARGET_RGBA16F=1") "host_low_raw"
 
     Build (Join-Path $superior "SpatialGuides.hlsl") "SuperiorUniformSurfaceGuidesMain" @() "host_uniform_surface_guides"
     foreach ($minified in @($false, $true)) {
@@ -87,9 +87,9 @@ try {
     }
 
     # More modes of the frozen v59 shader (through the same wrapper as the Area downsample).
-    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @() "dlssnr_superior_generic"
-    Build (Join-Path $superior "dlssnr_vk.hlsl") "SuperiorCarrierMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1") "dlssnr_superior_carrier"
-    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1", "-D", "DLSSNR_SUPERIOR_LOW=1") "dlssnr_superior_low"
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @("-D", "VK_TARGET_R32F=1") "dlssnr_superior_generic"
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "SuperiorCarrierMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1", "-D", "VK_TARGET_RGBA16F=1") "dlssnr_superior_carrier"
+    Build (Join-Path $superior "dlssnr_vk.hlsl") "CSMain" @("-D", "DLSSNR_SUPERIOR_SCALING=1", "-D", "DLSSNR_SUPERIOR_LOW=1", "-D", "VK_TARGET_RGBA16F=1") "dlssnr_superior_low"
 
     # The private DLSS's own shaders carry no vk::binding (except through the frozen shader they include): the host's
     # descriptor layout is fixed here, register by register. b0 the constants, t0-t3 bindings 1-4, t5 binding 8, t4 binding 9

@@ -79,10 +79,10 @@ int main()
     both.passes = 1;
     check(Decide(both) == Outcome::DetailReuse, "then Reuse detail");
 
-    check(VkRule::SharedMemoryEnough(32768) && VkRule::SharedMemoryEnough(VkRule::kLowFieldSharedBytes) &&
+    check(VkRule::SharedMemoryEnough(49152) && VkRule::SharedMemoryEnough(VkRule::kLowFieldSharedBytes) &&
               !VkRule::SharedMemoryEnough(VkRule::kLowFieldSharedBytes - 1) && !VkRule::SharedMemoryEnough(16384),
-          "the shared memory the low field pass needs (29376 bytes)");
-    static_assert(VkRule::kLowFieldSharedBytes == 29376);
+          "the shared memory the low field pass needs (the 16-byte float3 stride bound, 39168 bytes)");
+    static_assert(VkRule::kLowFieldSharedBytes == 39168);
 
     // Words: each fallback says something and names what runs instead; running and not selected are silent (the private
     // DLSS's own state is a line of its own).
