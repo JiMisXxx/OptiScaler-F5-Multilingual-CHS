@@ -207,6 +207,7 @@ float DepthPrecision(VkFormat format)
     {
     case VK_FORMAT_D16_UNORM:
     case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_R16_UNORM: // a colour image holding the depth (D3D12's table lists R16_UNORM too)
         return 2.f / 65535.f;
     case VK_FORMAT_X8_D24_UNORM_PACK32:
     case VK_FORMAT_D24_UNORM_S8_UINT:
@@ -225,7 +226,11 @@ Rule::Outcome Begin(VkCommandBuffer cmd, const Config& cfg, VkDevice device, VkP
     frame.reduced = reduced;
     frame.packed = packed;
     frame.passes = passes;
-    frame.detailReuse = cfg.DlssNrDetailReuse.value_or_default();
+    // Reuse detail takes the frame only when it would actually run: its own gate (route, minimum frame rate, frame
+    // generation, textures) said so on its last frame. The ini switch alone does not block Superior. Its gate sits in
+    // DetailReuseVk::BeforeModel, after this point, so this reads what it decided last frame (published for the menu)
+    // rather than moving the passes; the frame it flips costs one frame of the other composition.
+    frame.detailReuse = cfg.DlssNrDetailReuse.value_or_default() && DetailReuseVk::Published().why.empty();
     if (frame.selected)
     {
         // The device's limits do not change; asked once per device handle.

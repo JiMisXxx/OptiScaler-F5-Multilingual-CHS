@@ -195,6 +195,13 @@ DlssNrSpatial_Vk::Read DepthRead(VkDevice device, const NVSDK_NGX_Resource_VK* r
     if (info.SubresourceRange.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT)
         return { info.ImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
+    // A game may hand its depth as a colour image (R32_SFLOAT, R16_SFLOAT, R16_UNORM), which D3D12 reads like any other
+    // texture. Its own view is sampled as it is.
+    if (info.SubresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && info.ImageView != VK_NULL_HANDLE &&
+        (info.Format == VK_FORMAT_R32_SFLOAT || info.Format == VK_FORMAT_R16_SFLOAT ||
+         info.Format == VK_FORMAT_R16_UNORM))
+        return { info.ImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
     if (info.Image == VK_NULL_HANDLE || (info.SubresourceRange.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) == 0)
         return {};
 

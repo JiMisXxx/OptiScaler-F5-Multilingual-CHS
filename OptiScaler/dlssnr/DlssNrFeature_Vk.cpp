@@ -38,6 +38,7 @@
 #include "DlssNr_SuperiorVkRule.h"
 #include "DlssNr_SuperiorPrivatePolicy.h"
 #include <proxies/NVNGX_Proxy.h>
+#include <native/VkPresentBridge.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/sgsr1/SGSR1_Vk.h>
@@ -787,13 +788,20 @@ void Release(bool deviceAlive)
 
 void ReleaseNrObjects(); // below, with ShutdownVk
 
-// Native Vulkan Neural Rendering is up and was evaluated within the last second. Not merely "its model exists": after a
-// switch to the Vulkan bridge route the model stays (g_vk.feature is released only with the device or on Retry/off),
-// but NR runs on the bridge's D3D12 device, and the menu has to show that route's controls.
+// Native Vulkan Neural Rendering is up. Not merely "its model exists": after a switch to the Vulkan bridge route the
+// model stays (g_vk.feature is released only with the device or on Retry/off), but NR runs on the bridge's D3D12
+// device, and the menu has to show that route's controls. That is told by the seam going quiet WHILE a bridge is up; a
+// native Vulkan game that stops calling DLSS for a while (a menu, a loading screen) has no bridge and stays native.
 bool IsRunningVk()
 {
+    if (g_vk.feature == nullptr || g_vk.failed)
+        return false;
+
     const long long stamp = g_vkSeamStamp.load(std::memory_order_relaxed);
-    return g_vk.feature != nullptr && !g_vk.failed && stamp != 0 && SteadyMs() - stamp <= kVkSeamStaleMs;
+    if (stamp == 0)
+        return false;
+
+    return !(SteadyMs() - stamp > kVkSeamStaleMs && VkPresentBridge::IsUp());
 }
 
 const char* FailureReasonVk() { return g_vk.failed ? g_vk.reason : ""; }
@@ -1017,7 +1025,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         return;
     }
 
-    // The native Vulkan path is the one running NR (menu: IsRunningVk), also while it is switched off.
+    // The native Vulkan path is the one running NR (menu: IsRunningVk); it stays so while NR is switched off, until the
+    // off release lets the model go (kOffReleaseVk).
     g_vkSeamStamp.store(SteadyMs(), std::memory_order_relaxed);
 
     if (!cfg.DlssNrEnabled.value_or_default())
@@ -2701,7 +2710,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     reuseFrame.modelReset = g_vk.reset;
     reuseFrame.edgeCompression = spatial; // the two do not run together; Reuse detail says so in the menu
     // A Tune step pins the white point; a Measure detail run measures Reuse bottleneck as it runs.
-    reuseFrame.blocked = calibrationPinned;
+    // Superior's composition has the frame this time (Begin decided that from Reuse detail's last gate), so the two
+    // never run together even where the gate flips between the two reads.
+    reuseFrame.blocked = calibrationPinned || superiorRuns;
     reuseFrame.vulkan = true;
     reuseFrame.present = VkFrameClock();
     // NR's own frames, which step exactly once per evaluate: the present count is read on this thread while presents

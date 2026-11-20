@@ -80,7 +80,8 @@ class DlssNrSuperior_Vk : public Shader_Vk
     bool Ready() const { return _init && !_blobsFailed; }
 
     // Builds the pipelines of `blobs` and the placeholder image now, so a build that fails is known before any frame
-    // depends on them (the pass is then given up for the selection, not a frame's dispatch). False: one would not build.
+    // depends on them (the pass is then given up for the selection, not a frame's dispatch). False: one would not
+    // build.
     bool Build(VkCommandBuffer InCmdList, const Blob* InBlobs, size_t InCount);
 
     // The colour-mapping specializations of the residual resolve are an optimization of the generic resolve: one that

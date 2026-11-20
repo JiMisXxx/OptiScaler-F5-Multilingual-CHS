@@ -46,9 +46,9 @@ constexpr Outcome Decide(const Frame& f)
                              : Outcome::Runs;
 }
 
-// The low field pass keeps a 36 x 68 tile of RGB floats in shared memory (superior/RawLow.hlsl). D3D12 packs a float3 in
-// 12 bytes (29,376); the std430 bound for a SPIR-V float3 array is the 16-byte stride, which is what a Vulkan driver may
-// reserve, so the device must offer that.
+// The low field pass keeps a 36 x 68 tile of RGB floats in shared memory (superior/RawLow.hlsl). D3D12 packs a float3
+// in 12 bytes (29,376); the std430 bound for a SPIR-V float3 array is the 16-byte stride, which is what a Vulkan driver
+// may reserve, so the device must offer that.
 constexpr uint32_t kLowFieldSharedBytes = 36u * 68u * 4u * 4u;
 constexpr bool SharedMemoryEnough(uint32_t maxComputeSharedMemorySize)
 {
