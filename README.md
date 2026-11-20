@@ -1,4 +1,5 @@
 # 这仅仅是一个汉化版本，目前支持中英双语言切换
+> **📥 快速下载**：前往 [最新 Release](../../releases/latest) 下载汉化补丁。
 
 # 以下是作者原版介绍：
 # OptiScaler Neural Rendering
