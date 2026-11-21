@@ -2299,9 +2299,9 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
         frameTimesCalculated = true;
 
-        // Vulkan FG output timing is already averaged across the last 125 ms.
-        // Use it directly for the current FPS readout; preserve the shared
-        // history for the separately labelled average and frame-time graph.
+        // Vulkan FG output timing is already averaged over the last 100 output presents (as the 100 frames above
+        // on D3D12, where the menu is drawn once per shown frame). Use it directly for the current FPS readout;
+        // preserve the shared history for the separately labelled average and frame-time graph.
         if (ctx.fgOutputFrameTimeMs > 0.0)
         {
             frameTime = ctx.fgOutputFrameTimeMs;
