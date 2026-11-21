@@ -651,8 +651,9 @@ std::unique_ptr<DlssNrGpuTime> g_scanTime;
 double g_scanTimeSum = 0.0, g_scanTimeMax = 0.0;
 unsigned g_scanTimeSamples = 0;
 std::optional<double> g_lastGpuTime;
-std::chrono::steady_clock::time_point
-    g_lastGpuTimeAt {}; // when g_lastGpuTime was measured (LastGpuTime shows a fresh one)
+// When g_lastGpuTime was measured, in steady milliseconds (LastGpuTime shows a fresh one); atomic: the menu thread
+// reads it
+std::atomic<long long> g_lastGpuTimeAtMs { 0 };
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
@@ -6993,7 +6994,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
             {
                 g_lastGpuTime = ms;
-                g_lastGpuTimeAt = std::chrono::steady_clock::now();
+                g_lastGpuTimeAtMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now().time_since_epoch())
+                                            .count(),
+                                        std::memory_order_relaxed);
             }
             // Every completed frame, not only the newest: full and reused frames alternate, and two can complete
             // between reads.
@@ -7341,7 +7345,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         {
             DeferredSr::Cancel();
             Late::Cancel();
-            Late::Say("Finished Picture does not run through dxvk or a frame generation bridge.");
+            Late::Say("Finished Picture needs a native DirectX 12 or Vulkan game.");
             return;
         }
         // Refuse before capture, pre-SR NR and private DLSS, not only when Present discards output.
@@ -8016,7 +8020,11 @@ void CurrentModelSize(unsigned int& width, unsigned int& height)
 // on a Vulkan game) never shows the other one's last number
 std::optional<double> LastGpuTime()
 {
-    if (std::chrono::steady_clock::now() - g_lastGpuTimeAt > std::chrono::seconds(2))
+    const long long now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+
+    if (now - g_lastGpuTimeAtMs.load(std::memory_order_relaxed) > 2000)
         return std::nullopt;
 
     return g_lastGpuTime;

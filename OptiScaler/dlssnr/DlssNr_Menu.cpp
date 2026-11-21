@@ -1615,6 +1615,13 @@ static void RenderStatusLine(const NrCommon& nr)
     else if (!nr.vulkan && DlssNr::StoodDownForRebuilds())
         ImGui::TextColored(kWarnAmber,
                            "Stood down: the game keeps switching formats or sizes. Runs again once it settles.");
+    else if (nr.finishedPicture && !nr.vulkan && State::Instance().swapchainApi == API::Vulkan && !ms.has_value())
+    {
+        // Finished Picture on a Vulkan game (the D3D12 engine on the private device): what it says about the picture is
+        // the reason it is not running (frame generation on, a screen format it cannot take, ...)
+        const std::string status = DlssNr::FinishedPictureStatus();
+        ImGui::TextDisabled("%s", status.empty() ? "Waiting for a finished picture." : status.c_str());
+    }
     else if (!DlssNr::IsRunning() && !nr.vulkan)
         ImGui::TextDisabled("NR is not running. See Status & Presets.");
     else if (ms.has_value())
@@ -2588,9 +2595,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                    "instead.");
 
         if (blendUnsupported && !nativeBlend)
-            ImGui::TextWrapped(
-                "Needs a native DirectX 12 or Vulkan game (Finished Picture does not run through dxvk or "
-                "the Vulkan frame generation bridge).");
+            ImGui::TextWrapped("Finished Picture needs a native DirectX 12 or Vulkan game.");
 
         // Not greyed: the player may turn the game's frame generation off afterwards.
         if (GameFgPausesFinishedPicture())
@@ -3537,9 +3542,7 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
         {
             // A native Vulkan game runs it too (dlssnr/DlssNr_FinishedVk.h): its status line is NR's own, below
             if (!FinishedPictureGame(State::Instance().currentFeature))
-                ImGui::TextWrapped(
-                    "Finished Picture runs on native DirectX 12 and Vulkan games, not through dxvk or the "
-                    "Vulkan frame generation bridge.");
+                ImGui::TextWrapped("Finished Picture needs a native DirectX 12 or Vulkan game.");
             else if (GameFgPausesFinishedPicture())
             {
                 ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);

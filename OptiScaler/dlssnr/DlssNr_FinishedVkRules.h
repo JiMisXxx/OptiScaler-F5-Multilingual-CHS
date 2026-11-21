@@ -79,9 +79,11 @@ inline GuideRead ReadDepth(VkFormat format, VkImageAspectFlags viewAspect)
 
 // Slots of the capture ring. A slot's descriptor set and depth-only view are rewritten when it is captured into again,
 // and a command buffer the game recorded with it may still be waiting to run, so a slot is reused only once its capture
-// is kReuseAge presents old (the game has at most three frames in flight) and has no unsent recording; when no slot is
-// free the capture is skipped. (No push descriptors: they need VK_KHR_push_descriptor on the game's device, which the
-// game did not enable and the device hook does not add.)
+// is kReuseAge presents old (the game has at most three frames in flight), has no unsent recording and, where the
+// device has timeline semaphores, the GPU has finished the submit that ran it; when no slot is free the capture is
+// skipped. Without timelines the age alone stands for GPU completion and assumes the game keeps fewer than kReuseAge
+// frames in flight. (No push descriptors: they need VK_KHR_push_descriptor on the game's device, which the game did not
+// enable and the device hook does not add.)
 inline constexpr size_t kSlots = 8;
 inline constexpr uint64_t kReuseAge = 4;
 
@@ -131,13 +133,21 @@ class GuideRing
     // to say (Forget), not told apart here.
     bool Begin(uint64_t cmd, uint64_t now, const FinishedGameFrame& frame, size_t& index)
     {
+        return Begin(cmd, now, frame, index, [](const Slot&) { return true; });
+    }
+
+    // `gpuDone(slot)`: the GPU has finished the work of the slot's last submit (always true for a slot with no timeline
+    // value).
+    template <class DoneFn>
+    bool Begin(uint64_t cmd, uint64_t now, const FinishedGameFrame& frame, size_t& index, DoneFn&& gpuDone)
+    {
         const Slot* best = nullptr;
 
         for (size_t i = 0; i < kSlots; ++i)
         {
             const Slot& slot = _slots[i];
             const bool free = slot.serial == 0 || (!slot.armed && now >= slot.frame.captureEpoch &&
-                                                   now - slot.frame.captureEpoch >= kReuseAge);
+                                                   now - slot.frame.captureEpoch >= kReuseAge && gpuDone(slot));
 
             if (free && (best == nullptr || slot.serial < best->serial))
             {
@@ -183,6 +193,37 @@ class GuideRing
                 slot.queue = queue;
                 slot.submitSerial = serial;
                 slot.value = value;
+                any = true;
+            }
+        }
+
+        return any;
+    }
+
+    // A recording into `cmd` waits for its submit.
+    bool Waiting(uint64_t cmd) const
+    {
+        for (const auto& slot : _slots)
+        {
+            if (slot.armed && slot.cmd == cmd)
+                return true;
+        }
+
+        return false;
+    }
+
+    // The signal that should have followed the submit with timeline `value` on `queue` could not be queued: those slots
+    // would wait for it forever, so they are dropped (and report no value, so reuse does not wait for it either).
+    bool DropByValue(uint64_t queue, uint64_t value)
+    {
+        bool any = false;
+
+        for (auto& slot : _slots)
+        {
+            if (slot.submitted && slot.queue == queue && slot.value == value)
+            {
+                Drop(slot);
+                slot.value = 0;
                 any = true;
             }
         }
@@ -242,7 +283,10 @@ class GuideRing
     // submit after it is for a later frame and stays), inside the window of FinishedStale (one present; the rule the
     // D3D12 slots use). `ready(slot)` says whether the work that wrote it is done or ordered by the present's own
     // queue: not ready, nothing is consumed and the present is skipped. Everything older than the one used goes with
-    // it, and a game reset flag of a capture that was dropped unapplied rides on the one that is used.
+    // it, and a game reset flag of a capture that was dropped unapplied rides on the one that is used. Captures are
+    // matched by output size alone: a game that draws several views of the same size per frame (a multi-monitor layout)
+    // gets the newest one's guides for the picture, as the D3D12 Finished Picture stands down for several views
+    // altogether.
     template <class ReadyFn>
     PickResult Pick(uint64_t epoch, uint64_t snapshot, uint32_t width, uint32_t height, size_t& index, bool& reset,
                     ReadyFn&& ready)
@@ -329,6 +373,20 @@ class GuideRing
     size_t _next = 0;
     bool _carriedReset = false;
 };
+
+// The idle release of the private D3D12 pass (native/NativeDriverVk.cpp) shares that pass with Optical F5Low's NR (the
+// same model, scratch pair and history). It may start only when Finished Picture has been idle for `limitMs` AND
+// nothing else uses the pass: the motion estimate's NR (NativeInput with NR and Finished Picture on), the virtual
+// upscaler, or a frame of it that ran lately. While another user is there the caller restarts the idle clock, so the
+// release comes `limitMs` after the last use, long after that user's last list finished.
+inline bool MayReleaseIdlePass(double nowMs, double lastActiveMs, double limitMs, bool otherNrUser)
+{
+    return !otherNrUser && nowMs - lastActiveMs >= limitMs;
+}
+
+// A capture made on another queue than the present's that stays not finished for this many presents in a row means the
+// game's DLSS and its present are on queues that do not order each other here: refused with a status line.
+inline constexpr uint32_t kNotReadyRefuse = 30;
 
 // NR drops its history when nothing was applied yet or the capture of this frame is more than two game frames of
 // presents after the last applied one (the D3D12 rule, one present per game frame: FinishedHistoryGap).

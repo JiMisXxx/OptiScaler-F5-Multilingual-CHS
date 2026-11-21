@@ -299,6 +299,50 @@ int main()
         CHECK(ring.Pick(931, UINT64_MAX, 1920, 1080, index, reset, ok) == PickResult::None);
     }
 
+    // ---- reuse also waits for the GPU (the slot's timeline value) ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+        uint64_t reached = 0;
+        const auto done = [&](const GuideRing::Slot& slot) { return slot.value == 0 || reached >= slot.value; };
+
+        for (uint64_t i = 0; i < kSlots; ++i)
+        {
+            Beg(ring, 10 + i, 1000, Frame(1000));
+            ring.Submitted(10 + i, 3, ++g_clock, 100 + i);
+        }
+
+        CHECK(!ring.Begin(99, 1000 + kReuseAge, Frame(1004), index, done)); // old enough, GPU not there
+        reached = 100;
+        CHECK(ring.Begin(99, 1000 + kReuseAge, Frame(1004), index, done));  // the oldest slot's value reached
+        CHECK(index == 0);
+        CHECK(!ring.Begin(98, 1000 + kReuseAge, Frame(1004), index, done)); // the next one's is not
+        CHECK(ring.Waiting(99));
+        CHECK(!ring.Waiting(10));
+    }
+
+    // ---- a timeline signal that could not be queued drops its captures ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+        bool reset = false;
+        Beg(ring, 1, 1100, Frame(1100));
+        ring.Submitted(1, 4, ++g_clock, 55);
+        CHECK(!ring.DropByValue(4, 54)); // another value: untouched
+        CHECK(ring.DropByValue(4, 55));
+        CHECK(!P(ring, 1101, 1920, 1080, index, reset));
+        Beg(ring, 2, 1101, Frame(1101));
+        ring.Submitted(2, 4, ++g_clock, 56);
+        ring.DropByValue(4, 56);
+        // the dropped slot reports no value, so reuse of it does not wait for a signal that never comes
+        CHECK(ring.At(1).value == 0 || ring.At(0).value == 0);
+    }
+
+    // ---- the idle release of the shared D3D12 pass ----
+    CHECK(MayReleaseIdlePass(20000, 5000, 10000, false));
+    CHECK(!MayReleaseIdlePass(14000, 5000, 10000, false)); // not idle long enough
+    CHECK(!MayReleaseIdlePass(20000, 5000, 10000, true));  // Optical F5Low's NR or the virtual upscaler can use it
+
     // ---- colour spaces ----
     CHECK(ColourSpaceTaken(VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
     CHECK(ColourSpaceTaken(VK_COLOR_SPACE_HDR10_ST2084_EXT));

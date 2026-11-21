@@ -105,11 +105,21 @@ DXGI_COLOR_SPACE_TYPE ToDxgiSpace(native::ColorSpace space)
 // D3D12 side, the copy back. The frame source is set to this present already. True when the picture went through NR.
 // Finished Picture has not run for kFpIdleMs (NR off, another placement, the game stopped calling its DLSS): its D3D12
 // list object, the model and surfaces on the private device, the HDR10 scratch pair and the composition pass go, the
-// way a switched-off NR lets go. Not while the virtual upscaler (NR + frame generation) shares the composition pass.
+// way a switched-off NR lets go. Never while Optical F5Low's NR or the virtual upscaler can use the same pass.
 void LetGoWhenIdle(uint64_t presentCount)
 {
-    if (g_guideRunner == nullptr || Util::MillisecondsNow() - g_fpActiveMs < kFpIdleMs ||
-        Config::Instance()->DlssNrNativeUpscaler.value_or_default())
+    // The pass (model, scratch pair, history) is shared with Optical F5Low's NR on this device (NativeMotion ->
+    // ApplyNativeInput) and the virtual upscaler: while any of them can run, nothing is released and the idle clock
+    // starts over, so a release comes kFpIdleMs after their last use and no list of theirs is still in flight
+    const bool otherNrUser = native::NativeDriver::MotionUsed() ||
+                             Config::Instance()->DlssNrNativeUpscaler.value_or_default() || g_driver.NrOnlyRunning();
+    const double nowMs = Util::MillisecondsNow();
+
+    if (otherNrUser)
+        g_fpActiveMs = nowMs;
+
+    if (g_guideRunner == nullptr ||
+        !DlssNr::FinishedVkRules::MayReleaseIdlePass(nowMs, g_fpActiveMs, kFpIdleMs, otherNrUser))
         return;
 
     ID3D12CommandQueue* queue = g_source.Queue12();
@@ -312,7 +322,8 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
                 DlssNr::FinishedPictureNote(why.empty() ? "Waiting for the game's depth and motion." : why.c_str());
                 g_fpRan.store(false, std::memory_order_relaxed);
                 DlssNr::NativeInputSkipped();
-                return;
+                // No `return`: Optical F5Low's own work on this present (if it is on) goes on, as when nothing is
+                // wanted
             }
         }
     }

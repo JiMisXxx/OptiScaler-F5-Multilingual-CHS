@@ -114,6 +114,9 @@ bool GuideRunner::RunEmpty(ID3D12CommandQueue* queue, const std::function<void(I
 
     record(_list);
 
+    // A list that cannot be closed is never executed: what `record` parked for it (DlssNr::ReleaseFinishedIdle watches
+    // the list) is then freed by the retire list's own last-resort timer, not by this list finishing. Closing an empty
+    // list does not fail in practice.
     if (FAILED(_list->Close()))
     {
         _list->Release();

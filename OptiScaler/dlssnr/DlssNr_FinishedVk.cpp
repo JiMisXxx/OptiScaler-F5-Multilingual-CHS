@@ -5,6 +5,7 @@
 
 #include <Config.h>
 #include <State.h>
+#include <hooks/Vulkan_Hooks.h>
 #include <native/VkFrameSource.h>
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/precompile/dlssnr_finished_guide_depth_Shader_Vk.h>
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace DlssNr::FinishedVk
@@ -76,10 +78,18 @@ struct Objects
     std::vector<Retired> retired;
     uint64_t captures = 0;
 
-    // Signalled on a submit queue right after the game's submit that carries a capture, so a present on ANOTHER queue
-    // can tell the capture has finished (null when the device has no timeline semaphores: such captures are not used)
-    VkSemaphore timeline = VK_NULL_HANDLE;
-    uint64_t timelineValue = 0;
+    // One timeline semaphore per queue the game submits captures on, signalled by an empty submit right behind the
+    // game's (submit order puts everything the game queued before it). A present on ANOTHER queue reads it to tell the
+    // capture has finished, and slot reuse reads it to tell the GPU is done with the slot. Only on a device that has
+    // the timeline feature on (VulkanHooks::TimelineSemaphoresOn); without, other-queue captures are not used and reuse
+    // goes by age.
+    struct QueueTimeline
+    {
+        VkSemaphore semaphore = VK_NULL_HANDLE;
+        uint64_t value = 0; // the last value an empty submit signalled
+    };
+    bool timelineOn = false;
+    std::unordered_map<uint64_t, QueueTimeline> timelines; // by VkQueue
 
     bool Built() const { return pipelineLayout != VK_NULL_HANDLE && motionPipeline != VK_NULL_HANDLE; }
 };
@@ -92,7 +102,10 @@ std::atomic<uint64_t> g_lastCapture { UINT64_MAX }; // the present count at the 
 std::atomic<uint64_t> g_lastAttempt { UINT64_MAX }; // the present count at the last Capture call, success or refusal
 std::atomic<bool> g_usable { true };                // the last present could use a capture (SetUsable)
 std::atomic<uint64_t> g_submitClock { 0 };          // numbers the game's submits that carried a capture
-std::atomic<uint64_t> g_snapshot { UINT64_MAX };    // g_submitClock when the present hook was entered
+// g_submitClock when the present hook was entered. One global value, set by the present thread: a game that presents
+// from another thread than it submits on, or two swapchains presenting at once, can see a snapshot from the other
+// present. The worst case is one frame's guides one frame early or late (the same size and window rules still apply).
+std::atomic<uint64_t> g_snapshot { UINT64_MAX };
 std::chrono::steady_clock::time_point g_lastCaptureTime {};
 std::string g_refusal; // under g_mutex
 
@@ -231,8 +244,11 @@ void Destroy(Objects& o)
     if (o.motionPipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(o.device, o.motionPipeline, nullptr);
 
-    if (o.timeline != VK_NULL_HANDLE)
-        vkDestroySemaphore(o.device, o.timeline, nullptr);
+    for (auto& [queue, timeline] : o.timelines)
+    {
+        if (timeline.semaphore != VK_NULL_HANDLE)
+            vkDestroySemaphore(o.device, timeline.semaphore, nullptr);
+    }
 
     if (o.pool != VK_NULL_HANDLE)
         vkDestroyDescriptorPool(o.device, o.pool, nullptr);
@@ -380,22 +396,14 @@ bool EnsureObjects(VkPhysicalDevice physical, VkDevice device)
                        g_obj.motionPipeline))
         return fail("compute pipelines");
 
-    // A timeline semaphore for captures submitted on another queue than the present's; the device may not have enabled
-    // the feature, in which case those captures are simply not used (same-queue ones are ordered by the queue)
-    VkSemaphoreTypeCreateInfo timelineType {};
-    timelineType.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-    timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-    VkSemaphoreCreateInfo timelineInfo {};
-    timelineInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    timelineInfo.pNext = &timelineType;
+    // Timeline semaphores only where the device was made with the feature (a semaphore of that type is an error
+    // otherwise)
+    g_obj.timelineOn = VulkanHooks::TimelineSemaphoresOn(device);
 
-    if (vkCreateSemaphore(device, &timelineInfo, nullptr, &g_obj.timeline) != VK_SUCCESS)
-    {
-        g_obj.timeline = VK_NULL_HANDLE;
+    if (!g_obj.timelineOn)
         LOG_WARN(
-            "DLSS-NR Vulkan finished picture: no timeline semaphore on the game's device; captures made on another "
-            "queue than the present's are not used");
-    }
+            "DLSS-NR Vulkan finished picture: the game's device has no timeline semaphores; captures made on another "
+            "queue than the present's are not used, and slots are reused by age alone");
 
     LOG_INFO("DLSS-NR Vulkan finished picture: capture pass ready on the game's device ({} queue families)",
              g_obj.families.size());
@@ -534,6 +542,53 @@ std::string FormatName(VkFormat format)
         return "format " + std::to_string((int) format);
     }
 }
+
+namespace
+{
+// The queue's timeline, made on first use. Under g_mutex. Null when the device has none or it could not be made.
+Objects::QueueTimeline* TimelineFor(uint64_t queue)
+{
+    if (!g_obj.timelineOn || g_obj.device == VK_NULL_HANDLE)
+        return nullptr;
+
+    auto& timeline = g_obj.timelines[queue];
+
+    if (timeline.semaphore == VK_NULL_HANDLE)
+    {
+        VkSemaphoreTypeCreateInfo type {};
+        type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo info {};
+        info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        info.pNext = &type;
+
+        if (vkCreateSemaphore(g_obj.device, &info, nullptr, &timeline.semaphore) != VK_SUCCESS)
+        {
+            timeline.semaphore = VK_NULL_HANDLE;
+            g_obj.timelineOn = false; // not tried again; same-queue captures still work
+            LOG_WARN("DLSS-NR Vulkan finished picture: a timeline semaphore could not be made");
+            return nullptr;
+        }
+    }
+
+    return &timeline;
+}
+
+// Whether the GPU has reached the signal that followed the slot's submit (polled, never waited for). True for a slot
+// with no value, and for one whose queue has no timeline (nothing to ask). Under g_mutex.
+bool SlotGpuDone(const GuideRing::Slot& slot)
+{
+    if (slot.value == 0)
+        return true;
+
+    const auto it = g_obj.timelines.find(slot.queue);
+
+    if (it == g_obj.timelines.end() || it->second.semaphore == VK_NULL_HANDLE)
+        return true;
+
+    return VulkanHooks::WaitTimelineSemaphore(g_obj.device, it->second.semaphore, slot.value, 0);
+}
+} // namespace
 
 std::string SpaceName(VkColorSpaceKHR space)
 {
@@ -769,7 +824,7 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
 
     // No slot free (a game that captures several times per frame, or frames stuck in flight): this frame has no guides,
     // and the present side says it is waiting
-    if (!g_ring.Begin(Handle(cmd), frame.captureEpoch, frame, index))
+    if (!g_ring.Begin(Handle(cmd), frame.captureEpoch, frame, index, SlotGpuDone))
     {
         if (depthOnlyView != VK_NULL_HANDLE)
             vkDestroyImageView(device, depthOnlyView, nullptr);
@@ -829,9 +884,12 @@ TakeResult Take(VkDevice device, VkQueue presentQueue, uint64_t presentEpoch, ui
         if (slot.queue == (uint64_t) (uintptr_t) presentQueue)
             return true;
 
-        uint64_t completed = 0;
-        return g_obj.timeline != VK_NULL_HANDLE && slot.value != 0 &&
-               vkGetSemaphoreCounterValue(device, g_obj.timeline, &completed) == VK_SUCCESS && completed >= slot.value;
+        if (slot.value == 0)
+            return false; // no timeline: nothing says it has finished
+
+        const auto it = g_obj.timelines.find(slot.queue);
+        return it != g_obj.timelines.end() && it->second.semaphore != VK_NULL_HANDLE &&
+               VulkanHooks::WaitTimelineSemaphore(device, it->second.semaphore, slot.value, 0);
     };
 
     const auto picked =
@@ -845,8 +903,34 @@ TakeResult Take(VkDevice device, VkQueue presentQueue, uint64_t presentEpoch, ui
         return TakeResult::None;
     }
 
+    // A capture that stays on another queue and not finished present after present: the game's DLSS and its present do
+    // not order each other in a way this can use. Said once the run is long enough not to be a hiccup.
+    static uint32_t notReadyRun = 0;
+
+    if (picked == PickResult::NotReady)
+    {
+        if (++notReadyRun >= kNotReadyRefuse)
+        {
+            g_refusal = "The game's DLSS runs on another queue than its present: not supported yet.";
+            static bool said = false;
+
+            if (!said)
+            {
+                said = true;
+                LOG_WARN(
+                    "DLSS-NR Vulkan finished picture: the game's DLSS capture is on queue {:X}, its present on queue "
+                    "{:X}, and the capture has not finished for {} presents in a row; refused",
+                    (size_t) g_ring.At(index).queue, (size_t) (uintptr_t) presentQueue, notReadyRun);
+            }
+        }
+
+        return TakeResult::NotReady;
+    }
+
+    notReadyRun = 0;
+
     if (picked != PickResult::Ready)
-        return picked == PickResult::NotReady ? TakeResult::NotReady : TakeResult::None;
+        return TakeResult::None;
 
     const FinishedGameFrame frame = g_ring.At(index).frame;
     const SlotImages& slot = g_obj.slots[index];
@@ -924,28 +1008,36 @@ namespace
 // timeline value (submit order puts every earlier batch of the queue before the signal).
 void AfterSubmitBuffers(VkQueue queue, const VkCommandBuffer* buffers, uint32_t count)
 {
-    VkSemaphore timeline = VK_NULL_HANDLE;
-    uint64_t value = 0;
-    bool marked = false;
+    // Under the lock throughout, so the value taken and the signal queued stay in order (values on a queue never go
+    // backwards); the nested vkQueueSubmit comes back through the submit hook with no buffers and does not lock
+    std::lock_guard lock(g_mutex);
 
-    {
-        std::lock_guard lock(g_mutex);
-        const uint64_t serial = g_submitClock.fetch_add(1, std::memory_order_relaxed) + 1;
-        const bool signal = g_obj.timeline != VK_NULL_HANDLE;
+    if (g_obj.device == VK_NULL_HANDLE)
+        return;
 
-        if (signal)
-        {
-            timeline = g_obj.timeline;
-            value = ++g_obj.timelineValue;
-        }
+    bool waiting = false;
 
-        for (uint32_t i = 0; i < count; ++i)
-            marked = g_ring.Submitted(Handle(buffers[i]), (uint64_t) (uintptr_t) queue, serial, value) || marked;
+    for (uint32_t i = 0; i < count && !waiting; ++i)
+        waiting = g_ring.Waiting(Handle(buffers[i]));
 
-        PublishArmed();
-    }
+    VkDevice queueDevice = VK_NULL_HANDLE;
+    VkPhysicalDevice queuePhysical = VK_NULL_HANDLE;
 
-    if (!marked || timeline == VK_NULL_HANDLE)
+    if (!waiting || !native::VkFrameSource::DeviceOfQueue(queue, &queueDevice, &queuePhysical) ||
+        queueDevice != g_obj.device)
+        return;
+
+    const uint64_t serial = g_submitClock.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t queueId = (uint64_t) (uintptr_t) queue;
+    Objects::QueueTimeline* timeline = TimelineFor(queueId);
+    const uint64_t value = timeline != nullptr ? timeline->value + 1 : 0;
+
+    for (uint32_t i = 0; i < count; ++i)
+        g_ring.Submitted(Handle(buffers[i]), queueId, serial, value);
+
+    PublishArmed();
+
+    if (timeline == nullptr)
         return;
 
     VkTimelineSemaphoreSubmitInfo values {};
@@ -956,8 +1048,27 @@ void AfterSubmitBuffers(VkQueue queue, const VkCommandBuffer* buffers, uint32_t 
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.pNext = &values;
     submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores = &timeline;
-    vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+    submit.pSignalSemaphores = &timeline->semaphore;
+    const VkResult result = vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+
+    if (result == VK_SUCCESS)
+    {
+        timeline->value = value;
+        return;
+    }
+
+    // The signal will never come: those captures are not used (and reuse does not wait for them)
+    g_ring.DropByValue(queueId, value);
+    PublishArmed();
+    static bool said = false;
+
+    if (!said)
+    {
+        said = true;
+        LOG_WARN("DLSS-NR Vulkan finished picture: the timeline signal behind the game's submit failed ({}); that "
+                 "capture is dropped",
+                 (int) result);
+    }
 }
 } // namespace
 
@@ -974,12 +1085,18 @@ void AfterSubmit2(VkQueue queue, const VkCommandBufferSubmitInfo* buffers, uint3
     if (g_armed.load(std::memory_order_relaxed) == 0 || buffers == nullptr || count == 0)
         return;
 
-    std::vector<VkCommandBuffer> handles(count);
+    // A stack buffer, in chunks: no heap in the game's submit
+    VkCommandBuffer handles[16];
 
-    for (uint32_t i = 0; i < count; ++i)
-        handles[i] = buffers[i].commandBuffer;
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const uint32_t n = (std::min) (16u, count - first);
 
-    AfterSubmitBuffers(queue, handles.data(), count);
+        for (uint32_t i = 0; i < n; ++i)
+            handles[i] = buffers[first + i].commandBuffer;
+
+        AfterSubmitBuffers(queue, handles, n);
+    }
 }
 
 void ForgetCommandBuffers(uint32_t count, const VkCommandBuffer* buffers)
