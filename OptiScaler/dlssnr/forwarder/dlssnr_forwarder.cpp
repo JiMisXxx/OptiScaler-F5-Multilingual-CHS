@@ -35,7 +35,8 @@ namespace nrweights
 {
 
 std::mutex g_mutex;
-std::wstring g_setDir; // empty = stock
+std::wstring g_dirA;   // Model A (WEIGHTS_HT*), empty = stock
+std::wstring g_dirB;   // Model B (WEIGHTS_CC_SMALL_FP8*), empty = stock
 std::string g_log;     // taken by the host (dlssnr_weights_take_log)
 std::unordered_set<HMODULE> g_patched;
 std::map<std::pair<HMODULE, std::string>, unsigned> g_stockCrc;
@@ -142,10 +143,20 @@ HRSRC WINAPI hkFindResourceA(HMODULE module, LPCSTR name, LPCSTR type)
     std::lock_guard<std::mutex> lock(g_mutex);
     HGLOBAL handle = LoadResource(module, resource); // the same handle the model's own LoadResource gets
     g_served.erase(handle);
-    if (g_setDir.empty()) // the DLL's own weights: nothing to say, most players never pick a set
+    const bool isA = strncmp(name, "WEIGHTS_HT", 10) == 0;
+    const bool isB = strncmp(name, "WEIGHTS_CC_SMALL_FP8", 20) == 0;
+    const std::wstring& setDir = isA ? g_dirA : g_dirB;
+    if (!isA && !isB) // a resource that belongs to neither model: always the DLL's own
+    {
+        if (!g_dirA.empty() || !g_dirB.empty())
+            log("read " + std::string(name) + ": stock (not a Model A or Model B weights resource)");
+        return resource;
+    }
+    if (setDir.empty()) // the DLL's own weights: nothing to say, most players never pick a set
         return resource;
     g_reads++;
-    const std::string head = "read " + std::string(name) + " #" + std::to_string(g_reads) + ": ";
+    const std::string head = std::string(isA ? "Model A" : "Model B") + " weights, read " + std::string(name) + " #" +
+                             std::to_string(g_reads) + ": ";
 
     const auto* stock = (const unsigned char*) LockResource(handle);
     const DWORD size = SizeofResource(module, resource);
@@ -162,7 +173,7 @@ HRSRC WINAPI hkFindResourceA(HMODULE module, LPCSTR name, LPCSTR type)
 
     char file[96];
     snprintf(file, sizeof(file), "%s.%08X.bin", name, crc->second);
-    const std::wstring path = g_setDir + L"\\" + std::wstring(file, file + strlen(file));
+    const std::wstring path = setDir + L"\\" + std::wstring(file, file + strlen(file));
     Read result = Read::Failed;
     long long onDisk = -1;
     const auto* data = readFile(path, size, result, onDisk);
@@ -247,6 +258,15 @@ void watch(HMODULE module)
     const bool lockRes = patchImport(module, "LockResource", (void*) &hkLockResource);
     log(find && lockRes ? "weights selector ready on the model DLL"
                         : "weights selector NOT available: the model DLL does not import FindResourceA/LockResource");
+}
+
+// A folder as the host gives it, without a trailing separator
+std::wstring trimDir(const wchar_t* dir)
+{
+    std::wstring d = dir ? dir : L"";
+    while (!d.empty() && (d.back() == L'\\' || d.back() == L'/'))
+        d.pop_back();
+    return d;
 }
 
 } // namespace nrweights
@@ -1204,15 +1224,18 @@ __declspec(dllexport) void dlssnr_call_release(void *feature) {
     }
 }
 
-// Model weights selector: the folder the next feature creates read their weights from (null or empty = the
-// model DLL's own). Takes effect at the next create; features already built keep what they were built with.
-__declspec(dllexport) void dlssnr_weights_select(const wchar_t* setDir)
+// Model weights selector: the folders the next feature creates read their weights from, one per model
+// (dirA = Model A, WEIGHTS_HT*; dirB = Model B, WEIGHTS_CC_SMALL_FP8*; null or empty = the model DLL's own).
+// Takes effect at the next create; features already built keep what they were built with.
+__declspec(dllexport) void dlssnr_weights_select2(const wchar_t* dirA, const wchar_t* dirB)
 {
     std::lock_guard<std::mutex> lock(nrweights::g_mutex);
-    nrweights::g_setDir = setDir ? setDir : L"";
-    while (!nrweights::g_setDir.empty() && (nrweights::g_setDir.back() == L'\\' || nrweights::g_setDir.back() == L'/'))
-        nrweights::g_setDir.pop_back();
+    nrweights::g_dirA = nrweights::trimDir(dirA);
+    nrweights::g_dirB = nrweights::trimDir(dirB);
 }
+
+// The first version of the selector (older OptiScaler builds): one folder for both models.
+__declspec(dllexport) void dlssnr_weights_select(const wchar_t* setDir) { dlssnr_weights_select2(setDir, setDir); }
 
 // What the selector did since the last call (one line per weights read), copied into the host's buffer and
 // cleared. Returns the length written (the text is cut to fit and always terminated).
