@@ -264,7 +264,7 @@ struct NrState
     std::string modelError;
     // Model weights selector (optional forwarder exports; an older forwarder lacks them and the DLL's own
     // weights are used). builtWeightsSet = the set the current features were created with.
-    void (*weightsSelect)(const wchar_t*) = nullptr;
+    DlssNr::Weights::Exports weightsSelect;
     int (*weightsTakeLog)(char*, int) = nullptr;
     std::string builtWeightsSet;
 
@@ -825,7 +825,7 @@ bool EnsureForwarder()
     g_nr.lastInit = (int*) GetProcAddress(g_nr.forwarder, "dlssnr_call_last_init");
     g_nr.lastCreate = (int*) GetProcAddress(g_nr.forwarder, "dlssnr_call_last_create");
     g_nr.lastModelError = (const char*(*)()) GetProcAddress(g_nr.forwarder, "dlssnr_call_error");
-    g_nr.weightsSelect = (void (*)(const wchar_t*)) GetProcAddress(g_nr.forwarder, "dlssnr_weights_select");
+    DlssNr::Weights::Load(g_nr.weightsSelect, g_nr.forwarder);
     g_nr.weightsTakeLog = (int (*)(char*, int)) GetProcAddress(g_nr.forwarder, "dlssnr_weights_take_log");
 
     if (g_nr.create == nullptr || g_nr.evaluate == nullptr)
@@ -2249,7 +2249,8 @@ void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer
 // SelectWeights is called before every create; DlssNr::Weights resolves and checks the folder.
 void SelectWeights(const Config& cfg)
 {
-    DlssNr::Weights::Select(g_nr.weightsSelect, cfg.DlssNrWeightsSet.value_or_default(), "");
+    DlssNr::Weights::Select(g_nr.weightsSelect, cfg.DlssNrWeightsSetA.value_or_default(),
+                            cfg.DlssNrWeightsSetB.value_or_default(), "");
 }
 
 // The forwarder's account of what each weights read got (stock or which file), into OptiScaler.log.
@@ -2257,9 +2258,10 @@ void LogWeightsReads() { DlssNr::Weights::LogReads(g_nr.weightsTakeLog, ""); }
 
 bool TuningMatchesFeature(const Config& cfg, unsigned int requestedPasses)
 {
-    // All passes are built from the same weight set (an older forwarder cannot serve one: no rebuild for nothing)
-    if (g_nr.feature != nullptr && g_nr.weightsSelect != nullptr &&
-        g_nr.builtWeightsSet != cfg.DlssNrWeightsSet.value_or_default())
+    // All passes on a model are built from that model's weight set (no forwarder: no rebuild for nothing)
+    if (g_nr.feature != nullptr && g_nr.weightsSelect.Available() &&
+        g_nr.builtWeightsSet != DlssNr::WeightsRules::BuiltKey(cfg.DlssNrWeightsSetA.value_or_default(),
+                                                               cfg.DlssNrWeightsSetB.value_or_default()))
         return false;
 
     for (unsigned int pass = 0; pass < requestedPasses; ++pass)
@@ -2282,7 +2284,8 @@ void RecordBuiltPrimaryTuning(const Config& cfg)
 {
     g_nr.builtPassTuning[0] = PassTuning(cfg, 0);
     g_nr.builtPreset[0] = PassPreset(cfg, 0);
-    g_nr.builtWeightsSet = cfg.DlssNrWeightsSet.value_or_default();
+    g_nr.builtWeightsSet = DlssNr::WeightsRules::BuiltKey(cfg.DlssNrWeightsSetA.value_or_default(),
+                                                          cfg.DlssNrWeightsSetB.value_or_default());
     g_nr.builtIntensity = cfg.DlssNrIntensity.value_or_default();
     g_nr.builtStyle[0] = PassStyle(cfg, 0);
     g_nr.builtLocalStructure = cfg.DlssNrLocalStructure.value_or_default();

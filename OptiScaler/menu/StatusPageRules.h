@@ -227,13 +227,15 @@ inline std::string VulkanRouteText(bool routeOn, bool f5lowFrameGeneration, bool
 }
 
 // Optical F5Low's mode, and whether it stands aside because the game calls an upscaler of its own
-// [DlssNr] Preset (1 A, 2 B, else the DLL's choice) and WeightsSet (a folder under nr_weights, empty = the DLL's own)
-inline std::string NrModelText(uint32_t preset, const std::string& weightsSet)
+// [DlssNr] Preset (1 A, 2 B, else the DLL's choice) and WeightsSetA / WeightsSetB (folders under nr_weights, empty =
+// the DLL's own). The weights part shows when either model has a set.
+inline std::string NrModelText(uint32_t preset, const std::string& weightsSetA, const std::string& weightsSetB)
 {
     std::string text = preset == 1 ? "Preset A (main)" : preset == 2 ? "Preset B (small)" : "DLL's choice";
 
-    if (!weightsSet.empty())
-        text += ", weights " + weightsSet;
+    if (!weightsSetA.empty() || !weightsSetB.empty())
+        text += ", weights A: " + (weightsSetA.empty() ? std::string("stock") : weightsSetA) +
+                ", B: " + (weightsSetB.empty() ? std::string("stock") : weightsSetB);
 
     return text;
 }

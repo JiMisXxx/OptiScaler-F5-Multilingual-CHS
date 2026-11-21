@@ -667,17 +667,12 @@ struct PassPresetUndo
 // undo is offered only while the settings are still `after`, so a later change of the player's is never undone.
 static std::optional<std::pair<PassPresetUndo, PassPresetUndo>> g_passPresetUndo;
 
-// [DlssNr] WeightsSet: the folders in OptiScaler/nr_weights, read again each time the list opens. All passes use
-// the chosen set; a change rebuilds the Neural Rendering features (the model reads its weights at create).
-// Which models a set has files for: WEIGHTS_HT.* = Model A (Preset A), WEIGHTS_CC_SMALL_FP8.* = Model B.
-struct WeightsSetModels
+// [DlssNr] WeightsSetA / WeightsSetB: the folders in OptiScaler/nr_weights, read again each time a list opens. Every
+// pass on a model uses that model's set; a change rebuilds the Neural Rendering features (the model reads its weights
+// at create). Model A = Preset A (WEIGHTS_HT.*), Model B = Preset B or Default (WEIGHTS_CC_SMALL_FP8.*).
+static DlssNr::WeightsRules::Models ScanWeightsSet(const std::string& name)
 {
-    bool a = false, b = false;
-    std::string Label() const { return a && b ? "Model A + B" : a ? "Model A" : b ? "Model B" : "no weight files"; }
-};
-static WeightsSetModels ScanWeightsSet(const std::string& name)
-{
-    WeightsSetModels m;
+    DlssNr::WeightsRules::Models m;
     const auto dir = DlssNr::Weights::Folder(name);
     std::error_code ec;
     if (dir.empty())
@@ -685,91 +680,89 @@ static WeightsSetModels ScanWeightsSet(const std::string& name)
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
     {
         // wstring + our converter: path::string() throws on names the code page cannot hold (CustomProviders::List)
-        const auto file = wstring_to_string(entry.path().filename().wstring());
-        if (file.rfind("WEIGHTS_HT.", 0) == 0)
-            m.a = true;
-        else if (file.rfind("WEIGHTS_CC_SMALL_FP8.", 0) == 0)
-            m.b = true;
+        DlssNr::WeightsRules::NoteFile(m, wstring_to_string(entry.path().filename().wstring()));
     }
     return m;
 }
 
-static void ModelWeightsCombo(Config* config)
+static void ModelWeightsCombo(Config* config, bool modelA)
 {
-    static std::vector<std::pair<std::string, WeightsSetModels>> sets;
-    static std::string scannedCurrent;
-    static WeightsSetModels currentModels;
-    const std::string current = config->DlssNrWeightsSet.value_or_default();
-    if (current != scannedCurrent)
-    {
-        scannedCurrent = current;
-        currentModels = current.empty() ? WeightsSetModels {} : ScanWeightsSet(current);
-    }
-    const std::string shown =
-        current.empty() ? std::string("Stock (the DLL's own)") : current + " (" + currentModels.Label() + ")";
+    static std::vector<DlssNr::WeightsRules::Set> sets;
+    auto& option = modelA ? config->DlssNrWeightsSetA : config->DlssNrWeightsSetB;
+    const std::string current = option.value_or_default();
+    static const std::string stock = "Stock (the DLL's own)";
 
-    if (ImGui::BeginCombo("Model weights", shown.c_str()))
+    // The current folder may have been removed or have no file for this model: say so instead of showing it as fine
+    std::string shown = stock;
+    if (!current.empty())
+    {
+        const auto has = ScanWeightsSet(current);
+        shown = (modelA ? has.a : has.b) ? current : current + " (no file for this model)";
+    }
+
+    const char* label = modelA ? "Preset A weights" : "Preset B weights";
+    if (ImGui::BeginCombo(label, shown.c_str()))
     {
         if (ImGui::IsWindowAppearing())
         {
             sets.clear();
             std::error_code ec;
-            const auto root = DlssNr::Weights::Root();
-            for (const auto& entry : std::filesystem::directory_iterator(root, ec))
+            for (const auto& entry : std::filesystem::directory_iterator(DlssNr::Weights::Root(), ec))
                 if (entry.is_directory(ec))
                 {
                     const auto name = wstring_to_string(entry.path().filename().wstring());
-                    sets.emplace_back(name, ScanWeightsSet(name));
+                    sets.push_back({ name, ScanWeightsSet(name) });
                 }
-            std::sort(sets.begin(), sets.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
-            currentModels = current.empty() ? WeightsSetModels {} : ScanWeightsSet(current);
+            std::sort(sets.begin(), sets.end(), [](const auto& l, const auto& r) { return l.name < r.name; });
         }
 
-        if (ImGui::Selectable("Stock (the DLL's own)", current.empty()))
-            config->DlssNrWeightsSet = std::string();
-        for (const auto& [name, models] : sets)
-        {
-            const std::string label = name + " (" + models.Label() + ")";
-            if (ImGui::Selectable(label.c_str(), name == current))
-                config->DlssNrWeightsSet = name;
-        }
+        if (ImGui::Selectable(stock.c_str(), current.empty()))
+            option = std::string();
+        for (const auto& name : DlssNr::WeightsRules::ListFor(sets, modelA))
+            if (ImGui::Selectable(name.c_str(), name == current))
+                option = name;
         ImGui::EndCombo();
     }
-    HelpMarker("Weights the model runs with, for every pass. Stock: the ones inside nvngx_dlssnr.dll. Other "
-               "entries: folders in OptiScaler\\nr_weights, each holding weight files exported for this DLL; the "
-               "brackets say which model the set has weights for. A pass on the other model keeps its stock "
-               "weights. A file is used only by the DLL it was made for; otherwise the stock weights run and "
-               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 and "
-               "Vulkan (native or bridged); DirectX 11 only when bridged to DirectX 12.");
+    HelpMarker(modelA ? "Weights for every pass on Preset A (main model)."
+                      : "Weights for every pass on Preset B or Default (small model).");
 
     if (current.empty())
         return;
 
-    // Selection reaches the model on the D3D12 path (native D3D12, or a D3D11/Vulkan bridge to it) and on native
-    // Vulkan; a D3D11 game not bridged to D3D12 does not reach it.
-    const auto& state = State::Instance();
-    const bool reachesModel = DlssNr::IsRunningVk() || state.swapchainApi != API::DX11 ||
-                              state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
-    if (!reachesModel)
-    {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
-                           "No effect here yet: DirectX 11 only when bridged to DirectX 12.");
-        return;
-    }
-
     // Preset A (1) runs Model A; Default, B and the legacy 3 run Model B on 310.9 DLLs (310.8 has only Model A, which
     // this note does not know about). Passes 4 and up use Pass 1's; the driver proxy runs one pass.
+    const unsigned passes =
+        config->DlssNrUseProxy.value_or_default() ? 1u : std::max(1u, config->DlssNrPasses.value_or_default());
+    bool usesA = false, usesB = false;
+    for (unsigned pass = 0; pass < std::min(passes, 3u); ++pass)
+        (DlssNr::Profiles::PassPreset(*config, pass) == 1u ? usesA : usesB) = true;
+    if (DlssNr::WeightsRules::NotUsedNow(true, modelA, usesA, usesB))
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), modelA ? "Not used now: no pass runs Preset A."
+                                                                  : "Not used now: no pass runs Preset B or Default.");
+}
+
+// The card above the passes: the weights are shared by every pass, so they are not part of Pass 1
+static void ModelWeightsCard(Config* config, float menuResScale)
+{
+    if (NrCard card("Model weights (all passes)", menuResScale); card.IsOpen())
     {
-        const unsigned passes =
-            config->DlssNrUseProxy.value_or_default() ? 1u : std::max(1u, config->DlssNrPasses.value_or_default());
-        bool usesA = false, usesB = false;
-        for (unsigned pass = 0; pass < std::min(passes, 3u); ++pass)
-            (DlssNr::Profiles::PassPreset(*config, pass) == 1u ? usesA : usesB) = true;
-        if ((!usesA || !currentModels.a) && (!usesB || !currentModels.b))
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "No effect: no pass runs %s.",
-                               currentModels.b && !currentModels.a   ? "Model B (Preset B or Default)"
-                               : currentModels.a && !currentModels.b ? "Model A (Preset A)"
-                                                                     : "a model this set has weights for");
+        ModelWeightsCombo(config, true);
+        ModelWeightsCombo(config, false);
+        HelpMarker("A weights set is a folder in OptiScaler\nr_weights with weight files exported for this DLL. "
+                   "Every pass on that preset uses it. Stock: the weights inside nvngx_dlssnr.dll. A file is used "
+                   "only by the DLL it was made for; otherwise the stock weights run and OptiScaler.log says why. "
+                   "Changing a set rebuilds Neural Rendering (a short hitch). DirectX 12 and Vulkan (native or "
+                   "bridged); DirectX 11 only when bridged to DirectX 12.");
+
+        // Selection reaches the model on the D3D12 path (native D3D12, or a D3D11/Vulkan bridge to it) and on native
+        // Vulkan; a D3D11 game not bridged to D3D12 does not reach it.
+        const auto& state = State::Instance();
+        const bool reachesModel = DlssNr::IsRunningVk() || state.swapchainApi != API::DX11 ||
+                                  state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+        if (!reachesModel && (!config->DlssNrWeightsSetA.value_or_default().empty() ||
+                              !config->DlssNrWeightsSetB.value_or_default().empty()))
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                               "No effect here yet: DirectX 11 only when bridged to DirectX 12.");
     }
 }
 
@@ -5129,6 +5122,8 @@ static void RenderPassesPage(Config* config, float menuResScale)
         "310.8 "
         "DLLs have only the main model, so the preset changes nothing there. Passes 4 and up use Pass 1's preset.";
 
+    ModelWeightsCard(config, menuResScale);
+
     if (NrCard card("Pass 1", menuResScale); card.IsOpen())
     {
         int style = (int) std::min(config->DlssNrStyle.value_or_default(), 2u);
@@ -5139,7 +5134,6 @@ static void RenderPassesPage(Config* config, float menuResScale)
         if (ImGui::Combo("Preset", &preset, presets, IM_ARRAYSIZE(presets)))
             config->DlssNrPreset = (uint32_t) preset;
         HelpMarker(presetHelp);
-        ModelWeightsCombo(config);
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local structure", &config->DlssNrLocalStructure, 0.0f, 2.0f, 1.0f);
         DeferredSlider("Local tone", &config->DlssNrLocalTone, 0.0f, 2.0f, 1.0f);

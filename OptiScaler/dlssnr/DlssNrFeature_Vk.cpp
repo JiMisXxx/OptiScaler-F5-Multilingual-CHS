@@ -113,9 +113,10 @@ struct VkState
     PFN_VkSetFloatSlot setFloatSlot = nullptr;
     PFN_VkProbeFloat probeFloat = nullptr;
     // Model weights selector (optional: forwarders before it lack both). All passes are built from one set.
-    DlssNr::Weights::SelectFn weightsSelect = nullptr;
+    DlssNr::Weights::Exports weightsSelect;
     DlssNr::Weights::TakeLogFn weightsTakeLog = nullptr;
-    std::string builtWeightsSet;
+    std::string builtWeightsSet; // A|B, see DlssNr::WeightsRules::BuiltKey
+    std::string builtWeightsSetA, builtWeightsSetB;
     bool floatSlotKnown = false;
 
     VkInstance instance = VK_NULL_HANDLE;
@@ -633,7 +634,7 @@ bool LoadForwarder()
     g_vk.forget = (PFN_VkForget) GetProcAddress(g_vk.forwarder, "dlssnr_vk_forget");
     g_vk.setFloatSlot = (PFN_VkSetFloatSlot) GetProcAddress(g_vk.forwarder, "dlssnr_call_set_float_slot");
     g_vk.probeFloat = (PFN_VkProbeFloat) GetProcAddress(g_vk.forwarder, "dlssnr_call_probe_float");
-    g_vk.weightsSelect = (DlssNr::Weights::SelectFn) GetProcAddress(g_vk.forwarder, "dlssnr_weights_select");
+    DlssNr::Weights::Load(g_vk.weightsSelect, g_vk.forwarder);
     g_vk.weightsTakeLog = (DlssNr::Weights::TakeLogFn) GetProcAddress(g_vk.forwarder, "dlssnr_weights_take_log");
 
     if (g_vk.init == nullptr || g_vk.create == nullptr || g_vk.evaluate == nullptr)
@@ -1563,7 +1564,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                           g_vk.builtPreset[pass] != Profiles::PassPreset(cfg, pass) ||
                           g_vk.builtStyle[pass] != Profiles::PassStyle(cfg, pass);
     // A new weight set rebuilds every pass (an older forwarder cannot serve one: no rebuild for nothing)
-    profileChanged |= g_vk.weightsSelect != nullptr && g_vk.builtWeightsSet != cfg.DlssNrWeightsSet.value_or_default();
+    profileChanged |= g_vk.weightsSelect.Available() &&
+                      g_vk.builtWeightsSet != DlssNr::WeightsRules::BuiltKey(cfg.DlssNrWeightsSetA.value_or_default(),
+                                                                             cfg.DlssNrWeightsSetB.value_or_default());
     if (g_vk.width != width || g_vk.height != height || g_vk.workWidth != modelWidth ||
         g_vk.workHeight != modelHeight || g_vk.beforeSr != beforeSr ||
         g_vk.rayReconstruction != rayReconstruction || profileChanged ||
@@ -1664,7 +1667,9 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             g_vk.builtPreset[pass] = Profiles::PassPreset(cfg, pass);
             g_vk.builtStyle[pass] = Profiles::PassStyle(cfg, pass);
         }
-        g_vk.builtWeightsSet = cfg.DlssNrWeightsSet.value_or_default();
+        g_vk.builtWeightsSetA = cfg.DlssNrWeightsSetA.value_or_default();
+        g_vk.builtWeightsSetB = cfg.DlssNrWeightsSetB.value_or_default();
+        g_vk.builtWeightsSet = DlssNr::WeightsRules::BuiltKey(g_vk.builtWeightsSetA, g_vk.builtWeightsSetB);
         g_vk.reset = true;
     }
 
@@ -1675,7 +1680,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (feature)
             continue;
         const auto tuning = Profiles::PassTuning(cfg, pass);
-        DlssNr::Weights::Select(g_vk.weightsSelect, g_vk.builtWeightsSet, " Vulkan");
+        DlssNr::Weights::Select(g_vk.weightsSelect, g_vk.builtWeightsSetA, g_vk.builtWeightsSetB, " Vulkan");
         feature = g_vk.create((void*) cmdBuffer, g_vk.capabilityParams, modelWidth, modelHeight,
                              (int) Profiles::PassPreset(cfg, pass), tuning.intensity,
                              (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone,

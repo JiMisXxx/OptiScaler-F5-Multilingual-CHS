@@ -367,7 +367,8 @@ void RenderFork(Config* config, float menuResScale)
             if (summary.nrEnabled)
             {
                 Row("  Model",
-                    NrModelText(config->DlssNrPreset.value_or_default(), config->DlssNrWeightsSet.value_or_default()));
+                    NrModelText(config->DlssNrPreset.value_or_default(), config->DlssNrWeightsSetA.value_or_default(),
+                                config->DlssNrWeightsSetB.value_or_default()));
                 Row("  Passes", NrPassesText(config->DlssNrPasses.value_or_default(),
                                              config->DlssNrWorkingScale.value_or_default()));
                 Row("  Pass at", NrPlacementText(config->DlssNrFinishedPicture.value_or_default(),
