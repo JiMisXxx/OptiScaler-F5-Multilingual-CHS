@@ -399,6 +399,7 @@ int main()
         CHECK(ChainedPresentMode(true, 1) == 0 && ChainedPresentMode(true, 2) == 2 && ChainedPresentMode(false, 1) == 1);
         // the swapchain's real mode is IMMEDIATE: timed on the CPU, not display paced, the gate bound for a timed batch (3)
         CHECK(!VsyncPaces(tear.mode) && !DisplaySpaces(true, tear.mode, 0) && LatencyBound(3, 4, VsyncPaces(tear.mode)) == 3);
+        CHECK(std::string(TearingText(TearingWhy::ListLacksImmediate)).find("scaling") != std::string::npos);
         CHECK(TearingText(TearingWhy::Tearing) != nullptr && TearingText(TearingWhy::NoImmediate) != nullptr);
     }
 

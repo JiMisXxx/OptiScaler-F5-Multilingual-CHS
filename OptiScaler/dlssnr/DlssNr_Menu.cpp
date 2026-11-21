@@ -5685,13 +5685,13 @@ void RenderVulkanRoute(Config* config)
     if (ImGui::RadioButton("Bridge, game's upscaler##vkroute", routeOn) && !routeOn)
         UseBridgeRoute(config);
 
-    HelpMarker(
-        "Native swapchain: the game's own device and swapchain. FSR FG and DLSS-G run there; Neural Rendering "
-        "runs on Vulkan.\n"
-        "Bridge: the game's swapchain moves to a hidden window and a D3D12 swapchain is shown. XeFG and F5Low are "
-        "D3D12 libraries and need it. The game's upscaler runs on a D3D12 copy, so Neural Rendering runs on "
-        "D3D12.\n"
-        "Choose before the game starts; leaving the bridge needs a restart.");
+    HelpMarker("Native swapchain: the game's own device and swapchain. FSR FG, DLSS-G and F5Low (XeFG Tensor) run "
+               "there; Neural Rendering "
+               "runs on Vulkan.\n"
+               "Bridge: the game's swapchain moves to a hidden window and a D3D12 swapchain is shown. XeFG is a "
+               "D3D12 library and needs it. The game's upscaler runs on a D3D12 copy, so Neural Rendering runs on "
+               "D3D12.\n"
+               "Choose before the game starts; leaving the bridge needs a restart.");
 
     // The chosen route's row is read, the other one is the quiet one
     const bool nativeSelected = !routeOn && !f5lowFg;

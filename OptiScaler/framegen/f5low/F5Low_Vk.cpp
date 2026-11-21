@@ -1205,6 +1205,28 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
         info = &copy;
     }
 
+    // A game's per-present mode info saying MAILBOX goes out as IMMEDIATE too when our swapchain was made with it (the
+    // generated frames do): the value is rewritten in the game's array for this call and put back after
+    VkPresentModeKHR* chainedMode = nullptr;
+
+    if (_tearing)
+    {
+        for (auto* node = static_cast<const VkBaseInStructure*>(info->pNext); node != nullptr; node = node->pNext)
+        {
+            if (node->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT)
+                continue;
+
+            const auto* mode = reinterpret_cast<const VkSwapchainPresentModeInfoEXT*>(node);
+
+            if (mode->swapchainCount >= 1 && mode->pPresentModes != nullptr &&
+                mode->pPresentModes[0] == VK_PRESENT_MODE_MAILBOX_KHR)
+                chainedMode = const_cast<VkPresentModeKHR*>(&mode->pPresentModes[0]);
+        }
+
+        if (chainedMode != nullptr)
+            *chainedMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+
     if (!DrainWorker(kBlockMs))
         LOG_DEBUG("F5Low (Vulkan): the worker was still busy, presenting the game's image anyway");
 
@@ -1213,6 +1235,9 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
     AddOurWait(drainedMs - startMs);
 
     const auto result = PresentOn(queue, *info, RemainingMs(kBlockMs, drainedMs - startMs));
+
+    if (chainedMode != nullptr)
+        *chainedMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
     // The swapchain lock and the driver's block (FIFO with a full queue) are the game thread's wait too
     AddOurWait(Util::MillisecondsNow() - drainedMs);
@@ -1494,14 +1519,13 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
         for (auto* node = static_cast<const VkBaseInStructure*>(pCreateInfo->pNext); node != nullptr;
              node = node->pNext)
         {
-            if (node->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT)
+            if (node->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT &&
+                node->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT)
                 continue;
 
-            const auto* list = reinterpret_cast<const VkSwapchainPresentModesCreateInfoEXT*>(node);
+            // The compatibility set of a swapchain is per present mode: a swapchain the game made for MAILBOX with its
+            // own list (or scaling info) is not made for IMMEDIATE by us
             listAllows = false;
-
-            for (uint32_t i = 0; i < list->presentModeCount; ++i)
-                listAllows = listAllows || list->pPresentModes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
 
         const auto chosen = ChoosePresentMode(static_cast<int>(pCreateInfo->presentMode), immediateSupported,
@@ -1512,8 +1536,10 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
         _tearing = chosen.why == TearingWhy::Tearing;
 
         if (pCreateInfo->presentMode == VK_PRESENT_MODE_MAILBOX_KHR)
-            LOG_INFO("F5Low (Vulkan): the game asked for present mode {} (MAILBOX): {} ({})", _gamePresentMode,
-                     chosen.mode, TearingText(chosen.why));
+            LOG_INFO(
+                "F5Low (Vulkan): the game asked for present mode {} (MAILBOX): {} ({}); chosen when the "
+                "swapchain is made, frame generation switched on or off later takes effect with the next swapchain",
+                _gamePresentMode, chosen.mode, TearingText(chosen.why));
     }
 
     info.minImageCount = RequestedMinImageCount(

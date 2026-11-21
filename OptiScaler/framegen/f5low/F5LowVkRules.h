@@ -354,7 +354,7 @@ enum class TearingWhy : int
     FgOff,              // frame generation is off: the game's mode stays
     SettingOff,         // [F5Low] VulkanTearing=false
     NoImmediate,        // the surface does not offer IMMEDIATE
-    ListLacksImmediate, // the game lists the present modes its swapchain may switch between, IMMEDIATE not among them
+    ListLacksImmediate, // the game chains its own present-mode list or scaling info (compatibility is per mode)
     Tearing             // MAILBOX -> IMMEDIATE
 };
 
@@ -398,9 +398,8 @@ inline const char* TearingText(TearingWhy why)
     case TearingWhy::NoImmediate:
         return "the surface has no IMMEDIATE mode, MAILBOX stays (the driver replaces frames above the refresh rate)";
     case TearingWhy::ListLacksImmediate:
-        return "the game's own list of present modes has no IMMEDIATE, MAILBOX stays (the driver replaces frames above "
-               "the "
-               "refresh rate)";
+        return "the game chains its own present-mode list or scaling info, MAILBOX stays (the driver replaces frames "
+               "above the refresh rate)";
     default:
         return "tearing like D3D12: every generated frame reaches the screen";
     }

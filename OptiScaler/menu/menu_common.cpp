@@ -4080,6 +4080,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     }
     else if (outputOptions[xefgOutputIndex].disabled)
         outputOptions[f5lowOutputIndex].set_disabled(true, outputOptions[xefgOutputIndex].tooltip);
+    else if (state.swapchainApi == API::Vulkan && vulkanNoFg)
+        // Vulkan, but not the game's own native swapchain (a game on dxvk, or the bridge): F5Low runs through the
+        // bridge there
+        outputOptions[f5lowOutputIndex].set_disabled(
+            !f5lowAvailability.available,
+            f5lowAvailability.available
+                ? "Needs the bridge here: this game does not present on its own Vulkan swapchain (for example dxvk)"
+                : f5lowAvailability.reason);
     else
         outputOptions[f5lowOutputIndex].set_disabled(!f5lowAvailability.available, f5lowAvailability.reason);
     // Unsupported FG input selected
