@@ -830,6 +830,7 @@ struct CapInputs
     bool xefgVsync = false;          // frame generation presents with V-Sync (State::fgPresentVsync)
     bool xellCountsShown = true;     // XeLL counts shown frames: the XeFG library tells it about its own (XeFGProxy)
     bool driverMultipliesCap = false; // DLSS-G behind XeFG's API: the driver multiplies the interval (XeFGProxy)
+    bool vkF5Low = false;             // F5Low on a native Vulkan swapchain: the driver never hears its multiplier
 };
 
 // Frames shown per frame the game renders: 1 + the generated ones, but only while frame generation generates. Stood
@@ -939,6 +940,10 @@ inline CapPlan PlanCap(const CapInputs& in)
     if (in.method == Method::XellWithXefg)
         return { CapOwner::LowLatency,
                  IntervalUs(in.xellCountsShown ? in.capFps : CapPerRenderedFrame(in.capFps, in.shownPerRendered)) };
+
+    // F5Low on Vulkan: the driver's interval counts the game's own frames, the shown cap is divided per rendered frame
+    if (in.vkF5Low)
+        return { CapOwner::LowLatency, IntervalUs(CapPerRenderedFrame(in.capFps, in.shownPerRendered)) };
 
     // Reflex, Anti-Lag 2 and LatencyFlex pace the game's own frames: FSR frame generation doubles them
     return { CapOwner::LowLatency, IntervalUs(in.fsrFgActive ? in.capFps / 2.0f : in.capFps) };

@@ -90,7 +90,6 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     bool _warnedCapMode = false;
 
     // f5low's pacer (f5low_pacer.h), when the f5low.dll has it
-    bool _timerRaised = false;
     std::mutex _statMutex;
     F5LowVk::SpacingStats _spacing;
     int64_t _lastPresentTicks = 0;
@@ -121,7 +120,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
         0; // presented generated frames + 1 of a frame whose generated frames ran inline (no worker)
     uint32_t _gameMinImages = 0;
     uint32_t _meterLogs = 0;
-    uint32_t _lastFeedback = 0;
+    std::atomic<uint32_t> _lastFeedback { 0 };
+    bool _hostMeter = false; // the pacer was told the host can meter (ini + device)
+    F5LowVk::TimerState _timer;
     std::vector<VkBool32*>
         _switchedFlags; // feature flags switched on in the game's own structs, put back after the create
     std::vector<const char*> _deviceExtensions;

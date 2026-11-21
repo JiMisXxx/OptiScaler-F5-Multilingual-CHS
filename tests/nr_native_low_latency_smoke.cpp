@@ -388,6 +388,19 @@ int main()
         // Not running: not ours, whatever the cap
         cap.capFps = 60.0f;
         CHECK(PlanCap(cap).owner == CapOwner::NotOurs);
+
+        // F5Low on Vulkan: the shown cap is divided per rendered frame by our own low latency
+        {
+            CapInputs vk {};
+            vk.running = true;
+            vk.capFps = 120.0f;
+            vk.method = Method::RealReflex;
+            vk.shownPerRendered = 3;
+            vk.vkF5Low = true;
+            CHECK(PlanCap(vk).minimumIntervalUs == IntervalUs(40.0f));
+            vk.vkF5Low = false;
+            CHECK(PlanCap(vk).minimumIntervalUs == IntervalUs(120.0f));
+        }
         CHECK(PlanCap(cap).minimumIntervalUs == 0);
 
         // Running with no cap: ours, nothing to limit (the limiter has nothing to do either)

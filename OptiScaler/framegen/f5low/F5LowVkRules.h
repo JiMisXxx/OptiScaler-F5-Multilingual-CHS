@@ -380,6 +380,7 @@ enum class SwapchainSupport
     OkHdr10,
     RefusedFp16,
     RefusedOrder,
+    RefusedColourSpace,
     RefusedFormat
 };
 
@@ -393,7 +394,7 @@ inline SwapchainSupport ClassifySwapchain(int format, long long colorSpace)
     case 50:
         return SwapchainSupport::Ok;
     case 64:
-        return colorSpace == 1000104008 ? SwapchainSupport::OkHdr10 : SwapchainSupport::Ok;
+        return colorSpace == 1000104008 ? SwapchainSupport::OkHdr10 : SwapchainSupport::RefusedColourSpace;
     case 58:
         return SwapchainSupport::RefusedOrder;
     case 97:
@@ -418,6 +419,8 @@ inline const char* SwapchainReason(SwapchainSupport support)
     case SwapchainSupport::RefusedOrder:
         return "the swapchain's 10-bit format has its channels in an order the generator does not take (A2R10G10B10), "
                "only A2B10G10R10 is supported";
+    case SwapchainSupport::RefusedColourSpace:
+        return "a 10-bit swapchain only works with the HDR10 (ST 2084) colour space";
     case SwapchainSupport::RefusedFormat:
         return "the swapchain's format is not supported (8-bit RGBA/BGRA and HDR10 are)";
     default:
@@ -474,6 +477,9 @@ inline bool DynamicRuns(bool dynamicSet, bool followsGame, int maxCount)
     return dynamicSet && !followsGame && maxCount > 1;
 }
 
+// Frames asked of the generator: 0 while Dynamic MFG holds at 1X (history is still fed)
+inline uint32_t CountToGenerate(bool dynamicHold, uint32_t count) { return dynamicHold ? 0u : count; }
+
 inline int CountAfterDynamic(int chosen, int kept) { return chosen >= 1 ? chosen : kept; }
 
 // Whether "Dynamic MFG holds back" is true: it chose 1X (the status line says so only then)
@@ -503,16 +509,61 @@ inline uint32_t PacerFlags(bool meteringOnDevice) { return meteringOnDevice ? 0x
 
 // Whether this batch is metered: the pacer's answer (meterWanted) when there is one, else the fallback rule; always
 // needs the extension on the device
-inline bool MeterThisBatch(bool pacerPresent, uint32_t meterWanted, bool fallbackOn, bool meteringOnDevice)
+inline bool MeterThisBatch(bool pacerPresent, uint32_t meterWanted, bool fallbackOn, bool meteringUsable)
 {
-    return meteringOnDevice && (pacerPresent ? meterWanted != 0 : fallbackOn);
+    return meteringUsable && (pacerPresent ? meterWanted != 0 : fallbackOn);
 }
 
 // The status handed to f5lowPacerMeterResult: 0 accepted, 1 a refusal (a failed present or presentConfigFeedback != 0)
 inline int32_t MeterStatus(bool presentFailed, uint32_t feedback) { return (presentFailed || feedback != 0) ? 1 : 0; }
 
-// The 1 ms timer is raised while frames are generated
-inline bool TimerWanted(bool generating, bool pacerPresent) { return generating && pacerPresent; }
+// The 1 ms timer follows generating, with hysteresis: on at once, off after kTimerOffFrames frames without generating
+inline constexpr uint32_t kTimerOffFrames = 30;
+
+struct TimerState
+{
+    bool raised = false;
+    uint32_t idle = 0;
+};
+
+// True when the raise should change (to `state.raised` after the call)
+inline bool TimerUpdate(TimerState& state, bool generating)
+{
+    if (generating)
+    {
+        state.idle = 0;
+
+        if (state.raised)
+            return false;
+
+        state.raised = true;
+        return true;
+    }
+
+    if (!state.raised)
+        return false;
+
+    if (++state.idle < kTimerOffFrames)
+        return false;
+
+    state.raised = false;
+    state.idle = 0;
+    return true;
+}
+
+// The host says it can meter only when the ini asks for it, the device has VK_NV_present_metering and it was not
+// refused
+inline bool HostCanMeter(bool iniOn, bool onDevice) { return iniOn && onDevice; }
+
+// A pacer wait is clamped on our side: never past two intervals or 100 ms from now
+inline int64_t ClampRelease(int64_t releaseTicks, int64_t nowTicks, int64_t ticksPerSecond, double intervalMs)
+{
+    const int64_t hundredMs = ticksPerSecond / 10;
+    const int64_t twoIntervals =
+        intervalMs > 0.0 ? static_cast<int64_t>(2.0 * intervalMs * ticksPerSecond / 1000.0) : hundredMs;
+    const int64_t limit = nowTicks + (twoIntervals < hundredMs ? twoIntervals : hundredMs);
+    return releaseTicks < limit ? releaseTicks : limit;
+}
 
 // Present spacing of the shown frames (ms): mean, standard deviation, largest, and how many ran late
 struct SpacingStats

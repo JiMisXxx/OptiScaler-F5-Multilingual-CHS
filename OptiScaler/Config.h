@@ -1270,7 +1270,9 @@ class Config
     // [F5Low] KeepGameDlssg: with the DLSS-G generator the game's own nvngx_dlssg.dll is kept from loading (two DLSS-G
     // copies fault the GPU); true lets it load
     CustomOptional<bool> F5LowKeepGameDlssg { false };
-    CustomOptional<bool> F5LowVulkanLatencyGate { true }; // F5Low on Vulkan: bound how far the game runs ahead
+    CustomOptional<bool> F5LowVulkanFlipMetering { false }; // experimental, RTX 50: VK_NV_present_metering
+    CustomOptional<bool> F5LowVulkanPacer { true };         // use f5low's pacer when the f5low.dll exports it
+    CustomOptional<bool> F5LowVulkanLatencyGate { true };   // F5Low on Vulkan: bound how far the game runs ahead
     // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
     // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
     CustomOptional<bool> FGStreamlineIgnoreOTA { false };

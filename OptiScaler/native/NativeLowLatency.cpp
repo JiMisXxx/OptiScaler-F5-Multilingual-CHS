@@ -332,6 +332,7 @@ CapInputs FrameCapInputs(Api api)
     in.shownPerRendered = XefgShownPerRendered();
     in.xellCountsShown = XellCountsShown();
     in.driverMultipliesCap = DriverMultipliesReflexCap();
+    in.vkF5Low = state.activeFgOutput == FGOutput::F5Low && state.currentVkFG != nullptr;
     in.xefgVsync = state.fgPresentVsync.load(std::memory_order_relaxed);
     in.fakenvapiXell = in.method == Method::Fakenvapi && InputCommon::current_mode() == LowLatencyMode::XeLL;
 

@@ -239,7 +239,7 @@ int main()
     CHECK(ClassifySwapchain(50, 0) == SwapchainSupport::Ok);
     CHECK(ClassifySwapchain(37, 0) == SwapchainSupport::Ok);
     CHECK(ClassifySwapchain(64, 1000104008LL) == SwapchainSupport::OkHdr10);
-    CHECK(ClassifySwapchain(64, 0) == SwapchainSupport::Ok); // 10-bit SDR
+    CHECK(ClassifySwapchain(64, 0) == SwapchainSupport::RefusedColourSpace); // 10-bit, not HDR10: refused
     CHECK(ClassifySwapchain(58, 1000104008LL) == SwapchainSupport::RefusedOrder);
     CHECK(ClassifySwapchain(97, 1000104002LL) == SwapchainSupport::RefusedFp16);
     CHECK(ClassifySwapchain(97, 0) == SwapchainSupport::RefusedFp16);
@@ -284,7 +284,22 @@ int main()
     CHECK(MeterStatus(false, 0) == 0);
     CHECK(MeterStatus(true, 0) == 1);
     CHECK(MeterStatus(false, 4) == 1);
-    CHECK(TimerWanted(true, true) && !TimerWanted(false, true) && !TimerWanted(true, false));
+    {
+        TimerState timer;
+        CHECK(TimerUpdate(timer, true) && timer.raised);
+        CHECK(!TimerUpdate(timer, true));
+        for (uint32_t i = 0; i + 1 < kTimerOffFrames; ++i)
+            CHECK(!TimerUpdate(timer, false));
+        CHECK(!TimerUpdate(timer, true)); // back before it dropped: stays on, count restarts
+        for (uint32_t i = 0; i + 1 < kTimerOffFrames; ++i)
+            CHECK(!TimerUpdate(timer, false));
+        CHECK(TimerUpdate(timer, false) && !timer.raised);
+    }
+    CHECK(HostCanMeter(true, true) && !HostCanMeter(false, true) && !HostCanMeter(true, false));
+    CHECK(ClampRelease(1000, 0, 1000, 10.0) == 20);          // two intervals (10 ms = 10 ticks at 1 kHz) from now
+    CHECK(ClampRelease(5, 0, 1000, 10.0) == 5);              // earlier than the limit: kept
+    CHECK(ClampRelease(100000, 0, 1000, 500.0) == 100);      // 100 ms cap
+    CHECK(CountToGenerate(true, 3) == 0 && CountToGenerate(false, 3) == 3);
     {
         SpacingStats stats;
         stats.Add(8.0);

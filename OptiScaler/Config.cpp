@@ -167,6 +167,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                              F5Low::GeneratorLabel(F5Low::kDefaultGenerator));
                 F5LowKeepGameDlssg.set_from_config(readBool("F5Low", "KeepGameDlssg"));
                 F5LowVulkanLatencyGate.set_from_config(readBool("F5Low", "VulkanLatencyGate"));
+                F5LowVulkanFlipMetering.set_from_config(readBool("F5Low", "VulkanFlipMetering"));
+                F5LowVulkanPacer.set_from_config(readBool("F5Low", "VulkanPacer"));
             }
 
             FGStreamlineIgnoreOTA.set_from_config(readBool("FrameGen", "StreamlineIgnoreOTA"));
@@ -2202,6 +2204,9 @@ bool Config::SaveIni()
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
         ini.SetValue("F5Low", "FrameGenerator", F5Low::GeneratorText(Instance()->F5LowGenerator.value_for_config()));
         ini.SetValue("F5Low", "KeepGameDlssg", GetBoolValue(Instance()->F5LowKeepGameDlssg.value_for_config()).c_str());
+        ini.SetValue("F5Low", "VulkanFlipMetering",
+                     GetBoolValue(Instance()->F5LowVulkanFlipMetering.value_for_config()).c_str());
+        ini.SetValue("F5Low", "VulkanPacer", GetBoolValue(Instance()->F5LowVulkanPacer.value_for_config()).c_str());
         ini.SetValue("F5Low", "VulkanLatencyGate",
                      GetBoolValue(Instance()->F5LowVulkanLatencyGate.value_for_config()).c_str());
 
