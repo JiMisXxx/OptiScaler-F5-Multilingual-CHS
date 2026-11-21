@@ -80,9 +80,10 @@ int main()
     CHECK(runs(true, false, false, true, false, false, false, false, false) == RunsOn::D3D12GameCopy);  // dlss_12 left
     CHECK(runs(true, false, true, false, true, true, false, false, false) == RunsOn::D3D12F5Low);       // NR only / + FG
     CHECK(runs(true, false, false, true, true, false, false, false, false) == RunsOn::D3D12F5Low);      // beats on12
-    // Finished Picture on native Vulkan: does not run on this base, runs on D3D12 once the flag is flipped
+    // Finished Picture on native Vulkan: on the private D3D12 device while it runs, "not running" while it waits or is
+    // refused (and without Vulkan support in a build)
     CHECK(runs(true, false, false, false, false, true, false, false, false) == RunsOn::FinishedPictureNotRunning);
-    CHECK(runs(true, false, false, false, false, true, true, false, false) == RunsOn::D3D12FinishedPicture);
+    CHECK(runs(true, false, false, false, false, true, true, false, false) == RunsOn::FinishedPictureNotRunning);
     // The runtime wins over the settings
     CHECK(runs(true, true, true, false, false, false, false, true, false) == RunsOn::Vulkan);
     CHECK(runs(true, false, false, false, false, true, false, false, true) == RunsOn::D3D12);
@@ -98,7 +99,7 @@ int main()
     CHECK(CardRunsOnLine(RunsOn::NrOff) == "Neural Rendering is off.");
     CHECK(CardRunsOnLine(RunsOn::Vulkan) == "Neural Rendering runs on: Vulkan (native swapchain)");
     CHECK(CardRunsOnLine(RunsOn::FinishedPictureNotRunning) ==
-          "Neural Rendering runs on: none (Finished Picture does not run on Vulkan yet)");
+          "Neural Rendering runs on: none (Finished Picture is not running, see its status)");
     CHECK(PageRunsOnLine(RunsOn::D3D12F5Low) == "Runs on: D3D12 (Optical F5Low, copies)");
 
     // The leftover: only dlss_12 (the route's own), route off, no F5Low mode, a Vulkan game only
@@ -127,7 +128,7 @@ int main()
     CHECK(StatusText(false, false, false, false, "", RunsOn::D3D12FinishedPicture) ==
           "Native swapchain (Neural Rendering on D3D12, Finished Picture copies)");
     CHECK(StatusText(false, false, false, false, "", RunsOn::FinishedPictureNotRunning) ==
-          "Native swapchain (Finished Picture does not run on Vulkan yet)");
+          "Native swapchain (Finished Picture is not running)");
 
     if (fails == 0)
         printf("vulkan_route_rule_smoke: PASS\n");

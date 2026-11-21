@@ -94,12 +94,12 @@ enum class RunsOn
     D3D12F5Low,    // Optical F5Low's NR only / NR + frame generation
     D3D12FinishedPicture,
     D3D12,                    // running on D3D12, which no setting explains
-    FinishedPictureNotRunning // Finished Picture is on and does not run on Vulkan (yet)
+    FinishedPictureNotRunning // Finished Picture is on but not running (refused: frame generation, format, ...)
 };
 
 // Whether Finished Picture runs on a native Vulkan game (it is made there by a Vulkan frame source on a private D3D12
-// device). False where this branch's base is; the branch that adds it sets it true: the rule below is the only place.
-inline constexpr bool kFinishedPictureRunsOnVulkan = false;
+// device, #353); false only for a build without it: the rule below is the only place.
+inline constexpr bool kFinishedPictureRunsOnVulkan = true;
 
 struct NrInputs
 {
@@ -130,7 +130,10 @@ inline RunsOn NrRunsOn(const NrInputs& in)
     else if (in.motionModeOn)
         byDesign = RunsOn::D3D12F5Low;
     else if (in.finishedPicture)
-        byDesign = in.finishedPictureRunsOnVulkan ? RunsOn::D3D12FinishedPicture : RunsOn::FinishedPictureNotRunning;
+        // It runs on the private D3D12 device; while it is not running there (refused or waiting) say so, its status
+        // line says why (IsRunningVk() is false while Finished Picture is what runs on a Vulkan game)
+        byDesign = in.finishedPictureRunsOnVulkan && in.runningD3D12 ? RunsOn::D3D12FinishedPicture
+                                                                     : RunsOn::FinishedPictureNotRunning;
     else if (in.upscalerOnD3D12)
         byDesign = RunsOn::D3D12GameCopy;
 
@@ -158,7 +161,7 @@ inline std::string RunsOnText(RunsOn runsOn)
     case RunsOn::D3D12:
         return "D3D12";
     case RunsOn::FinishedPictureNotRunning:
-        return "none (Finished Picture does not run on Vulkan yet)";
+        return "none (Finished Picture is not running, see its status)";
     default:
         return "off";
     }
@@ -217,7 +220,7 @@ inline std::string StatusText(bool routeOn, bool f5lowFrameGeneration, bool left
     case RunsOn::D3D12FinishedPicture:
         return text + " (Neural Rendering on D3D12, Finished Picture copies)";
     case RunsOn::FinishedPictureNotRunning:
-        return text + " (Finished Picture does not run on Vulkan yet)";
+        return text + " (Finished Picture is not running)";
     default:
         return text + " (Neural Rendering on D3D12)";
     }
