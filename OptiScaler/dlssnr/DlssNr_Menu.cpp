@@ -5693,8 +5693,20 @@ void RenderVulkanRoute(Config* config)
         "D3D12.\n"
         "Choose before the game starts; leaving the bridge needs a restart.");
 
-    ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
-    ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
+    // The chosen route's row is read, the other one is the quiet one
+    const bool nativeSelected = !routeOn && !f5lowFg;
+
+    if (nativeSelected)
+        ImGui::Text("%s", DlssNrVulkanRoute::NativeSummary());
+    else
+        ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
+
+    if (nativeSelected)
+        ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
+    else
+        ImGui::Text("%s", DlssNrVulkanRoute::BridgeSummary());
+
+    ImGui::Spacing();
     ImGui::TextDisabled("%s", DlssNrVulkanRoute::CardRunsOnLine(route.runsOn).c_str());
     DrawLeftoverFix(config, route, "route");
 

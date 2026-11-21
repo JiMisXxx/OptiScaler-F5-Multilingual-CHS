@@ -172,9 +172,28 @@ inline std::string RunsOnText(RunsOn runsOn)
     }
 }
 
+// The route card's "Now:" line, in full words (the short forms above are for the Status page and the pages' lines)
 inline std::string CardRunsOnLine(RunsOn runsOn)
 {
-    return runsOn == RunsOn::NrOff ? "Neural Rendering is off." : "Neural Rendering runs on: " + RunsOnText(runsOn);
+    switch (runsOn)
+    {
+    case RunsOn::NrOff:
+        return "Now: Neural Rendering is off.";
+    case RunsOn::Vulkan:
+        return "Now: Neural Rendering runs on Vulkan, in the game's own device.";
+    case RunsOn::D3D12Bridge:
+        return "Now: Neural Rendering runs on D3D12, through the bridge.";
+    case RunsOn::D3D12F5Low:
+        return "Now: Neural Rendering runs on D3D12, because Optical F5Low copies the picture there.";
+    case RunsOn::D3D12FinishedPicture:
+        return "Now: Neural Rendering runs on D3D12, because Finished Picture copies the picture there.";
+    case RunsOn::D3D12GameCopy:
+        return "Now: Neural Rendering runs on D3D12, because the game's upscaler still runs on its D3D12 copy.";
+    case RunsOn::FinishedPictureNotRunning:
+        return "Now: Neural Rendering is not running (Finished Picture is waiting, see its status).";
+    default:
+        return "Now: Neural Rendering runs on D3D12.";
+    }
 }
 
 // The page line is not drawn while Neural Rendering is off
@@ -196,9 +215,9 @@ inline std::string LeftoverLine(const std::string& backendCode)
 // The route card's two rows, always shown.
 inline const char* NativeSummary()
 {
-    return "Native swapchain: FSR FG, DLSS-G, F5Low (XeFG Tensor). The game's own swapchain.";
+    return "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. No extra cost.";
 }
-inline const char* BridgeSummary() { return "Bridge: also XeFG. Adds a D3D12 swapchain, device and copies."; }
+inline const char* BridgeSummary() { return "Bridge: adds XeFG. Costs a second (D3D12) device and picture copies."; }
 
 // The Status page's "Vulkan route" row: the route, then where Neural Rendering runs.
 inline std::string StatusText(bool routeOn, bool f5lowFrameGeneration, bool leftover, bool bridgeUp,

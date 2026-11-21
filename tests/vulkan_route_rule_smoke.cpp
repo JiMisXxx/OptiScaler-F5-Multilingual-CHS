@@ -119,10 +119,18 @@ int main()
     CHECK(RunsOnText(RunsOn::D3D12F5Low) == "D3D12 (Optical F5Low, copies)");
     CHECK(RunsOnText(RunsOn::D3D12FinishedPicture) == "D3D12 (Finished Picture, copies)");
     CHECK(RunsOnText(RunsOn::D3D12) == "D3D12");
-    CHECK(CardRunsOnLine(RunsOn::NrOff) == "Neural Rendering is off.");
-    CHECK(CardRunsOnLine(RunsOn::Vulkan) == "Neural Rendering runs on: Vulkan (native swapchain)");
+    CHECK(CardRunsOnLine(RunsOn::NrOff) == "Now: Neural Rendering is off.");
+    CHECK(CardRunsOnLine(RunsOn::Vulkan) == "Now: Neural Rendering runs on Vulkan, in the game's own device.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12Bridge) == "Now: Neural Rendering runs on D3D12, through the bridge.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12F5Low) ==
+          "Now: Neural Rendering runs on D3D12, because Optical F5Low copies the picture there.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12FinishedPicture) ==
+          "Now: Neural Rendering runs on D3D12, because Finished Picture copies the picture there.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12GameCopy) ==
+          "Now: Neural Rendering runs on D3D12, because the game's upscaler still runs on its D3D12 copy.");
     CHECK(CardRunsOnLine(RunsOn::FinishedPictureNotRunning) ==
-          "Neural Rendering runs on: none (Finished Picture is not running, see its status)");
+          "Now: Neural Rendering is not running (Finished Picture is waiting, see its status).");
+    CHECK(CardRunsOnLine(RunsOn::D3D12) == "Now: Neural Rendering runs on D3D12.");
     CHECK(PageRunsOnLine(RunsOn::D3D12F5Low) == "Runs on: D3D12 (Optical F5Low, copies)");
 
     // The leftover: only dlss_12 (the route's own), route off, no F5Low mode, a Vulkan game only
@@ -134,8 +142,10 @@ int main()
     CHECK(LeftoverLine("dlss_12") ==
           "The game's upscaler runs on its D3D12 copy (dlss_12), so Neural Rendering runs on D3D12.");
 
-    CHECK(std::string(NativeSummary()).find("FSR FG, DLSS-G, F5Low") != std::string::npos);
-    CHECK(std::string(BridgeSummary()).find("also XeFG") != std::string::npos);
+    CHECK(std::string(NativeSummary()) == "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. No extra cost.");
+    CHECK(std::string(NativeSummary()).find("FSR FG, DLSS-G or F5Low") != std::string::npos);
+    CHECK(std::string(BridgeSummary()) == "Bridge: adds XeFG. Costs a second (D3D12) device and picture copies.");
+    CHECK(std::string(BridgeSummary()).find("adds XeFG") != std::string::npos);
 
     // The Status page's row
     CHECK(StatusText(true, false, false, true, "", RunsOn::D3D12Bridge) ==
