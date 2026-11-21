@@ -955,6 +955,7 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
         LOG_DEBUG("F5Low (Vulkan): the worker was still busy, presenting the game's image anyway");
 
     _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - startMs));
+    AddOurWait(Util::MillisecondsNow() - startMs);
 
     const auto result = PresentOn(queue, *info, RemainingMs(kBlockMs, Util::MillisecondsNow() - startMs));
 
@@ -1414,10 +1415,26 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
     // The time between two game presents. The game thread is not held by our pacing (the worker paces), so this is the
     // game's own cadence.
     const double entryMs = Util::MillisecondsNow();
-    _arriveTicks = _impl->pacerNowTicks != nullptr ? _impl->pacerNowTicks() : 0;
+    const int64_t realTicks = _impl->pacerNowTicks != nullptr ? _impl->pacerNowTicks() : 0;
+    const double ourWaitMs = _ourWaitMs.exchange(0.0);
 
+    // The game's own frame time, without what our waits added to it; the interval and the pacer's arrival ticks follow
+    // it
     if (_lastEntryMs > 0.0)
-        _intervalMs = NextInterval(_intervalMs, entryMs - _lastEntryMs);
+    {
+        const double own = Unthrottled(entryMs - _lastEntryMs, ourWaitMs);
+        _intervalMs = NextInterval(_intervalMs, own);
+        _statWaitMs += ourWaitMs;
+
+        if (own >= 2.0 && own <= 100.0)
+        {
+            _statUnthrottledSum += own;
+            ++_statUnthrottledN;
+        }
+    }
+
+    _synthTicks = NextSyntheticTick(_synthTicks, realTicks, _intervalMs, _impl->ticksPerSecond);
+    _arriveTicks = _synthTicks;
 
     _lastEntryMs = entryMs;
 
@@ -1489,7 +1506,11 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
 
     VkPresentInfoKHR finalInfo = *pPresentInfo;
 
-    if (Generate(queue, pPresentInfo, pending, finalInfo) == Outcome::Queued)
+    const double generateStartMs = Util::MillisecondsNow();
+    const auto outcome = Generate(queue, pPresentInfo, pending, finalInfo);
+    AddOurWait(Util::MillisecondsNow() - generateStartMs);
+
+    if (outcome == Outcome::Queued)
         return AskRecreateIfRaised(static_cast<VkResult>(_impl->lastResult.load()));
 
     const auto direct = DirectPresent(queue, &finalInfo, _frameOwnId, _inlineBatch);
@@ -2129,12 +2150,24 @@ void F5Low_Vk::LogStats()
         _gateWaitTotalMs = 0.0;
     }
 
+    // Everything below is for this window of kStatsEvery game frames
+    const double nowMs = Util::MillisecondsNow();
+    const double windowS = _statStartMs > 0.0 ? (nowMs - _statStartMs) / 1000.0 : 0.0;
+    const double unthrottled = _statUnthrottledN > 0 ? _statUnthrottledSum / _statUnthrottledN : 0.0;
+    const double waitPerFrame = _statWaitMs / kStatsEvery;
+    const double shownFps = windowS > 0.0 ? static_cast<double>(generated + batches) / windowS : 0.0;
+    _statStartMs = nowMs;
+    _statWaitMs = 0.0;
+    _statUnthrottledSum = 0.0;
+    _statUnthrottledN = 0;
+
     LOG_INFO(
-        "F5Low (Vulkan) stats: interval {:.2f} ms, generated {:.2f}/frame, pacing {} (mode {}, active {}), metering {} "
-        "(feedback 0x{:X}, refused {}), present spacing mean {:.2f} sd {:.2f} max {:.2f} ms, late {}, gate waits {} "
-        "({:.1f} ms)",
-        haveInfo ? info.intervalMs : _intervalMs,
-        batches > 0 ? static_cast<double>(generated) / static_cast<double>(batches) : 0.0,
+        "F5Low (Vulkan) stats (per {} frames): game {:.1f} fps unthrottled (interval {:.2f} ms), shown {:.1f} fps, "
+        "generated {:.2f}/frame, our waits {:.2f} ms/frame, pacing {} (mode {}, active {}), metering {} (feedback "
+        "0x{:X}, "
+        "refused {}), present spacing mean {:.2f} sd {:.2f} max {:.2f} ms, late {}, gate waits {} ({:.1f} ms)",
+        kStatsEvery, unthrottled > 0.0 ? 1000.0 / unthrottled : 0.0, _intervalMs, shownFps,
+        batches > 0 ? static_cast<double>(generated) / static_cast<double>(batches) : 0.0, waitPerFrame,
         s.pacer != nullptr ? "f5low pacer" : "plain", haveInfo ? info.pacingMode : -1, haveInfo ? info.pacingActive : 0,
         _meteringOn.load() || _meterWasOn.load() ? "on" : "off", _lastFeedback.load(),
         haveInfo ? info.meteringRefused : 0, spacing.mean, spacing.Sd(), spacing.max, spacing.late, gateWaits, gateMs);
@@ -2145,7 +2178,8 @@ uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)
     auto& s = *_impl;
     auto& slot = s.slots[job.slot];
     uint32_t presentedGenerated = 0;
-    const double spacingMs = SpacingMs(job.intervalMs, job.generated);
+    // No CPU spacing when V-Sync / FIFO paces the display; else the batch fits the game's own interval
+    const double spacingMs = BatchSpacingMs(job.intervalMs, job.generated, VsyncPaces(_presentMode));
     const double baseMs = Util::MillisecondsNow();
     bool complete = true;
 
@@ -2163,7 +2197,7 @@ uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)
                 continue;
             }
         }
-        else if (paced && k > 0)
+        else if (paced && k > 0 && spacingMs > 0.0)
         {
             WaitUntil(baseMs + k * spacingMs);
         }
@@ -2262,7 +2296,7 @@ uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)
     }
 
     // The game's frame follows after the last generated one's slot
-    if (paced && complete)
+    if (paced && complete && spacingMs > 0.0)
         WaitUntil(baseMs + job.generated * spacingMs);
 
     return presentedGenerated;
@@ -2773,6 +2807,7 @@ bool F5Low_Vk::GateAcquire(VkDevice device, VkSwapchainKHR swapchain, uint64_t t
     const double waitStartMs = Util::MillisecondsNow();
     const auto result = WaitForPresent(device, swapchain, id, waitNs);
     _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - waitStartMs));
+    AddOurWait(Util::MillisecondsNow() - waitStartMs);
 
     {
         std::lock_guard statLock(_gateMutex);

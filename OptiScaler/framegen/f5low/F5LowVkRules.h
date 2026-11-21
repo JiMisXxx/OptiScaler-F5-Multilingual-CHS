@@ -66,6 +66,34 @@ inline double NextInterval(double previousMs, double sampleMs)
     return previousMs * 0.8 + sampleMs * 0.2;
 }
 
+// The game's own frame time: the time between two present arrivals minus what its thread spent inside our blocking
+// waits in between (gate, drain, N-2 job, inline presents). Without that subtraction our waits lengthen the interval,
+// which widens the spacing, which lengthens the waits.
+inline double Unthrottled(double deltaMs, double ourWaitMs) { return deltaMs - (ourWaitMs > 0.0 ? ourWaitMs : 0.0); }
+
+// Synthetic arrival tick for the pacer: the previous one plus the game's own interval (the pacer then sees the
+// unthrottled cadence); back on the real tick when none yet or it drifted more than 200 ms from it
+inline int64_t NextSyntheticTick(int64_t previous, int64_t real, double intervalMs, int64_t ticksPerSecond)
+{
+    if (previous == 0 || intervalMs <= 0.0 || ticksPerSecond <= 0)
+        return real;
+
+    const int64_t next = previous + static_cast<int64_t>(intervalMs * static_cast<double>(ticksPerSecond) / 1000.0);
+    const int64_t drift = next > real ? next - real : real - next;
+    return drift > ticksPerSecond / 5 ? real : next;
+}
+
+// Space between the generated frames' presents on the CPU: none when the display paces (V-Sync / FIFO: present back to
+// back, the queue holds the order), else the interval less a margin, shared by the batch; a batch never outlasts the
+// interval
+inline double BatchSpacingMs(double intervalMs, uint32_t generated, bool displayPaced, double marginMs = 0.5)
+{
+    if (displayPaced || generated == 0 || !(intervalMs > marginMs))
+        return 0.0;
+
+    return (intervalMs - marginMs) / (generated + 1);
+}
+
 // Space between the shown frames of one game frame (the generated ones, then the game's own). The waits add up to
 // count * spacing, which is always below one interval. 0 when the interval is not known: no pacing, no generation.
 inline double SpacingMs(double intervalMs, uint32_t count)

@@ -311,6 +311,37 @@ int main()
         CHECK(Late(21.0, 10.0, 8.0) && !Late(13.0, 10.0, 8.0));
     }
 
+    // no runaway: a 60 fps game (16.7 ms of its own) whose thread is held by our waits keeps its interval
+    for (int n = 1; n <= 3; ++n)
+    {
+        double interval = 0.0, lastEntry = 0.0, now = 0.0, wait = 0.0;
+        int64_t synth = 0;
+        const double ownMs = 16.7;
+
+        for (int frame = 0; frame < 600; ++frame)
+        {
+            now += ownMs + wait; // the game's own time plus what our waits held it
+
+            if (lastEntry > 0.0)
+                interval = NextInterval(interval, Unthrottled(now - lastEntry, wait));
+
+            lastEntry = now;
+            synth = NextSyntheticTick(synth, static_cast<int64_t>(now * 1000.0), interval, 1000000);
+
+            // Our waits next frame: 3 ms of gate/drain, plus any CPU spacing (none under FIFO)
+            wait = 3.0 + BatchSpacingMs(interval, static_cast<uint32_t>(n), true) * n;
+        }
+
+        CHECK(std::fabs(interval - 16.7) < 0.2);
+        CHECK(std::min(120.0, 60.0 * (n + 1)) == 120.0); // 120 Hz FIFO shows min(refresh, 60 * (n + 1))
+        CHECK(BatchSpacingMs(16.7, static_cast<uint32_t>(n), false) * (n + 1) <= 16.7 - 0.5 + 1e-9);
+        CHECK(BatchSpacingMs(16.7, static_cast<uint32_t>(n), true) == 0.0);
+    }
+    CHECK(Unthrottled(20.0, 5.0) == 15.0 && Unthrottled(10.0, 30.0) < 0.0);
+    CHECK(NextSyntheticTick(0, 5000, 16.7, 1000000) == 5000);
+    CHECK(NextSyntheticTick(1000, 900000, 16.0, 1000000) == 900000); // drifted: resync
+    CHECK(NextSyntheticTick(1000, 17000, 16.0, 1000000) == 17000);
+
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);
     CHECK(RemainingMs(50.0, 20.5) == 29);

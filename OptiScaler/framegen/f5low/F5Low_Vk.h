@@ -99,6 +99,14 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     uint64_t _gateWaits = 0;
     double _gateWaitTotalMs = 0.0;
     int64_t _arriveTicks = 0;
+    int64_t _synthTicks = 0;
+    std::atomic<double> _ourWaitMs { 0.0 }; // our blocking waits on the game thread since the last arrival
+    // Stats window (reset every line)
+    double _statStartMs = 0.0;
+    double _statWaitMs = 0.0;
+    double _statUnthrottledSum = 0.0;
+    uint32_t _statUnthrottledN = 0;
+    void AddOurWait(double ms) { _ourWaitMs.store(_ourWaitMs.load() + ms); }
 
     // Device extensions this output enabled (or found enabled): present id + present wait bound how far the game runs
     // ahead, present metering lets the RTX 50 display hardware space the flips of a batch
