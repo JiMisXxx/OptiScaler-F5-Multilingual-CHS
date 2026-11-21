@@ -205,6 +205,9 @@ struct VkState
     float timestampPeriod = 0.0f;
     unsigned long long timedFrames = 0;
     std::optional<double> lastGpuTime;
+    std::atomic<long long> lastGpuTimeAtMs {
+        0
+    }; // SteadyMs() when lastGpuTime was measured (the menu shows only a fresh one)
 
     // Whether the game hands over an exposure texture, and what it said when it did.
     bool exposureOffered = false;
@@ -806,6 +809,16 @@ bool IsRunningVk()
     if (g_vk.feature == nullptr || g_vk.failed)
         return false;
 
+    // With Finished Picture on and NR enabled, NR on a Vulkan game is the D3D12 engine on the private device
+    // (native/NativeDriverVk.cpp); a Vulkan model that is still alive (released after the off delay) is not what runs,
+    // and its controls, time and status are not the ones in effect
+    {
+        const auto& cfg = *Config::Instance();
+
+        if (cfg.DlssNrFinishedPicture.value_or_default() && cfg.DlssNrEnabled.value_or_default())
+            return false;
+    }
+
     const long long stamp = g_vkSeamStamp.load(std::memory_order_relaxed);
     if (stamp == 0)
         return false;
@@ -862,7 +875,15 @@ ExposureStatus GameExposureStatusVk()
     return s;
 }
 
-std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
+// Only a time measured in the last 2 s: the model can linger (kOffReleaseVk) with nothing evaluating it, as while
+// Finished Picture runs the D3D12 engine on a Vulkan game, and its last number would be shown as if it were live.
+std::optional<double> LastGpuTimeVk()
+{
+    if (SteadyMs() - g_vk.lastGpuTimeAtMs.load(std::memory_order_relaxed) > 2000)
+        return std::nullopt;
+
+    return g_vk.lastGpuTime;
+}
 
 DetailReuseInfo DetailReuseStatusVk() { return DetailReuseVk::Published(); }
 
@@ -3215,6 +3236,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                 if (ms > 0.0 && ms < 1000.0)
                 {
                     g_vk.lastGpuTime = ms;
+                    g_vk.lastGpuTimeAtMs.store(SteadyMs(), std::memory_order_relaxed);
                     // Each frame's pair is read once, so full and reused frames both land here.
                     DetailReuseVk::RecordGpuTime(ms);
                 }

@@ -651,6 +651,8 @@ std::unique_ptr<DlssNrGpuTime> g_scanTime;
 double g_scanTimeSum = 0.0, g_scanTimeMax = 0.0;
 unsigned g_scanTimeSamples = 0;
 std::optional<double> g_lastGpuTime;
+std::chrono::steady_clock::time_point
+    g_lastGpuTimeAt {}; // when g_lastGpuTime was measured (LastGpuTime shows a fresh one)
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
@@ -6989,7 +6991,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (queue != nullptr)
         {
             if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
+            {
                 g_lastGpuTime = ms;
+                g_lastGpuTimeAt = std::chrono::steady_clock::now();
+            }
             // Every completed frame, not only the newest: full and reused frames alternate, and two can complete
             // between reads.
             for (const double sample : g_gpuTime->TakeFresh())
@@ -7336,7 +7341,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         {
             DeferredSr::Cancel();
             Late::Cancel();
-            Late::Say("This option needs a native DirectX 12 game.");
+            Late::Say("Finished Picture does not run through dxvk or a frame generation bridge.");
             return;
         }
         // Refuse before capture, pre-SR NR and private DLSS, not only when Present discards output.
@@ -8007,9 +8012,15 @@ void CurrentModelSize(unsigned int& width, unsigned int& height)
     height = g_nr.workHeight;
 }
 
-std::optional<double> LastGpuTime() { return g_lastGpuTime; }
+// Only a time measured in the last 2 s, so a switch between this engine and the native Vulkan model (Finished Picture
+// on a Vulkan game) never shows the other one's last number
+std::optional<double> LastGpuTime()
+{
+    if (std::chrono::steady_clock::now() - g_lastGpuTimeAt > std::chrono::seconds(2))
+        return std::nullopt;
 
-
+    return g_lastGpuTime;
+}
 
 void RequestCapture(unsigned int frames)
 {
