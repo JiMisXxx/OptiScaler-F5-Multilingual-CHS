@@ -101,13 +101,36 @@ int main()
     CHECK(GeneratedAfter(1, 3, 3) == 0);
     CHECK(GeneratedAfter(-2, 3, 3) == 0);
 
-    // asking for a new swapchain after a raise
-    CHECK(AskRecreate(3, 1, 1, 0));   // raised 2x -> 4x, one spare image
-    CHECK(!AskRecreate(3, 1, 1, 3));  // already asked for 3
-    CHECK(AskRecreate(4, 1, 1, 3));   // changed again
-    CHECK(!AskRecreate(1, 3, 3, 0));  // lowered
-    CHECK(!AskRecreate(3, 3, 3, 0));  // the swapchain was made for it
-    CHECK(!AskRecreate(3, 1, 3, 0));  // enough spare images already
+    // asking the game for a new swapchain after a raise: suboptimal, then out of date once, then give up
+    {
+        RecreateAsk ask;
+        CHECK(!OnPresentRecreate(ask, 1, 1, 1, 0.0));  // nothing raised
+        CHECK(OnPresentRecreate(ask, 3, 1, 1, 10.0));  // raised: the suboptimal ask
+        CHECK(ask.state == RecreateState::Asked);
+        CHECK(!OnPresentRecreate(ask, 3, 1, 1, 20.0)); // not again
+        for (uint32_t i = 0; i < kAskPresents + 2; ++i)
+            CHECK(!OnPresentRecreate(ask, 3, 1, 1, 100.0)); // 30 presents but not 500 ms yet
+        CHECK(ask.state == RecreateState::Asked);
+        CHECK(!OnAcquireRecreate(ask, 120.0)); // not due
+        CHECK(!OnPresentRecreate(ask, 3, 1, 1, 600.0));
+        CHECK(ask.state == RecreateState::ForcePending);
+        CHECK(OnAcquireRecreate(ask, 610.0)); // out of date, once
+        CHECK(!OnAcquireRecreate(ask, 611.0));
+        CHECK(ask.state == RecreateState::Forced);
+        CHECK(!OnPresentRecreate(ask, 3, 1, 1, 2000.0));
+        CHECK(ask.state == RecreateState::Forced);
+        CHECK(!OnPresentRecreate(ask, 3, 1, 1, 2700.0)); // 2 s without a new swapchain
+        CHECK(ask.state == RecreateState::GaveUp);
+        CHECK(!OnPresentRecreate(ask, 3, 1, 1, 9000.0)); // stays given up for this count
+        CHECK(!OnAcquireRecreate(ask, 9001.0));
+        CHECK(OnPresentRecreate(ask, 4, 1, 1, 9100.0)); // another count starts over
+        CHECK(ask.state == RecreateState::Asked);
+        CHECK(!OnPresentRecreate(ask, 2, 1, 2, 9200.0)); // lowered: idle
+        CHECK(ask.state == RecreateState::Idle);
+        CHECK(NeedsRaise(3, 1, 1));
+        CHECK(!NeedsRaise(3, 3, 1));
+        CHECK(!NeedsRaise(3, 1, 3));
+    }
 
     // device group present info: one device only
     CHECK(SingleDeviceMask(1));

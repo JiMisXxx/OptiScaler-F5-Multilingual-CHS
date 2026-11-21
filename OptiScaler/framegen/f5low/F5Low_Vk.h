@@ -2,6 +2,8 @@
 #include "SysUtils.h"
 #include <framegen/IFGFeature_Vk.h>
 
+#include "F5LowVkRules.h"
+
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -47,13 +49,16 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     double _lastEntryMs = 0.0;
     uint64_t _generatedFrames = 0;
     int _failures = 0;
-    int _wanted = 1;          // generated frames per game frame the multiplier asks for
-    int _countLimit = 5;      // lowered when f5low refuses a larger count
-    std::string _nameCache;   // built once in the constructor
-    bool _removed = false;    // the D3D12 device was removed: stays so across swapchains
-    bool _retiredOld = false; // a failed create retired the game's old swapchain
-    int _createdWanted = 1;   // the multiplier the swapchain was made for
-    int _askedWanted = 0;     // the raise the game was last asked to recreate its swapchain for
+    int _wanted = 1;           // generated frames per game frame the multiplier asks for
+    int _countLimit = 5;       // lowered when f5low refuses a larger count
+    std::string _nameCache;    // built once in the constructor
+    bool _removed = false;     // the D3D12 device was removed: stays so across swapchains
+    bool _retiredOld = false;  // a failed create retired the game's old swapchain
+    int _createdWanted = 1;    // the multiplier the swapchain was made for
+    F5LowVk::RecreateAsk _ask; // getting the game to make a new swapchain after a raise
+    std::mutex _askMutex;
+    VkResult AcquireLoop(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
+                         VkFence fence, uint32_t* pImageIndex);
     VkResult AskRecreateIfRaised(VkResult result);
     bool _loggedBehind = false;
     bool _loggedGenerating = false; // the first generated frame of this swapchain was logged

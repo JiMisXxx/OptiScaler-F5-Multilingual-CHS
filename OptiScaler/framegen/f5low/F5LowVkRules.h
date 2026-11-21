@@ -117,12 +117,76 @@ inline bool DeviceGroupCarryable(uint32_t swapchainCount, uint32_t mode, uint32_
     return swapchainCount == 1 && SingleDeviceMask(mask0);
 }
 
-// Asking the game to make a new swapchain (a SUBOPTIMAL present) so it gets the spare images a raised multiplier needs:
-// only for a raise past what the swapchain was made for and past its spare images, once per wanted count (a game that
-// does not recreate is not asked again until the count changes), never for a lowered one.
-inline bool AskRecreate(int wanted, int createdFor, uint32_t headroom, int askedFor)
+// A raise of the multiplier past what the swapchain was made for and past its spare images
+inline bool NeedsRaise(int wanted, int createdFor, uint32_t headroom)
 {
-    return wanted > createdFor && wanted > static_cast<int>(headroom) && wanted != askedFor;
+    return wanted > createdFor && wanted > static_cast<int>(headroom);
+}
+
+// Getting the game to make a new swapchain for a raise: idle -> asked (a SUBOPTIMAL present) -> forcePending (no new
+// swapchain after kAskPresents presents and kAskMs) -> forced (its next acquire answered OUT_OF_DATE, once) -> gaveUp
+// (no new swapchain kForcedMs later: the clamp and the status line stay). A new swapchain or another wanted count
+// starts over; a lowered count (or enough spare images) goes back to idle.
+enum class RecreateState
+{
+    Idle,
+    Asked,
+    ForcePending,
+    Forced,
+    GaveUp
+};
+
+inline constexpr uint32_t kAskPresents = 30;
+inline constexpr double kAskMs = 500.0;
+inline constexpr double kForcedMs = 2000.0;
+
+struct RecreateAsk
+{
+    RecreateState state = RecreateState::Idle;
+    int wanted = 0;
+    uint32_t presents = 0;
+    double sinceMs = 0.0;
+};
+
+// Per present that went through. Returns true when this present should answer SUBOPTIMAL to the game.
+inline bool OnPresentRecreate(RecreateAsk& ask, int wanted, int createdFor, uint32_t headroom, double nowMs)
+{
+    if (ask.state != RecreateState::Idle && ask.wanted != wanted)
+        ask = {};
+
+    if (!NeedsRaise(wanted, createdFor, headroom))
+    {
+        ask = {};
+        return false;
+    }
+
+    switch (ask.state)
+    {
+    case RecreateState::Idle:
+        ask = { RecreateState::Asked, wanted, 0, nowMs };
+        return true;
+    case RecreateState::Asked:
+        if (++ask.presents >= kAskPresents && nowMs - ask.sinceMs >= kAskMs)
+            ask.state = RecreateState::ForcePending;
+        return false;
+    case RecreateState::Forced:
+        if (nowMs - ask.sinceMs >= kForcedMs)
+            ask.state = RecreateState::GaveUp;
+        return false;
+    default:
+        return false;
+    }
+}
+
+// The game's acquire on the swapchain: true once, when the escalation is due (answer OUT_OF_DATE, acquire nothing)
+inline bool OnAcquireRecreate(RecreateAsk& ask, double nowMs)
+{
+    if (ask.state != RecreateState::ForcePending)
+        return false;
+
+    ask.state = RecreateState::Forced;
+    ask.sinceMs = nowMs;
+    return true;
 }
 
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.

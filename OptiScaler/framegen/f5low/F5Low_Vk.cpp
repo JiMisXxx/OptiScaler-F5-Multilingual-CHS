@@ -161,6 +161,30 @@ bool MotionFormat(VkFormat format, DXGI_FORMAT* dxgi)
     }
 }
 
+// magic_enum has no names for the depth/stencil formats (124-130)
+std::string FormatName(VkFormat format)
+{
+    switch (format)
+    {
+    case VK_FORMAT_D16_UNORM:
+        return "D16_UNORM";
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+        return "X8_D24_UNORM_PACK32";
+    case VK_FORMAT_D32_SFLOAT:
+        return "D32_SFLOAT";
+    case VK_FORMAT_S8_UINT:
+        return "S8_UINT";
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+        return "D16_UNORM_S8_UINT";
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+        return "D24_UNORM_S8_UINT";
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return "D32_SFLOAT_S8_UINT";
+    default:
+        return std::string(magic_enum::enum_name(format));
+    }
+}
+
 constexpr uint32_t kBatches = 1 + kMaxGenerated; // the copy in, one copy out per generated frame
 
 bool WaitFence12(ID3D12Fence* fence, uint64_t value, DWORD timeoutMs)
@@ -655,6 +679,26 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info)
 VkResult F5Low_Vk::AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
                                     VkFence fence, uint32_t* pImageIndex)
 {
+    // A game that ignores SUBOPTIMAL is told its swapchain is out of date, once (nothing is acquired then)
+    if (swapchain == _swapchain)
+    {
+        std::lock_guard askLock(_askMutex);
+
+        if (OnAcquireRecreate(_ask, Util::MillisecondsNow()))
+        {
+            LOG_INFO("F5Low (Vulkan): the game ignored the suboptimal ask for {}x, answering its acquire with "
+                     "OUT_OF_DATE",
+                     _wanted + 1);
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
+    }
+
+    return AcquireLoop(device, swapchain, timeout, semaphore, fence, pImageIndex);
+}
+
+VkResult F5Low_Vk::AcquireLoop(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
+                               VkFence fence, uint32_t* pImageIndex)
+{
     const auto acquireFn = SwapchainFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR", vkAcquireNextImageKHR);
     const double startMs = Util::MillisecondsNow();
 
@@ -716,7 +760,7 @@ VkResult F5Low_Vk::WaitForPresent(VkDevice device, VkSwapchainKHR swapchain, uin
 bool F5Low_Vk::AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs)
 {
     const auto result =
-        AcquireNextImage(_device, _swapchain, static_cast<uint64_t>(timeoutMs * 1e6), semaphore, VK_NULL_HANDLE, index);
+        AcquireLoop(_device, _swapchain, static_cast<uint64_t>(timeoutMs * 1e6), semaphore, VK_NULL_HANDLE, index);
     return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }
 
@@ -897,7 +941,10 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _loggedBehind = false;
     _loggedGenerating = false;
     _createdWanted = _wanted;
-    _askedWanted = 0;
+    {
+        std::lock_guard askLock(_askMutex);
+        _ask = {};
+    }
     s.nextSet = 0;
     s.setSlot[0] = s.setSlot[1] = -1;
 
@@ -1070,10 +1117,21 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
 // through; the result is not kept anywhere else, so it is never taken for the driver's.
 VkResult F5Low_Vk::AskRecreateIfRaised(VkResult result)
 {
-    if (result != VK_SUCCESS || !AskRecreate(_wanted, _createdWanted, _headroom, _askedWanted))
+    if (result != VK_SUCCESS)
         return result;
 
-    _askedWanted = _wanted;
+    std::lock_guard askLock(_askMutex);
+    const auto before = _ask.state;
+
+    if (!OnPresentRecreate(_ask, _wanted, _createdWanted, _headroom, Util::MillisecondsNow()))
+    {
+        if (before != RecreateState::GaveUp && _ask.state == RecreateState::GaveUp)
+            LOG_WARN("F5Low (Vulkan): the game did not make a new swapchain for {}x, staying at {} spare images",
+                     _wanted + 1, _headroom);
+
+        return result;
+    }
+
     LOG_INFO("F5Low (Vulkan): multiplier {}x needs more spare swapchain images ({} now), asking the game to make a new "
              "swapchain",
              _wanted + 1, _headroom);
@@ -1474,7 +1532,7 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless, uint3
             s.depthWidth = depth.imageWidth;
             s.depthHeight = depth.imageHeight;
             LOG_INFO("F5Low (Vulkan): sharing the depth at {}x{}, Vulkan format {} ({})", s.depthWidth, s.depthHeight,
-                     static_cast<int>(depth.format), magic_enum::enum_name(depth.format));
+                     static_cast<int>(depth.format), FormatName(depth.format));
         }
     }
 
