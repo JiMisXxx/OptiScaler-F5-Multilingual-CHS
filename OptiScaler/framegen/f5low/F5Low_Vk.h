@@ -110,6 +110,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     std::atomic<double> _ourWaitMs { 0.0 }; // our blocking waits on the game thread since the last arrival
     // Stats window (reset every line)
     std::atomic<uint64_t> _statShown { 0 }; // every image we presented (worker, direct, inline), counted in PresentOn
+    uint64_t _statShownFirst = 0, _statShownLast = 0; // _statShown at the window's first and last present
+    uint64_t _statMeterFirst = 0, _statMeterLast = 0; // the overlay meter's count at the same two moments
+    bool _statMeterOn = false;
     double _statFirstEntryMs = 0.0;
     double _statLastEntryMs = 0.0;
     uint32_t _statEntries = 0;  // game presents seen in the window
@@ -126,7 +129,11 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     std::atomic<bool> _gateEnabled { false };
     uint32_t _gateBound = 0;
     std::atomic<uint32_t> _gateCount { 1 }; // generated frames per game frame the bound is for (1 = 2X)
-    uint32_t GateBound() const { return F5LowVk::LatencyBound(_gameMinImages, _gateCount.load(), F5LowVk::VsyncPaces(_presentMode)); }
+    std::atomic<int> _gateMode { 0 };       // the present mode of the last frame (its effective one)
+    uint32_t GateBound() const
+    {
+        return F5LowVk::LatencyBound(_gameMinImages, _gateCount.load(), F5LowVk::VsyncPaces(_gateMode.load()));
+    }
     int _presentMode = 0;
     std::mutex _gateMutex; // _gate, the ids, _meterHealth
     F5LowVk::GateState _gate;
@@ -180,7 +187,6 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     void PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dropped, VkResult result, uint32_t feedback);
     bool NextGameFrameDone();
     void EnsurePacer();
-    void SetFixedPacing(bool gateOn);
     int EffectiveMode(const Job& job) const;
     void LogStats();
     bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);

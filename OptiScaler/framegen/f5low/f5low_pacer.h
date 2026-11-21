@@ -38,6 +38,7 @@
 // lists the mapping and the gaps.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -84,7 +85,19 @@ extern "C"
                        // unknown; f5lowFramesGpuSm gives it
         uint32_t maxGenerated; // 1..F5LOW_PACER_MAX_GENERATED
         double refreshHz;      // the display's refresh rate, 0 unknown (informational, see the VRR flag)
+        // Added after the first release of this struct (a host built against the older header passes the smaller
+        // structSize, which is accepted: the two fields below are then 0). Who spaces a batch whose
+        // F5LowPacerFrame::displayPaced is 1 (V-Sync / FIFO), as D3D12's FixedPacing (pace_sched.h FixedTimer):
+        uint32_t fixedPacing; // 0: f5low's own setting (XEFG_CUDA_FIXEDPACING / f5low.ini FixedPacing, auto = timer),
+                              // 1: display (the batch goes out back to back, F5LOW_PACER_TARGET_PACED is not set), 2:
+                              // timer (each frame waits for its time). Above 2 is an argument error. MAILBOX /
+                              // IMMEDIATE batches (displayPaced 0) are always timed.
+        uint32_t gate;        // 1: the host's own latency gate paces the game (D3D12 Gate=1): display, whatever
+                              // fixedPacing or the setting say
     } F5LowPacerCreateInfo;
+// structSize of the first release of F5LowPacerCreateInfo (everything up to refreshHz); f5low accepts it and anything
+// larger
+#define F5LOW_PACER_CREATEINFO_SIZE_V1 offsetof(F5LowPacerCreateInfo, fixedPacing)
 
     // One app frame arriving at the present worker.
     typedef struct F5LowPacerFrame
@@ -215,6 +228,10 @@ extern "C"
     F5LOW_PACER_API int32_t f5lowPacerGetInfo(F5LowPacer p, F5LowPacerInfo* out);
 
     // ---- the same timing helpers the D3D12 presenter uses ----
+    // The level of this API in the DLL: 1 = the first release, 2 = F5LowPacerCreateInfo::fixedPacing and ::gate are
+    // applied. A DLL without this export is level 1 (it accepts the larger struct and ignores the two fields: V-Sync
+    // batches are timed).
+    F5LOW_PACER_API uint32_t f5lowPacerApiLevel(void);
     F5LOW_PACER_API int64_t f5lowPacerNowTicks(void); // QPC
     F5LOW_PACER_API int64_t f5lowPacerTicksPerSecond(void);
     // Sleeps until a QPC time: a high-resolution timer for all but the last half millisecond, then a spin. QPC clock

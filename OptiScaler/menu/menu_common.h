@@ -312,6 +312,8 @@ class MenuCommon
     // them.
     static void FGOutputPresent();
     static void FGOutputPresents(bool presents);
+    // What the overlay's output-rate meter has counted (never reset) and whether it is on; for logs
+    static uint64_t FGOutputPresentTotal(bool* enabled);
     static void ApplyThemeStyle();
     static void RebuildStyle(float menuScale = 0.0f);
     static void ApplyThemeFont();

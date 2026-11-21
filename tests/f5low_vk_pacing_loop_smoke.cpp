@@ -268,13 +268,19 @@ struct Model
     bool legacySpace;    // plain spacing = SpacingMs under FIFO too (before 794c9858f)
     bool pacer;          // f5low's pacer plans the batch (default), else the plain spacing
     uint32_t gate;       // latency gate: 0 off, 255 = LatencyBound(3, n, display paced), else a fixed bound
-    bool fixedDisplay;   // the pacer does not time display-paced batches (FixedPacing=display)
+    bool pacerKnowsGate; // the pacer is made with the gate flag (production); false = made without it (before the rework)
     bool countAcquire;   // the game's acquire block and lock polling are counted as our wait
+    bool clampCpuInterval; // ClampRelease with the game's CPU-only interval (before the rework), else the pacer's own
+    int switchAt;        // the gate goes to `switchGate` at this frame and the pacer is made again (0: never)
+    bool switchGate;
 };
 
 struct Out
 {
     std::vector<double> interval, pacerInterval, period, realShown, gateWait;
+    std::vector<double> presents; // when each of our presents returned
+    std::vector<size_t> presentsAt; // presents.size() after each game frame
+    uint32_t releases = 0, clamped = 0; // timed waits after the warm-up, and how many ClampRelease moved earlier
     double endMs = 0.0;
     uint32_t n = 0;
 };
@@ -287,15 +293,22 @@ Out Run(const Cfg& c, const Model& m)
     d.vblank = 1000.0 / c.hz;
     d.images = RequestedMinImageCount(3, n, 0);
 
-    pacecore::Config pc;
-    pc.ticksPerSecond = kFreq;
-    pc.refreshHz = c.hz;
-    pc.fixedDisplay = m.fixedDisplay;
-    pacecore::Pacer pacer(pc);
+    // f5low's pacer, made for a latency gate state as the export makes it (the host's gate flag, f5low's own setting on auto)
+    const auto makePacer = [&](bool gateOn)
+    {
+        pacecore::Config pc;
+        pc.ticksPerSecond = kFreq;
+        pc.refreshHz = c.hz;
+        pc.fixedDisplay =
+            m.pacerKnowsGate && !pacesched::FixedTimer(pacesched::HostFixedMode(0, pacesched::kFixedAuto), gateOn);
+        return std::make_unique<pacecore::Pacer>(pc);
+    };
+    bool gateOn = m.gate != 0;
+    auto pacerPtr = makePacer(gateOn);
 
     constexpr double kGpuTail = 2.0, kGenMs = 1.5, kHookMs = 0.3, kPresentCpuMs = 0.25, kPollMs = 0.15;
     constexpr int64_t kTps = static_cast<int64_t>(kFreq);
-    const uint32_t bound = m.gate == 255 ? LatencyBound(3, n, c.fifo) : m.gate;
+    uint32_t bound = m.gate == 255 ? LatencyBound(3, n, c.fifo) : m.gate;
 
     Out o;
     o.n = n;
@@ -325,6 +338,16 @@ Out Run(const Cfg& c, const Model& m)
 
     for (int f = 0; f < c.frames; ++f)
     {
+        // A new swapchain with the other gate state: the gate follows and the pacer is made again for it
+        if (m.switchAt != 0 && f == m.switchAt)
+        {
+            gateOn = m.switchGate;
+            bound = gateOn ? LatencyBound(3, n, c.fifo) : 0;
+            pacerPtr = makePacer(gateOn);
+        }
+
+        auto& pacer = *pacerPtr;
+
         // The latency gate (GateAcquire in the game's acquire): the present `bound` back is on screen
         double gateWaited = 0.0;
 
@@ -386,6 +409,7 @@ Out Run(const Cfg& c, const Model& m)
         {
             const double returned = d.Present(at);
             lockHeld.push_back({ at, returned + kPresentCpuMs });
+            o.presents.push_back(returned);
             return returned + kPresentCpuMs;
         };
 
@@ -412,7 +436,18 @@ Out Run(const Cfg& c, const Model& m)
                 pacer.Target(b, k, tgt);
 
                 if ((tgt.flags & F5LOW_PACER_TARGET_PACED) != 0 && tgt.releaseTicks != 0)
-                    t = std::max(t, M(ClampRelease(tgt.releaseTicks, T(t), kTps, interval)));
+                {
+                    const int64_t clampedTicks = ClampRelease(
+                        tgt.releaseTicks, T(t), kTps, m.clampCpuInterval ? interval : PacerIntervalMs(b.stepTicks, gen, kTps));
+
+                    if (f > 300)
+                    {
+                        ++o.releases;
+                        o.clamped += clampedTicks < tgt.releaseTicks ? 1u : 0u;
+                    }
+
+                    t = std::max(t, M(clampedTicks));
+                }
 
                 if (k <= gen)
                 {
@@ -453,6 +488,7 @@ Out Run(const Cfg& c, const Model& m)
         }
 
         o.realShown.push_back(d.lastShown);
+        o.presentsAt.push_back(o.presents.size());
         done.push_back(t);
         wfree = t;
 
@@ -481,24 +517,134 @@ static Shown ShownOver(const loop::Out& r, int a, int b)
     return { span > 0.0 ? frames * 1000.0 / span : 0.0, span > 0.0 ? span / frames : 0.0 };
 }
 
+// The spacing of our presents over frames [a, b): mean, and the share of gaps shorter than a third of the mean (bunching)
+struct Spacing
+{
+    double mean, bunched;
+};
+
+static Spacing PresentSpacing(const loop::Out& r, int a, int b)
+{
+    const size_t from = r.presentsAt[a - 1], to = r.presentsAt[b - 1];
+    double sum = 0.0;
+    size_t count = 0;
+
+    for (size_t i = from + 1; i < to; ++i)
+    {
+        sum += r.presents[i] - r.presents[i - 1];
+        ++count;
+    }
+
+    const double mean = count > 0 ? sum / static_cast<double>(count) : 0.0;
+    size_t bunched = 0;
+
+    for (size_t i = from + 1; i < to; ++i)
+        if (r.presents[i] - r.presents[i - 1] < mean / 3.0)
+            ++bunched;
+
+    return { mean, count > 0 ? static_cast<double>(bunched) / static_cast<double>(count) : 0.0 };
+}
+
+// The host's FixedPacing rule and the pacer's answer must be the same for every gate state, present mode and setting
+static void RuleMatchesPacer()
+{
+    int checked = 0;
+
+    for (const bool gate : { false, true })
+        for (int mode = 0; mode <= 3; ++mode)
+            for (int setting = 0; setting <= 2; ++setting)
+            {
+                pacecore::Config pc;
+                pc.ticksPerSecond = 1e7;
+                const unsigned char own = setting == 1   ? pacesched::kFixedDisplay
+                                          : setting == 2 ? pacesched::kFixedTimer
+                                                         : pacesched::kFixedAuto;
+                pc.fixedDisplay = !pacesched::FixedTimer(pacesched::HostFixedMode(0, own), gate);
+                pacecore::Pacer pacer(pc);
+
+                F5LowPacerFrame fr {};
+                fr.structSize = sizeof(fr);
+                fr.arriveTicks = fr.readyTicks = 1000000;
+                fr.generated = 2;
+                fr.displayPaced = VsyncPaces(mode) ? 1u : 0u;
+                F5LowPacerBatch b {};
+                b.structSize = sizeof(b);
+                pacer.FrameArrived(fr, b);
+                F5LowPacerTarget tgt {};
+                tgt.structSize = sizeof(tgt);
+                pacer.Target(b, 1, tgt);
+                const bool timed = (tgt.flags & F5LOW_PACER_TARGET_PACED) != 0;
+                CHECK(timed == !DisplaySpaces(gate, mode, setting));
+                ++checked;
+            }
+
+    std::printf("\nFixedPacing rule: the host's DisplaySpaces equals the pacer's answer in %d of %d combinations "
+                "(gate x present mode x setting)\n", checked, checked);
+}
+
+// A new swapchain with the other latency gate state in the middle of the run: the gate follows and the pacer is made again for it
+// (F5Low_Vk::CreateSwapchain). Before and after the change the loop must be as flat as without it.
+static void RecreateLoop()
+{
+    using loop::Model;
+    const Model models[] = {
+        { "recreate: gate on -> off", true, false, true, false, true, 255, true, true, false, 1500, false },
+        { "recreate: gate off -> on", true, false, true, false, true, 0, true, true, false, 1500, true },
+    };
+
+    std::printf("\nGATE CHANGE ON A NEW SWAPCHAIN (frame 1500): shown fps before (1200-1300) and after (2800-2900), expect min(Hz, ...)\n");
+
+    for (const Model& m : models)
+    {
+        int bad = 0, total = 0;
+
+        for (const double hz : { 60.0, 120.0, 144.0 })
+            for (const double w : { 5.0, 16.7, 25.0, 33.0 })
+                for (int mult = 2; mult <= 6; ++mult)
+                {
+                    Cfg c { w, hz, mult, true, false };
+                    c.frames = 3000;
+                    const loop::Out r = loop::Run(c, m);
+                    const double expGame = std::min(1000.0 / w, hz / mult);
+                    const double expShown = std::min(hz, expGame * mult);
+                    const Shown before = ShownOver(r, 1200, 1300), after = ShownOver(r, 2800, 2900);
+                    const double gameBefore = 1000.0 / Mean(r.period, 1200, 1300), gameAfter = 1000.0 / Mean(r.period, 2800, 2900);
+                    const bool ok = Near(before.fps, expShown, 0.10) && Near(after.fps, expShown, 0.10) &&
+                                    Near(gameBefore, expGame, 0.10) && Near(gameAfter, expGame, 0.10);
+                    ++total;
+                    bad += ok ? 0 : 1;
+
+                    if (!ok || (hz == 120.0 && (w == 5.0 || w == 25.0) && (mult == 2 || mult == 4)))
+                        std::printf("  %-26s | %5.1f %3.0fF x%d | game %5.1f -> %5.1f (expect %5.1f) | shown %6.1f -> %6.1f (expect %6.1f)%s\n",
+                                    m.name, w, hz, mult, gameBefore, gameAfter, expGame, before.fps, after.fps, expShown,
+                                    ok ? "" : "  <-- off");
+                }
+
+        std::printf("  == %-26s: %d of %d cases outside the band\n", m.name, bad, total);
+        CHECK(bad == 0);
+    }
+}
+
 static void FullLoop()
 {
     using loop::Model;
-    //                   name                        unthr  synth  rdyGpu legacy pacer  gate  fixedD acq
+    RuleMatchesPacer();
+    //  name, unthrottled, synthArrive, readyGpu, legacySpace, pacer, gate, pacerKnowsGate, countAcquire, clampCpuInterval, switchAt, switchGate
     const Model all[] = {
-        { "legacy (before 794c), pacer", false, false, false, false, true, 2, false, false },
-        { "794c, pacer", true, true, false, false, true, 2, false, false },
-        { "794c, plain", true, true, false, false, false, 2, false, false },
-        { "new, pacer", true, false, true, false, true, 255, true, true },
-        { "new, plain", true, false, true, false, false, 255, true, true },
+        { "legacy (before 794c), pacer", false, false, false, false, true, 2, false, false, true, 0, false },
+        { "794c, pacer", true, true, false, false, true, 2, false, false, true, 0, false },
+        { "794c, plain", true, true, false, false, false, 2, false, false, true, 0, false },
+        { "new, pacer", true, false, true, false, true, 255, true, true, false, 0, false },
+        { "new, plain", true, false, true, false, false, 255, true, true, false, 0, false },
         // one rule undone at a time (printed): each of them is needed
-        { "new but timed FIFO batches", true, false, true, false, true, 255, false, true },
-        { "new but gate bound 2", true, false, true, false, true, 2, true, true },
-        { "new but pickup ready ticks", true, false, false, false, true, 255, true, true },
-        { "new but synthetic arrive", true, true, true, false, true, 255, true, true },
+        { "new but pacer unaware of the gate", true, false, true, false, true, 255, false, true, false, 0, false },
+        { "new but gate bound 2", true, false, true, false, true, 2, true, true, false, 0, false },
+        { "new but pickup ready ticks", true, false, false, false, true, 255, true, true, false, 0, false },
+        { "new but synthetic arrive", true, true, true, false, true, 255, true, true, false, 0, false },
+        { "new but clamp by the CPU interval", true, false, true, false, true, 0, true, true, true, 0, false },
         // no latency gate: the timer paces a FIFO batch (FixedPacing auto without a gate, as D3D12)
-        { "new, no gate, timer", true, false, true, false, true, 0, false, true },
-        { "new, no gate, plain", true, false, true, false, false, 0, false, true },
+        { "new, no gate, timer", true, false, true, false, true, 0, true, true, false, 0, false },
+        { "new, no gate, plain", true, false, true, false, false, 0, true, true, false, 0, false },
     };
 
     const double works[] = { 5.0, 8.3, 16.7, 25.0, 33.0 };
@@ -512,7 +658,7 @@ static void FullLoop()
     for (const Model& m : all)
     {
         int bad = 0, total = 0;
-        double worstGame = 1.0, worstShown = 1.0;
+        double worstGame = 1.0, worstShown = 1.0, worstBunched = 0.0;
 
         for (const bool fifo : { true, false })
             for (const double hz : rates)
@@ -533,9 +679,17 @@ static void FullLoop()
                         const double i1 = Mean(m.pacer ? r.pacerInterval : r.interval, 1500, 1600); // past the queue filling up
                         const double i2 = Mean(m.pacer ? r.pacerInterval : r.interval, 2800, 2900);
                         const double gw = Mean(r.gateWait, 2800, 2900);
+                        // Where our timer spaces the batch (MAILBOX / IMMEDIATE, or FIFO without the gate) the presents are
+                        // spread over it, not bunched (a release clamped by too small an interval bunches them)
+                        const bool timedCase = !fifo || m.gate == 0;
+                        const Spacing sp = PresentSpacing(r, 2800, 2900);
+                        const double clampedShare = r.releases > 0 ? static_cast<double>(r.clamped) / r.releases : 0.0;
+                        const bool spacingOk = !m.pacer || !timedCase || clampedShare <= 0.02;
                         const bool ok = Near(gameFps, expGame, 0.10) && Near(b.fps, expShown, 0.10) &&
-                                        b.fps >= a.fps * 0.97 &&
+                                        b.fps >= a.fps * 0.97 && spacingOk &&
                                         (m.pacer || i2 <= i1 * 1.05 + 0.2); // the pacer's own estimate is only printed
+                        worstBunched = std::max(worstBunched, timedCase && m.pacer ? clampedShare : 0.0);
+                        (void) sp;
                         ++total;
                         bad += ok ? 0 : 1;
                         worstGame = std::min(worstGame, gameFps / expGame);
@@ -552,14 +706,14 @@ static void FullLoop()
                     }
             }
 
-        std::printf("  == %-28s: %3d of %3d cases outside the band or drifting; worst game fps %.2f, worst shown fps "
-                    "%.2f of expected\n",
-                    m.name, bad, total, worstGame, worstShown);
+        std::printf("  == %-34s: %3d of %3d cases outside the band, drifting or bunched; worst game fps %.2f, worst shown "
+                    "fps %.2f of expected; worst share of releases moved earlier by the clamp (timed cases) %.2f\n",
+                    m.name, bad, total, worstGame, worstShown, worstBunched);
 
         if (std::strncmp(m.name, "new, ", 5) == 0)
             CHECK(bad == 0); // the production flow holds everywhere, gate included
-        else if (std::strncmp(m.name, "legacy", 6) == 0)
-            CHECK(bad > 0); // the loop is able to fail
+        else if (std::strncmp(m.name, "legacy", 6) == 0 || std::strstr(m.name, "clamp by the CPU") != nullptr)
+            CHECK(bad > 0); // the loop is able to fail (the clamp one only through the spacing check)
     }
 }
 #endif
@@ -652,6 +806,7 @@ int main()
 
 #ifdef HAVE_PACER
     FullLoop();
+    RecreateLoop();
 #else
     std::printf("full loop skipped (no f5low-fg include path)\n");
 #endif

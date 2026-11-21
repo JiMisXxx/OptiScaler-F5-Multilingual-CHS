@@ -342,6 +342,62 @@ inline int FlipMeteringForced(const char* setting)
 // VK_PRESENT_MODE_FIFO_KHR = 2, FIFO_RELAXED_KHR = 3: V-Sync paces the presents, metering has nothing to add
 inline bool VsyncPaces(int presentMode) { return presentMode == 2 || presentMode == 3; }
 
+// Who spaces the frames of a batch, as D3D12 does (f5low pace_sched.h FixedTimer): true = the display (the batch goes
+// to the driver back to back), false = our timer. Only a V-Sync / FIFO present can be display paced; MAILBOX /
+// IMMEDIATE batches are always timed. With the latency gate on the gate paces by itself: display, whatever the player
+// set. Without it f5low's FixedPacing setting decides (0 auto = timer, 1 display, 2 timer). The pacer export takes the
+// gate flag and applies the same rule itself (F5LowPacerCreateInfo::gate); this is the host's copy, used by the tests
+// to hold the two together and by the log.
+inline bool DisplaySpaces(bool gateActive, int presentMode, int fixedPacingSetting)
+{
+    if (!VsyncPaces(presentMode))
+        return false;
+
+    return gateActive || fixedPacingSetting == 1;
+}
+
+// The GPU stamps of the frames in flight (one per slot and kind): when the game's frame was finished on the GPU (ready)
+// and when f5low's work was (done), QPC. Two kinds, each its own fence and its own watcher: a stamp of one kind never
+// waits for the other, whichever finishes first. A stamp belongs to the value it was taken for: a slot used again does
+// not hand out the old frame's.
+struct StampBook
+{
+    enum Kind : uint32_t
+    {
+        Ready = 0,
+        Done = 1
+    };
+    struct One
+    {
+        uint64_t value = 0;
+        int64_t ticks = 0;
+    };
+    One slot[kSlots][2];
+
+    void Put(Kind kind, uint32_t index, uint64_t value, int64_t ticks)
+    {
+        slot[index % kSlots][kind] = { value, ticks };
+    }
+
+    // 0: not stamped (yet) for this value
+    int64_t Take(Kind kind, uint32_t index, uint64_t value) const
+    {
+        const auto& one = slot[index % kSlots][kind];
+        return value != 0 && one.value == value ? one.ticks : 0;
+    }
+};
+
+// The pacer's own frame interval, from the batch it planned (step = interval / (generated + 1)); the CPU-only game time
+// is not it
+inline double PacerIntervalMs(int64_t stepTicks, uint32_t generated, int64_t ticksPerSecond)
+{
+    if (stepTicks <= 0 || ticksPerSecond <= 0)
+        return 0.0;
+
+    return static_cast<double>(stepTicks) * static_cast<double>(generated + 1) * 1000.0 /
+           static_cast<double>(ticksPerSecond);
+}
+
 // Hardware flip metering (VK_NV_present_metering) without the pacer export (an older f5low.dll): off unless forced on
 // (FlipMetering=1), and never on a V-Sync swapchain or without the extension on the device. The pacer export decides
 // it itself when there is one.

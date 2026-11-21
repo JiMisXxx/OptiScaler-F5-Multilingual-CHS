@@ -71,6 +71,16 @@ class PresentRateMeter final
         _lastPresentMs = nowMs;
     }
 
+    // The count of output presents seen while enabled (never reset), and whether it is enabled now; does not touch the
+    // menu's window. For logs that compare the overlay's rate with another count of the same presents.
+    std::uint64_t Total(bool* enabled)
+    {
+        std::lock_guard lock(_mutex);
+        if (enabled != nullptr)
+            *enabled = _enabled;
+        return _presents;
+    }
+
     // Called from the menu thread. Zero means there are not enough recent
     // output presents; the ordinary game-present timing remains the fallback.
     double FrameTime(double nowMs)

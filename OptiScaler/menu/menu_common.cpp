@@ -1818,6 +1818,8 @@ void MenuCommon::FGOutputPresent() { fgOutputPresentRate.Present(Util::Milliseco
 
 void MenuCommon::FGOutputPresents(bool presents) { fgOutputPresentRate.SetEnabled(presents); }
 
+uint64_t MenuCommon::FGOutputPresentTotal(bool* enabled) { return fgOutputPresentRate.Total(enabled); }
+
 struct MenuCommon::RenderMenuContext
 {
     State& state;

@@ -342,6 +342,38 @@ int main()
     }
     CHECK(Unthrottled(20.0, 5.0) == 15.0 && Unthrottled(10.0, 30.0) < 0.0);
 
+    // who spaces a batch: only V-Sync / FIFO can be display paced; the gate makes it so, else the player's setting (1 = display)
+    for (int mode = 0; mode <= 3; ++mode)
+        for (int setting = 0; setting <= 2; ++setting)
+        {
+            CHECK(DisplaySpaces(false, mode, setting) == (VsyncPaces(mode) && setting == 1));
+            CHECK(DisplaySpaces(true, mode, setting) == VsyncPaces(mode));
+        }
+    CHECK(!DisplaySpaces(true, 0, 0) && !DisplaySpaces(true, 1, 2)); // IMMEDIATE / MAILBOX are timed with the gate too
+    CHECK(DisplaySpaces(true, 2, 2) && DisplaySpaces(true, 3, 0));   // the gate over a "timer" setting
+
+    // the GPU stamps: a kind never waits for the other, a slot used again hands out nothing of the old frame
+    {
+        StampBook book;
+        CHECK(book.Take(StampBook::Ready, 0, 10) == 0 && book.Take(StampBook::Done, 0, 10) == 0);
+        // frame N = 10 and N+1 = 11: ready 10 and ready 11 are stamped before f5low's done 10 (which finishes after ready 11)
+        book.Put(StampBook::Ready, 0, 10, 1000);
+        book.Put(StampBook::Ready, 1, 11, 2000);
+        CHECK(book.Take(StampBook::Ready, 1, 11) == 2000 && book.Take(StampBook::Done, 0, 10) == 0); // done 10 is not there yet
+        book.Put(StampBook::Done, 1, 11, 2500);
+        CHECK(book.Take(StampBook::Done, 1, 11) == 2500 && book.Take(StampBook::Done, 0, 10) == 0);  // done 11 before done 10
+        book.Put(StampBook::Done, 0, 10, 3000);
+        CHECK(book.Take(StampBook::Done, 0, 10) == 3000 && book.Take(StampBook::Ready, 0, 10) == 1000);
+        // the slot is used again (4 slots) by frame 14: the old values are gone
+        book.Put(StampBook::Ready, 4, 14, 9000);
+        CHECK(book.Take(StampBook::Ready, 0, 10) == 0 && book.Take(StampBook::Ready, 0, 14) == 9000 &&
+              book.Take(StampBook::Done, 0, 14) == 0);
+        CHECK(book.Take(StampBook::Ready, 2, 0) == 0); // no value, no stamp
+    }
+
+    // the pacer's own interval from the batch it planned (step = interval / (generated + 1))
+    CHECK(std::fabs(PacerIntervalMs(55556, 2, 10000000) - 16.6668) < 0.01 && PacerIntervalMs(0, 2, 10000000) == 0.0);
+
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);
     CHECK(RemainingMs(50.0, 20.5) == 29);
