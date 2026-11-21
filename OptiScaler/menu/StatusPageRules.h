@@ -7,6 +7,8 @@
 // 76511542, 2a382e1f, deb645a1, c220ad9e, 76028322, fc44c2be), drawn with this fork's cards, plus a card for this
 // fork's own features.
 
+#include "../dlssnr/DlssNr_VulkanRoute.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -215,6 +217,13 @@ inline std::string NeuralRenderingText(bool enabled, const std::string& failure,
         return "Failed: " + failure;
 
     return backend.empty() ? "On, not started yet" : "On (" + backend + ")";
+}
+
+// The "Vulkan route" row of a Vulkan game (the words are DlssNr_VulkanRoute.h's, as the route card reads them)
+inline std::string VulkanRouteText(bool routeOn, bool f5lowFrameGeneration, bool leftover, bool bridgeUp,
+                                   const std::string& backendCode)
+{
+    return DlssNrVulkanRoute::StatusText(routeOn, f5lowFrameGeneration, leftover, bridgeUp, backendCode);
 }
 
 // Optical F5Low's mode, and whether it stands aside because the game calls an upscaler of its own

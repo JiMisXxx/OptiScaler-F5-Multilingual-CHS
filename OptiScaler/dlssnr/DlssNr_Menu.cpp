@@ -50,6 +50,7 @@
 #include "DlssNr_SteadyValue.h"
 #include "DlssNr_GameDefaults.h"
 #include "DlssNr_NativeMode.h"
+#include "DlssNr_VulkanRoute.h"
 #include "DlssNr_TierPlacement.h"
 #include "DlssNr_LutStatus.h"
 #include "DlssNr_LutChain.h"
@@ -1212,12 +1213,49 @@ static void EnterGameUpscalerRoute(Config* config)
     SwitchVulkanBackend(config, target);
 }
 
+// The code the ini and the log use for the upscalers the route moves between.
+static const char* VulkanBackendCode(Upscaler backend)
+{
+    switch (backend)
+    {
+    case Upscaler::DLSS_on12:
+        return "dlss_12";
+    case Upscaler::FFX_on12:
+        return "ffx_12";
+    case Upscaler::FSR21_on12:
+        return "fsr21_12";
+    case Upscaler::DLSS:
+        return "dlss";
+    case Upscaler::FFX:
+        return "ffx";
+    case Upscaler::FSR21:
+        return "fsr21";
+    default:
+        return "upscaler";
+    }
+}
+
+// Back to the Vulkan upscaler the route replaced: the one remembered this session, else (the route came from the ini,
+// or a restart came between) the one the D3D12 copy stands in for. The ini keeps no key of its own for it.
 static void LeaveGameUpscalerRoute(Config* config)
 {
-    if (!g_backendBeforeRoute.has_value())
-        return;
+    Upscaler back;
 
-    SwitchVulkanBackend(config, g_backendBeforeRoute.value());
+    if (g_backendBeforeRoute.has_value())
+    {
+        back = g_backendBeforeRoute.value();
+    }
+    else
+    {
+        const Upscaler current = config->VulkanUpscaler.value_or_default();
+
+        if (!FeatureProvider_Vk::IsOn12(current))
+            return;
+
+        back = FeatureProvider_Vk::Off12For(current);
+    }
+
+    SwitchVulkanBackend(config, back);
     g_backendBeforeRoute.reset();
 }
 
@@ -5318,6 +5356,85 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     return in;
 }
 
+// The Vulkan route as the menu reads it, for the route card, the output combo, the Neural Rendering pages and the
+// Status page (the words are in DlssNr_VulkanRoute.h).
+struct VulkanRouteState
+{
+    bool offered = false; // a native Vulkan game (not dxvk)
+    bool routeOn = false;
+    bool f5lowFg = false; // Optical F5Low's NR + frame generation
+    bool bridgeUp = false;
+    bool gameCallsUpscaler = false;
+    bool leftover = false; // the route is off but the Vulkan upscaler is still a D3D12 copy
+    Upscaler backend = Upscaler::FSR22;
+};
+
+static VulkanRouteState ReadVulkanRoute(Config* config)
+{
+    using namespace DlssNrNativeMode;
+
+    const NativeApi api = CurrentNativeApi();
+    VulkanRouteState state;
+    state.offered = RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame());
+
+    if (!state.offered)
+        return state;
+
+    const Shown shown =
+        FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+    state.routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
+    state.f5lowFg = !state.routeOn && shown == Shown::NrAndFrameGeneration;
+    state.bridgeUp = VkPresentBridge::IsUp();
+    state.gameCallsUpscaler = NativeGameCallsUpscaler(api);
+    state.backend = config->VulkanUpscaler.value_or_default();
+    state.leftover = DlssNrVulkanRoute::LeftoverD3D12Upscaler(true, state.routeOn, shown != Shown::Off,
+                                                              FeatureProvider_Vk::IsOn12(state.backend));
+    return state;
+}
+
+// The route card's second choice, also the "Use the bridge" button of the output combo.
+static void UseBridgeRoute(Config* config)
+{
+    // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that call's
+    // output (after SR), not on the finished picture.
+    const DlssNrNativeMode::Keys keys = DlssNrNativeMode::KeysForRouteOn();
+    config->DlssNrNativeDepthFinder = keys.depthFinder;
+    config->DlssNrNativeMotion = keys.motion;
+    config->DlssNrNativeInput = keys.input;
+    config->DlssNrNativeUpscaler = keys.upscaler;
+    config->DlssNrNativeFrameGenerationOnly = true;
+
+    if (config->DlssNrFinishedPicture.value_or_default())
+    {
+        config->DlssNrFinishedPicture = false;
+        RetryNr();
+    }
+
+    EnterGameUpscalerRoute(config);
+}
+
+// A D3D12 upscaler left behind with the route off: said where it is seen, with the one click back.
+static void DrawLeftoverFix(Config* config, const VulkanRouteState& route, const char* id)
+{
+    if (!route.leftover)
+        return;
+
+    const Upscaler back = FeatureProvider_Vk::Off12For(route.backend);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
+    ImGui::TextWrapped("%s Use the Vulkan one.",
+                       DlssNrVulkanRoute::LeftoverLine(VulkanBackendCode(route.backend)).c_str());
+    ImGui::PopStyleColor();
+
+    const std::string label = std::string("Use the Vulkan upscaler (") + VulkanBackendCode(back) + ")##leftover" + id;
+
+    if (ImGui::SmallButton(label.c_str()))
+        SwitchVulkanBackend(config, back);
+
+    ImGui::Spacing();
+}
+
 StatusSummary CurrentStatusSummary(Config* config)
 {
     const auto in = HeaderInputs(config, HeaderBanner::Feature::None, false);
@@ -5328,6 +5445,11 @@ StatusSummary CurrentStatusSummary(Config* config)
     summary.mode = in.mode;
     summary.gameCallsUpscaler = in.gameCallsUpscaler;
     summary.backend = BackendName();
+
+    if (const auto route = ReadVulkanRoute(config); route.offered)
+        summary.vulkanRoute = DlssNrVulkanRoute::StatusText(route.routeOn, route.f5lowFg, route.leftover,
+                                                            route.bridgeUp, VulkanBackendCode(route.backend));
+
     return summary;
 }
 
@@ -5460,12 +5582,10 @@ void RenderVulkanRoute(Config* config)
     if (!RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame()))
         return;
 
-    const bool routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
-    const Shown shown =
-        FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
-    const bool f5lowFg = !routeOn && shown == Shown::NrAndFrameGeneration;
-    const bool bridgeUp = VkPresentBridge::IsUp();
+    const VulkanRouteState route = ReadVulkanRoute(config);
+    const bool routeOn = route.routeOn;
+    const bool f5lowFg = route.f5lowFg;
+    const bool bridgeUp = route.bridgeUp;
 
     // A profile (or Revert) can set or clear the key without a click here: bring the backend along, once per switch.
     static bool backendFollowedRoute = false;
@@ -5495,28 +5615,21 @@ void RenderVulkanRoute(Config* config)
     ImGui::SameLine();
 
     if (ImGui::RadioButton("Bridge, game's upscaler##vkroute", routeOn) && !routeOn)
-    {
-        // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that
-        // call's output (after SR), not on the finished picture.
-        const Keys keys = KeysForRouteOn();
-        config->DlssNrNativeDepthFinder = keys.depthFinder;
-        config->DlssNrNativeMotion = keys.motion;
-        config->DlssNrNativeInput = keys.input;
-        config->DlssNrNativeUpscaler = keys.upscaler;
-        config->DlssNrNativeFrameGenerationOnly = true;
+        UseBridgeRoute(config);
 
-        if (config->DlssNrFinishedPicture.value_or_default())
-        {
-            config->DlssNrFinishedPicture = false;
-            RetryNr();
-        }
+    HelpMarker(
+        "Native swapchain: the game's own device and swapchain. FSR FG and DLSS-G run there; Neural Rendering "
+        "runs on Vulkan.\n"
+        "Bridge: the game's swapchain moves to a hidden window and a D3D12 swapchain is shown. XeFG and F5Low are "
+        "D3D12 libraries and need it. The game's upscaler runs on a D3D12 copy, so Neural Rendering runs on "
+        "D3D12.\n"
+        "Choose before the game starts; leaving the bridge needs a restart.");
 
-        EnterGameUpscalerRoute(config);
-    }
-
-    HelpMarker("Native swapchain: FSR FG or DLSS-G on the game's own swapchain. No XeFG.\n"
-               "Bridge: reads the game's upscaler call. XeFG, FSR FG and DLSS-G.\n"
-               "Choose before the game starts; leaving the bridge needs a restart.");
+    ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
+    ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
+    ImGui::TextDisabled("Neural Rendering runs on: %s",
+                        DlssNrVulkanRoute::RunsOnText(DlssNrVulkanRoute::NrRunsOn(routeOn, route.leftover)));
+    DrawLeftoverFix(config, route, "route");
 
     if (f5lowFg)
     {
@@ -5567,6 +5680,72 @@ void RenderVulkanRoute(Config* config)
         ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
                             feature != nullptr ? feature->Name().c_str() : "upscaler");
     }
+}
+
+void RenderVulkanRunsOn(Config* config)
+{
+    const VulkanRouteState route = ReadVulkanRoute(config);
+
+    if (!route.offered)
+        return;
+
+    ImGui::TextDisabled("Runs on: %s",
+                        DlssNrVulkanRoute::RunsOnText(DlssNrVulkanRoute::NrRunsOn(route.routeOn, route.leftover)));
+    ImGui::SameLine();
+    HelpMarker("Native swapchain: Neural Rendering runs on Vulkan, in the game's own device.\n"
+               "Bridge (Frame Generation page, Vulkan route): the game's upscaler runs on its D3D12 copy and Neural "
+               "Rendering runs on D3D12.");
+    DrawLeftoverFix(config, route, "nrpage");
+}
+
+bool VulkanNativeRoute(Config* config)
+{
+    const VulkanRouteState route = ReadVulkanRoute(config);
+    return DlssNrVulkanRoute::NativeRoute(route.offered, route.routeOn, route.f5lowFg);
+}
+
+void RenderBridgeNeeded(Config* config, uint32_t fgOutput)
+{
+    using namespace DlssNrVulkanRoute;
+
+    const VulkanRouteState route = ReadVulkanRoute(config);
+    const auto output = (Output) fgOutput;
+    const Offer offer =
+        BridgeOffer(output, NativeRoute(route.offered, route.routeOn, route.f5lowFg), route.gameCallsUpscaler);
+
+    if (offer == Offer::None)
+        return;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
+
+    if (offer == Offer::UseBridge)
+        ImGui::TextWrapped("%s", BridgeNeededLine(output).c_str());
+    else
+        ImGui::TextWrapped(
+            "%s The game makes no upscaler call now, which the bridge's route needs; Optical F5Low's NR + "
+            "frame generation does not.",
+            BridgeNeededLine(output).c_str());
+
+    ImGui::PopStyleColor();
+
+    if (offer == Offer::UseBridge)
+    {
+        if (ImGui::SmallButton("Use the bridge##fgbridge"))
+            UseBridgeRoute(config);
+    }
+    else
+    {
+        if (ImGui::SmallButton("Use Optical F5Low NR + frame generation##fgbridge"))
+            MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+
+        // A game often makes no upscaler call only for a while (its menus): the route stays one click away
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton("Use the bridge##fgbridge"))
+            UseBridgeRoute(config);
+    }
+
+    ImGui::Spacing();
 }
 
 void UpdateF5LowHint(Config* config)
@@ -5647,7 +5826,10 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
     const NrCommon nr = ReadNrCommon(config);
 
     if (page != Page::NrStatus)
+    {
         RenderStatusLine(nr);
+        RenderVulkanRunsOn(config);
+    }
 
     switch (page)
     {
