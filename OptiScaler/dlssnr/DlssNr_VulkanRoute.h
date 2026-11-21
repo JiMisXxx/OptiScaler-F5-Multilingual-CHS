@@ -215,7 +215,7 @@ inline std::string LeftoverLine(const std::string& backendCode)
 // The route card's two rows, always shown.
 inline const char* NativeSummary()
 {
-    return "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. No extra cost.";
+    return "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. Lighter than the bridge.";
 }
 inline const char* BridgeSummary() { return "Bridge: adds XeFG. Costs a second (D3D12) device and picture copies."; }
 

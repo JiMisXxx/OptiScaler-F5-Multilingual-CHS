@@ -142,7 +142,7 @@ int main()
     CHECK(LeftoverLine("dlss_12") ==
           "The game's upscaler runs on its D3D12 copy (dlss_12), so Neural Rendering runs on D3D12.");
 
-    CHECK(std::string(NativeSummary()) == "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. No extra cost.");
+    CHECK(std::string(NativeSummary()) == "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. Lighter than the bridge.");
     CHECK(std::string(NativeSummary()).find("FSR FG, DLSS-G or F5Low") != std::string::npos);
     CHECK(std::string(BridgeSummary()) == "Bridge: adds XeFG. Costs a second (D3D12) device and picture copies.");
     CHECK(std::string(BridgeSummary()).find("adds XeFG") != std::string::npos);
