@@ -50,6 +50,7 @@
 #include "DlssNr_SteadyValue.h"
 #include "DlssNr_GameDefaults.h"
 #include "DlssNr_NativeMode.h"
+#include "DlssNr_VulkanRoute.h"
 #include "DlssNr_TierPlacement.h"
 #include "DlssNr_LutStatus.h"
 #include "DlssNr_LutChain.h"
@@ -89,9 +90,19 @@ static const ImVec4 kWarnAmber(0.9f, 0.6f, 0.25f, 1.0f);
 
 // The status lines' elapsed time, steadied (DlssNr_SteadyValue.h): redrawn every frame it changed its digits every
 // frame, which frame generation blends into an overlapping, unreadable number. One for both status lines (one is up).
-static std::optional<double> SteadyGpuMs(std::optional<double> ms)
+// `vulkan`: which engine the number is from; the average starts over when it changes (it would blend two engines'
+// times).
+static std::optional<double> SteadyGpuMs(std::optional<double> ms, bool vulkan)
 {
     static DlssNr::SteadyValue steady;
+    static bool lastVulkan = false;
+
+    if (vulkan != lastVulkan)
+    {
+        lastVulkan = vulkan;
+        steady = DlssNr::SteadyValue {};
+    }
+
     return steady.Update(ms, Util::MillisecondsNow());
 }
 
@@ -728,20 +739,21 @@ static void ModelWeightsCombo(Config* config)
                "entries: folders in OptiScaler\\nr_weights, each holding weight files exported for this DLL; the "
                "brackets say which model the set has weights for. A pass on the other model keeps its stock "
                "weights. A file is used only by the DLL it was made for; otherwise the stock weights run and "
-               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 (and "
-               "games bridged to it) only for now.");
+               "OptiScaler.log says why. Changing it rebuilds Neural Rendering (a short hitch). DirectX 12 and "
+               "Vulkan (native or bridged); DirectX 11 only when bridged to DirectX 12.");
 
     if (current.empty())
         return;
 
-    // Selection reaches the model only on the D3D12 path (native D3D12 or a bridge to it) for now
+    // Selection reaches the model on the D3D12 path (native D3D12, or a D3D11/Vulkan bridge to it) and on native
+    // Vulkan; a D3D11 game not bridged to D3D12 does not reach it.
     const auto& state = State::Instance();
-    const bool d3d12Path =
-        !DlssNr::IsRunningVk() && state.swapchainApi != API::Vulkan &&
-        (state.swapchainApi != API::DX11 || state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12);
-    if (!d3d12Path)
+    const bool reachesModel = DlssNr::IsRunningVk() || state.swapchainApi != API::DX11 ||
+                              state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+    if (!reachesModel)
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "No effect here yet: DirectX 12 only for now.");
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                           "No effect here yet: DirectX 11 only when bridged to DirectX 12.");
         return;
     }
 
@@ -1205,18 +1217,56 @@ static void EnterGameUpscalerRoute(Config* config)
     // D3D12 one: rebuilt all the same, so it is made on the bridge's device (IFeature_VkwDx12::CreateDx12Device).
     const Upscaler target = FeatureProvider_Vk::On12For(current);
 
-    if (target != current)
-        g_backendBeforeRoute = current;
+    // Recorded even when it is already a D3D12 copy (an ffx_12 the player chose): leaving the route goes back to it
+    g_backendBeforeRoute = current;
 
     SwitchVulkanBackend(config, target);
 }
 
+// The code the ini and the log use for the upscalers the route moves between.
+static const char* VulkanBackendCode(Upscaler backend)
+{
+    switch (backend)
+    {
+    case Upscaler::DLSS_on12:
+        return "dlss_12";
+    case Upscaler::FFX_on12:
+        return "ffx_12";
+    case Upscaler::FSR21_on12:
+        return "fsr21_12";
+    case Upscaler::DLSS:
+        return "dlss";
+    case Upscaler::FFX:
+        return "ffx";
+    case Upscaler::FSR21:
+        return "fsr21";
+    default:
+        return "upscaler";
+    }
+}
+
+// Back to the Vulkan upscaler the route replaced: the one remembered this session, else (the route came from the ini,
+// or a restart came between) DLSS for dlss_12, the only D3D12 copy the route alone sets. The ini keeps no key of its
+// own for it; an ffx_12 or fsr21_12 is a choice of the Upscaler page and stays.
 static void LeaveGameUpscalerRoute(Config* config)
 {
-    if (!g_backendBeforeRoute.has_value())
-        return;
+    Upscaler back;
 
-    SwitchVulkanBackend(config, g_backendBeforeRoute.value());
+    if (g_backendBeforeRoute.has_value())
+    {
+        back = g_backendBeforeRoute.value();
+    }
+    else
+    {
+        const Upscaler current = config->VulkanUpscaler.value_or_default();
+
+        if (current != Upscaler::DLSS_on12)
+            return;
+
+        back = FeatureProvider_Vk::Off12For(current);
+    }
+
+    SwitchVulkanBackend(config, back);
     g_backendBeforeRoute.reset();
 }
 
@@ -1438,11 +1488,21 @@ static void RenderEnableToggle(Config* config)
         MenuPages::RequestPage(MenuPages::Page::Input);
 }
 
-// Finished Picture runs on a native DirectX 12 game only.
+// The game's own frame generation (Streamline 2 on DirectX 12) pauses Finished Picture: a native DirectX 12 game. Not
+// the Vulkan model (IsRunningVk) and not a Vulkan swapchain, whose frame generation Finished Picture on Vulkan refuses
+// itself.
 static bool IsNativeDx12Game()
 {
     const auto feature = State::Instance().currentFeature;
-    return !DlssNr::IsRunningVk() && (!feature || (feature->Api() == API::DX12 && !feature->IsWithDx12()));
+    return !DlssNr::IsRunningVk() && State::Instance().swapchainApi != API::Vulkan &&
+           (!feature || (feature->Api() == API::DX12 && !feature->IsWithDx12()));
+}
+
+// Finished Picture runs on a native DirectX 12 game and on a native Vulkan one; not through dxvk (Direct3D 11 calls) or
+// a bridge (the Vulkan frame generation bridge, a Direct3D 11 or Vulkan game on a Direct3D 12 backend).
+static bool FinishedPictureGame(IFeature* feature)
+{
+    return !feature || (!feature->IsWithDx12() && (feature->Api() == API::DX12 || feature->Api() == API::Vulkan));
 }
 
 // The game's own frame generation runs with no picture handoff, so NR on the finished picture pauses every frame.
@@ -1514,7 +1574,7 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         // nothing in it to hang this off.
         // Either backend's timer. They measure the same thing by different means, and only one
         // of them is running.
-        const auto ms = SteadyGpuMs(vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime());
+        const auto ms = SteadyGpuMs(vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime(), vulkan);
 
         // With "Apply the model" off the pass STILL RUNS (so Hold-frame A/B can toggle its edit on
         // a frozen frame) -- it only outputs the clean frame.
@@ -1569,7 +1629,7 @@ static std::string ViewText(const DlssNr::Views::Rect& r)
 
 static void RenderStatusLine(const NrCommon& nr)
 {
-    const auto ms = SteadyGpuMs(nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime());
+    const auto ms = SteadyGpuMs(nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime(), nr.vulkan);
     ScopedMonoFont monoFont {};
     const auto views = nr.vulkan ? DlssNr::Views::Snapshot {} : DlssNr::MultiViewStatus();
 
@@ -1594,6 +1654,13 @@ static void RenderStatusLine(const NrCommon& nr)
     else if (!nr.vulkan && DlssNr::StoodDownForRebuilds())
         ImGui::TextColored(kWarnAmber,
                            "Stood down: the game keeps switching formats or sizes. Runs again once it settles.");
+    else if (nr.finishedPicture && !nr.vulkan && State::Instance().swapchainApi == API::Vulkan && !ms.has_value())
+    {
+        // Finished Picture on a Vulkan game (the D3D12 engine on the private device): what it says about the picture is
+        // the reason it is not running (frame generation on, a screen format it cannot take, ...)
+        const std::string status = DlssNr::FinishedPictureStatus();
+        ImGui::TextDisabled("%s", status.empty() ? "Waiting for a finished picture." : status.c_str());
+    }
     else if (!DlssNr::IsRunning() && !nr.vulkan)
         ImGui::TextDisabled("NR is not running. See Status & Presets.");
     else if (ms.has_value())
@@ -2535,11 +2602,8 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
         if (DlssNrNativeBlend::Reconcile(blend, BlendResolvedNow(config)))
             WriteBlendState(config, blend);
 
-        // Finished Picture runs on a native DirectX 12 game only (the same test as the NR Options line); Vulkan has
-        // none.
-        const auto blendFeature = State::Instance().currentFeature;
-        const bool blendUnsupported =
-            DlssNr::IsRunningVk() || (blendFeature && (blendFeature->Api() != API::DX12 || blendFeature->IsWithDx12()));
+        // Finished Picture runs on a native DirectX 12 or Vulkan game (the same test as the NR Options line)
+        const bool blendUnsupported = !FinishedPictureGame(State::Instance().currentFeature);
         const bool nativeBlend = DlssNrNativeBlend::Active(blend, BlendResolvedNow(config));
 
         // Greyed only while off: a game that cannot run it can still switch a saved "on" off.
@@ -2570,7 +2634,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                    "instead.");
 
         if (blendUnsupported && !nativeBlend)
-            ImGui::TextWrapped("Needs a native DirectX 12 game (Finished Picture does not run on Vulkan).");
+            ImGui::TextWrapped("Finished Picture needs a native DirectX 12 or Vulkan game.");
 
         // Not greyed: the player may turn the game's frame generation off afterwards.
         if (GameFgPausesFinishedPicture())
@@ -3505,17 +3569,19 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                    "After Super Resolution (default): on the upscaled picture.\n"
                    "Before Super Resolution: on the smaller picture; cheaper.\n"
                    "Finished Picture: after the game's effects; may help green noise, but also changes HUD and menus "
-                   "(DirectX 12). With native Streamline 2 frame generation and a registered application-picture "
-                   "handoff, NR runs before interpolation; otherwise it pauses. With Optical F5Low's upscaler pass "
-                   "and XeFG or F5Low frame generation, NR runs on the pass's output instead, before frame "
-                   "generation.\n"
+                   "(DirectX 12 and native Vulkan). On DirectX 12, with native Streamline 2 frame generation and a "
+                   "registered application-picture handoff, NR runs before interpolation; otherwise it pauses. With "
+                   "Optical F5Low's upscaler pass and XeFG or F5Low frame generation, NR runs on the pass's output "
+                   "instead, before frame generation. On Vulkan it needs frame generation off, and does not run "
+                   "through dxvk, the Vulkan frame generation bridge, or a screen in HLG, Display P3 or "
+                   "A2R10G10B10.\n"
                    "With Ray Reconstruction, NR always runs after.");
 
         if (finishedPicture && enabled)
         {
-            const auto feature = State::Instance().currentFeature;
-            if (feature && (feature->Api() != API::DX12 || feature->IsWithDx12()))
-                ImGui::TextWrapped("This option needs a native DirectX 12 game.");
+            // A native Vulkan game runs it too (dlssnr/DlssNr_FinishedVk.h): its status line is NR's own, below
+            if (!FinishedPictureGame(State::Instance().currentFeature))
+                ImGui::TextWrapped("Finished Picture needs a native DirectX 12 or Vulkan game.");
             else if (GameFgPausesFinishedPicture())
             {
                 ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
@@ -4093,21 +4159,22 @@ static void RenderPostLutSection(Config* config)
         lutFiles = ScanLutFolder();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    HelpMarker("Applies a colour grade (.cube LUT) to the game's picture. Put files in OptiScaler\\LUTs and press "
-               "Rescan. Enable LUTs switches the whole stack off and on and keeps its settings.\n"
-               "With Neural Rendering on, it grades the picture NR returns, so the model never sees it and exposure, "
-               "skin detection and reuse are not affected. With NR before Super Resolution the grade is applied before "
-               "the upscaler; in Finished Picture mode it grades the finished picture, UI included (D3D12; Vulkan does "
-               "not run that mode). With NR off, it grades the OptiScaler upscaler's output, before the game draws its "
-               "HUD (needs an OptiScaler upscaler).\n"
-               "Add LUT adds another after the last one, up to four. They are applied top to bottom (the tick box "
-               "switches a layer off and on and keeps its settings, the arrows move it, x removes it); each strength "
-               "blends that layer only. Strong grades stack up.\n"
-               "Look input: a LUT made for a camera log space (ARRILogC4AWG4-to-..., S-Log3, ...) needs the picture in "
-               "that space. Auto reads it from the file's header or name and converts the game's picture for it, so no "
-               "conversion LUT is needed in front; an ordinary LUT gets the picture as it is. Exact on Linear HDR "
-               "games, up to paper white on PQ, highlights estimated on SDR. Pick one by hand if Auto guesses wrong; "
-               "None always uses the picture.");
+    HelpMarker(
+        "Applies a colour grade (.cube LUT) to the game's picture. Put files in OptiScaler\\LUTs and press "
+        "Rescan. Enable LUTs switches the whole stack off and on and keeps its settings.\n"
+        "With Neural Rendering on, it grades the picture NR returns, so the model never sees it and exposure, "
+        "skin detection and reuse are not affected. With NR before Super Resolution the grade is applied before "
+        "the upscaler; in Finished Picture mode it grades the finished picture, UI included (DirectX 12 and native "
+        "Vulkan). With NR off, it grades the OptiScaler upscaler's output, before the game draws its "
+        "HUD (needs an OptiScaler upscaler).\n"
+        "Add LUT adds another after the last one, up to four. They are applied top to bottom (the tick box "
+        "switches a layer off and on and keeps its settings, the arrows move it, x removes it); each strength "
+        "blends that layer only. Strong grades stack up.\n"
+        "Look input: a LUT made for a camera log space (ARRILogC4AWG4-to-..., S-Log3, ...) needs the picture in "
+        "that space. Auto reads it from the file's header or name and converts the game's picture for it, so no "
+        "conversion LUT is needed in front; an ordinary LUT gets the picture as it is. Exact on Linear HDR "
+        "games, up to paper white on PQ, highlights estimated on SDR. Pick one by hand if Auto guesses wrong; "
+        "None always uses the picture.");
 
     if (ImGui::TreeNode("Status##postlut"))
     {
@@ -4729,7 +4796,8 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
         const bool reduced = modelScale < 0.999f;
         const bool superior = DlssNr::SuperiorScaling::Enabled(*config);
 
-        // Superior needs D3D12 (or a D3D12 bridge) and NVIDIA's DLSS SR through NGX for its temporal part.
+        // Superior's private DLSS needs NVIDIA's DLSS SR through NGX (D3D12, a D3D12 bridge or native Vulkan); it runs
+        // below 100% Model resolution, and at 100% and above under Also at 100% and above.
         static const char* enlargeNames[] = { "Classic", "Matched residual", "NVIDIA residual", "Superior Scaling" };
         const int enlarge = superior ? 3 : (int) std::min(config->DlssNrTransfer.value_or_default(), 2u);
 
@@ -4741,7 +4809,7 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             for (int i = 0; i < IM_ARRAYSIZE(enlargeNames); ++i)
             {
                 const unsigned mode = i == 3 ? DlssNr::SuperiorScaling::Transfer : unsigned(i);
-                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale, nr.vulkan);
+                const bool blocked = !DlssNr::SuperiorScaling::CanSelectUpscaleMode(mode, modelScale);
 
                 if (ImGui::Selectable(enlargeNames[i], i == enlarge,
                                       blocked ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
@@ -4761,8 +4829,10 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             "NVIDIA residual: only the changes, NVIDIA's way; with Upscale Method Bilinear, also kept on "
             "their side of edges.\n"
             "Superior Scaling: its own Area downsample, frequency shaping and optional private DLSS to steady NR "
-            "over time, including at 100% with Compress screen edges. Needs DirectX 12 or a DirectX 12 bridge; "
-            "where it cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
+            "over time, including at 100% with Compress screen edges. On native Vulkan it runs with No DLSS, CNN or "
+            "Transformer below 100% and with CNN or Transformer at 100% and above (Also at 100% and above), one model "
+            "pass, without Compress screen edges or Reuse detail; where it "
+            "cannot run, Matched residual is used. At 100% and above, the ordinary modes use the "
             "original Classic composition; a saved residual choice returns when Model resolution is reduced.");
 
         if (superior)
@@ -4774,7 +4844,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
             const auto selected =
                 DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default());
             int preset = selected == choices[0] ? 0 : selected == choices[2] ? 2 : 1;
-            ImGui::BeginDisabled(nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable());
+            const bool srUnavailable =
+                nr.vulkan ? DlssNr::SuperiorSrUnavailableVk() : DlssNr::SuperiorScaling::SrUnavailable();
+            ImGui::BeginDisabled(srUnavailable);
             if (ImGui::Combo("DLSS to temporally stabilize NR", &preset, presets, IM_ARRAYSIZE(presets)))
                 config->DlssNrSuperiorScalingPreset = choices[preset];
             ImGui::EndDisabled();
@@ -4786,10 +4858,9 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                        "is not stable enough or shows artifacts that Transformer avoids. Transformer can introduce "
                        "different artifacts of its own.");
 
-            ImGui::BeginDisabled(
-                nr.vulkan || DlssNr::SuperiorScaling::SrUnavailable() ||
-                DlssNr::SuperiorScaling::Preset(config->DlssNrSuperiorScalingPreset.value_or_default()) ==
-                    DlssNr::SuperiorScaling::NoPrivateDlss);
+            ImGui::BeginDisabled(srUnavailable || DlssNr::SuperiorScaling::Preset(
+                                                      config->DlssNrSuperiorScalingPreset.value_or_default()) ==
+                                                      DlssNr::SuperiorScaling::NoPrivateDlss);
             bool atNative = config->DlssNrSuperiorAtNative.value_or_default();
             if (ImGui::Checkbox("Also at 100% and above", &atNative))
                 config->DlssNrSuperiorAtNative = atNative;
@@ -4799,12 +4870,15 @@ static void RenderOutputPage(Config* config, float menuResScale, const NrCommon&
                 "On: it also runs at 100% and above. Above 100% NR still works at the larger size; its result "
                 "is brought back to the screen's size first and the DLSS steadies that. Costs the DLSS's time at "
                 "full screen size. Not with Compress screen edges, which has its own rule. Like below 100%, "
-                "Superior's own composition then leaves out Depth fade.");
+                "Superior's own composition then leaves out Depth fade. On native Vulkan too, in one NR pass.");
 
             const auto unavailable = DlssNr::SuperiorScaling::Unavailable();
             if (nr.vulkan)
-                ImGui::TextWrapped("Superior Scaling needs DirectX 12 or a DirectX 12 bridge; Matched residual is "
-                                   "used here.");
+            {
+                const auto vulkanStatus = DlssNr::SuperiorStatusVk();
+                if (!vulkanStatus.empty())
+                    ImGui::TextWrapped("%s", vulkanStatus.c_str());
+            }
             else if (!unavailable.empty())
                 ImGui::TextWrapped("Superior Scaling is not running (%s); Matched residual is used. Select it again "
                                    "to retry.",
@@ -5310,6 +5384,123 @@ static HeaderBanner::Inputs HeaderInputs(Config* config, HeaderBanner::Feature f
     return in;
 }
 
+// The Vulkan route as the menu reads it, for the route card, the output combo, the Neural Rendering pages and the
+// Status page (the words are in DlssNr_VulkanRoute.h).
+struct VulkanRouteState
+{
+    bool offered = false; // a native Vulkan game (not dxvk)
+    bool routeOn = false;
+    bool f5lowFg = false; // Optical F5Low's NR + frame generation
+    bool bridgeUp = false;
+    bool gameCallsUpscaler = false;
+    bool leftover = false; // the route is off but the Vulkan upscaler is still dlss_12, which only the route sets
+    Upscaler backend = Upscaler::FSR22;
+    DlssNrVulkanRoute::RunsOn runsOn = DlssNrVulkanRoute::RunsOn::Vulkan;
+};
+
+static VulkanRouteState g_routeCache;
+static int g_routeCacheFrame = -1;
+
+// Read once per drawn frame (the card, the combo, the pages and the Status page all ask); a click that changes the
+// route drops it, so the rest of that frame reads the new state.
+static void DropVulkanRouteCache() { g_routeCacheFrame = -1; }
+
+static VulkanRouteState ReadVulkanRouteNow(Config* config);
+
+static const VulkanRouteState& ReadVulkanRoute(Config* config)
+{
+    const int frame = ImGui::GetFrameCount();
+
+    if (frame != g_routeCacheFrame)
+    {
+        g_routeCache = ReadVulkanRouteNow(config);
+        g_routeCacheFrame = frame;
+    }
+
+    return g_routeCache;
+}
+
+static VulkanRouteState ReadVulkanRouteNow(Config* config)
+{
+    using namespace DlssNrNativeMode;
+
+    const NativeApi api = CurrentNativeApi();
+    VulkanRouteState state;
+    state.offered = RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame());
+
+    if (!state.offered)
+        return state;
+
+    const Shown shown =
+        FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
+                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
+    state.routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
+    state.f5lowFg = !state.routeOn && shown == Shown::NrAndFrameGeneration;
+    state.bridgeUp = VkPresentBridge::IsUp();
+    state.gameCallsUpscaler = NativeGameCallsUpscaler(api);
+    state.backend = config->VulkanUpscaler.value_or_default();
+    state.leftover = DlssNrVulkanRoute::LeftoverD3D12Upscaler(true, state.routeOn, shown != Shown::Off,
+                                                              state.backend == Upscaler::DLSS_on12);
+
+    DlssNrVulkanRoute::NrInputs in;
+    in.nrEnabled = config->DlssNrEnabled.value_or_default();
+    in.routeOn = state.routeOn;
+    in.bridgeUp = state.bridgeUp;
+    in.upscalerOnD3D12 = FeatureProvider_Vk::IsOn12(state.backend);
+    in.motionModeOn = shown == Shown::NrOnly || shown == Shown::NrAndFrameGeneration;
+    in.finishedPicture = config->DlssNrFinishedPicture.value_or_default();
+    in.runningVk = DlssNr::IsRunningVk();
+    in.runningD3D12 = DlssNr::IsRunning();
+    state.runsOn = DlssNrVulkanRoute::NrRunsOn(in);
+    return state;
+}
+
+// The route card's second choice, also the "Use the bridge" button of the output combo.
+static void UseBridgeRoute(Config* config)
+{
+    DropVulkanRouteCache();
+
+    // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that call's
+    // output (after SR), not on the finished picture.
+    const DlssNrNativeMode::Keys keys = DlssNrNativeMode::KeysForRouteOn();
+    config->DlssNrNativeDepthFinder = keys.depthFinder;
+    config->DlssNrNativeMotion = keys.motion;
+    config->DlssNrNativeInput = keys.input;
+    config->DlssNrNativeUpscaler = keys.upscaler;
+    config->DlssNrNativeFrameGenerationOnly = true;
+
+    if (config->DlssNrFinishedPicture.value_or_default())
+    {
+        config->DlssNrFinishedPicture = false;
+        RetryNr();
+    }
+
+    EnterGameUpscalerRoute(config);
+}
+
+// A D3D12 upscaler left behind with the route off: said where it is seen, with the one click back.
+static void DrawLeftoverFix(Config* config, const VulkanRouteState& route, const char* id)
+{
+    if (!route.leftover)
+        return;
+
+    const Upscaler back = FeatureProvider_Vk::Off12For(route.backend);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
+    ImGui::TextWrapped("%s", DlssNrVulkanRoute::LeftoverLine(VulkanBackendCode(route.backend)).c_str());
+    ImGui::PopStyleColor();
+
+    const std::string label = std::string("Use the Vulkan upscaler (") + VulkanBackendCode(back) + ")##leftover" + id;
+
+    if (ImGui::SmallButton(label.c_str()))
+    {
+        DropVulkanRouteCache();
+        SwitchVulkanBackend(config, back);
+    }
+
+    ImGui::Spacing();
+}
+
 StatusSummary CurrentStatusSummary(Config* config)
 {
     const auto in = HeaderInputs(config, HeaderBanner::Feature::None, false);
@@ -5320,6 +5511,12 @@ StatusSummary CurrentStatusSummary(Config* config)
     summary.mode = in.mode;
     summary.gameCallsUpscaler = in.gameCallsUpscaler;
     summary.backend = BackendName();
+
+    if (const auto route = ReadVulkanRoute(config); route.offered)
+        summary.vulkanRoute =
+            DlssNrVulkanRoute::StatusText(route.routeOn, route.f5lowFg, route.leftover, route.bridgeUp,
+                                          VulkanBackendCode(route.backend), route.runsOn);
+
     return summary;
 }
 
@@ -5452,12 +5649,10 @@ void RenderVulkanRoute(Config* config)
     if (!RouteOffered(api == NativeApi::Vulkan, VkPresentBridge::DxvkGame()))
         return;
 
-    const bool routeOn = config->DlssNrNativeFrameGenerationOnly.value_or_default();
-    const Shown shown =
-        FromKeys({ config->DlssNrNativeDepthFinder.value_or_default(), config->DlssNrNativeMotion.value_or_default(),
-                   config->DlssNrNativeInput.value_or_default(), config->DlssNrNativeUpscaler.value_or_default() });
-    const bool f5lowFg = !routeOn && shown == Shown::NrAndFrameGeneration;
-    const bool bridgeUp = VkPresentBridge::IsUp();
+    const VulkanRouteState route = ReadVulkanRoute(config);
+    const bool routeOn = route.routeOn;
+    const bool f5lowFg = route.f5lowFg;
+    const bool bridgeUp = route.bridgeUp;
 
     // A profile (or Revert) can set or clear the key without a click here: bring the backend along, once per switch.
     static bool backendFollowedRoute = false;
@@ -5487,28 +5682,20 @@ void RenderVulkanRoute(Config* config)
     ImGui::SameLine();
 
     if (ImGui::RadioButton("Bridge, game's upscaler##vkroute", routeOn) && !routeOn)
-    {
-        // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that
-        // call's output (after SR), not on the finished picture.
-        const Keys keys = KeysForRouteOn();
-        config->DlssNrNativeDepthFinder = keys.depthFinder;
-        config->DlssNrNativeMotion = keys.motion;
-        config->DlssNrNativeInput = keys.input;
-        config->DlssNrNativeUpscaler = keys.upscaler;
-        config->DlssNrNativeFrameGenerationOnly = true;
+        UseBridgeRoute(config);
 
-        if (config->DlssNrFinishedPicture.value_or_default())
-        {
-            config->DlssNrFinishedPicture = false;
-            RetryNr();
-        }
+    HelpMarker(
+        "Native swapchain: the game's own device and swapchain. FSR FG and DLSS-G run there; Neural Rendering "
+        "runs on Vulkan.\n"
+        "Bridge: the game's swapchain moves to a hidden window and a D3D12 swapchain is shown. XeFG and F5Low are "
+        "D3D12 libraries and need it. The game's upscaler runs on a D3D12 copy, so Neural Rendering runs on "
+        "D3D12.\n"
+        "Choose before the game starts; leaving the bridge needs a restart.");
 
-        EnterGameUpscalerRoute(config);
-    }
-
-    HelpMarker("Native swapchain: FSR FG, DLSS-G or F5Low (XeFG Tensor) on the game's own swapchain. No XeFG.\n"
-               "Bridge: reads the game's upscaler call. XeFG, FSR FG and DLSS-G.\n"
-               "Choose before the game starts; leaving the bridge needs a restart.");
+    ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
+    ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
+    ImGui::TextDisabled("%s", DlssNrVulkanRoute::CardRunsOnLine(route.runsOn).c_str());
+    DrawLeftoverFix(config, route, "route");
 
     if (f5lowFg)
     {
@@ -5559,6 +5746,75 @@ void RenderVulkanRoute(Config* config)
         ImGui::TextDisabled("Frame generation from the game's upscaler (%s on D3D12).",
                             feature != nullptr ? feature->Name().c_str() : "upscaler");
     }
+}
+
+void RenderVulkanRunsOn(Config* config)
+{
+    const VulkanRouteState route = ReadVulkanRoute(config);
+
+    if (!route.offered)
+        return;
+
+    if (route.runsOn != DlssNrVulkanRoute::RunsOn::NrOff)
+    {
+        ImGui::TextDisabled("%s", DlssNrVulkanRoute::PageRunsOnLine(route.runsOn).c_str());
+        ImGui::SameLine();
+        HelpMarker("Native swapchain: Neural Rendering runs on Vulkan, in the game's own device.\n"
+                   "Everything else runs it on a D3D12 device with copies: the game's upscaler on its D3D12 copy "
+                   "(Frame Generation page, Vulkan route), Optical F5Low, and Finished Picture.");
+    }
+
+    DrawLeftoverFix(config, route, "nrpage");
+}
+
+bool VulkanNativeRoute(Config* config)
+{
+    const VulkanRouteState route = ReadVulkanRoute(config);
+    return DlssNrVulkanRoute::NativeRoute(route.offered, route.routeOn, route.f5lowFg);
+}
+
+void RenderBridgeNeeded(Config* config, uint32_t fgOutput)
+{
+    using namespace DlssNrVulkanRoute;
+
+    const VulkanRouteState route = ReadVulkanRoute(config);
+    const auto output = (Output) fgOutput;
+    const Offer offer =
+        BridgeOffer(output, NativeRoute(route.offered, route.routeOn, route.f5lowFg), route.gameCallsUpscaler);
+
+    if (offer == Offer::None)
+        return;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
+
+    if (offer == Offer::UseBridge)
+        ImGui::TextWrapped("%s", BridgeNeededLine(output).c_str());
+    else
+        ImGui::TextWrapped(
+            "%s The game makes no upscaler call now, which the bridge's route needs; Optical F5Low's NR + "
+            "frame generation does not.",
+            BridgeNeededLine(output).c_str());
+
+    ImGui::PopStyleColor();
+
+    if (offer == Offer::UseBridge)
+    {
+        if (ImGui::SmallButton("Use the bridge##fgbridge"))
+            UseBridgeRoute(config);
+    }
+    else
+    {
+        if (ImGui::SmallButton("Set on the Optical F5Low page##fgbridge"))
+            MenuPages::RequestPage(MenuPages::Page::NrF5Low);
+
+        // A game often makes no upscaler call only for a while (its menus): the route stays one click away
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton("Use the bridge##fgbridge"))
+            UseBridgeRoute(config);
+    }
+
+    ImGui::Spacing();
 }
 
 void UpdateF5LowHint(Config* config)
@@ -5639,7 +5895,10 @@ void RenderMenu(Config* config, float menuResScale, MenuPages::Page page)
     const NrCommon nr = ReadNrCommon(config);
 
     if (page != Page::NrStatus)
+    {
         RenderStatusLine(nr);
+        RenderVulkanRunsOn(config);
+    }
 
     switch (page)
     {

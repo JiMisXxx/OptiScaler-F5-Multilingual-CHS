@@ -46,6 +46,21 @@ Upscaler FeatureProvider_Vk::On12For(Upscaler upscaler)
     }
 }
 
+Upscaler FeatureProvider_Vk::Off12For(Upscaler upscaler)
+{
+    switch (upscaler)
+    {
+    case Upscaler::DLSS_on12:
+        return Upscaler::DLSS;
+    case Upscaler::FFX_on12:
+        return Upscaler::FFX;
+    case Upscaler::FSR21_on12:
+        return Upscaler::FSR21;
+    default:
+        return upscaler;
+    }
+}
+
 Upscaler FeatureProvider_Vk::ForFrameGenerationOnly(Upscaler upscaler)
 {
     if (!Config::Instance()->DlssNrNativeFrameGenerationOnly.value_or_default())

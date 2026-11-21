@@ -377,6 +377,9 @@ void RenderFork(Config* config, float menuResScale)
                                                         config->DlssNrDetailReuseInterval.value_or_default()));
                 Row("  F5LUT", config->DlssNrPostLutStackEnabled.value_or_default() ? "On" : "Off");
             }
+            if (!summary.vulkanRoute.empty())
+                Row("Vulkan route", summary.vulkanRoute);
+
             Row("Optical F5Low", OpticalF5LowText((NativeMode) summary.mode, summary.gameCallsUpscaler, nrUsable));
 
             // The FG page's words, which follow the generator f5low.dll was asked for

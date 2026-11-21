@@ -537,6 +537,21 @@
     <ClInclude Include="native\FrameContract.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_FinishedGameFrame.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_FinishedVk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_FinishedVkGuides.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_FinishedVkRules.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\GuideRunner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\NativeProducer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1638,6 +1653,12 @@
     <ClCompile Include="native\DepthFinderCore.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_FinishedVk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\GuideRunner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="native\NativeProducer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2125,6 +2146,7 @@
     <ClInclude Include="dlssnr\DlssNr_InterPassSchedule.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNr_SuperiorGains.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNr_SuperiorScaling.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_SuperiorVkRule.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="shaders\dlssnr\superior\Constants.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="shaders\dlssnr\superior\Fields.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="shaders\dlssnr\superior\Pipeline.inl"><Filter>Header Files</Filter></ClInclude>

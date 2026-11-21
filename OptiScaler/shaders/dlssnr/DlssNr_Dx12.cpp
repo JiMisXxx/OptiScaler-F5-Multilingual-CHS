@@ -651,6 +651,9 @@ std::unique_ptr<DlssNrGpuTime> g_scanTime;
 double g_scanTimeSum = 0.0, g_scanTimeMax = 0.0;
 unsigned g_scanTimeSamples = 0;
 std::optional<double> g_lastGpuTime;
+// When g_lastGpuTime was measured, in steady milliseconds (LastGpuTime shows a fresh one); atomic: the menu thread
+// reads it
+std::atomic<long long> g_lastGpuTimeAtMs { 0 };
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
@@ -2246,41 +2249,11 @@ void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer
 // SelectWeights is called before every create; DlssNr::Weights resolves and checks the folder.
 void SelectWeights(const Config& cfg)
 {
-    const auto set = cfg.DlssNrWeightsSet.value_or_default();
-    if (g_nr.weightsSelect == nullptr)
-    {
-        if (!set.empty())
-            LOG_WARN("DLSS-NR: Model weights '{}' needs the forwarder from this release (nvngx.dll_dlssnr.dll); "
-                     "the DLL's own weights are used",
-                     set);
-        return;
-    }
-    const auto dir = DlssNr::Weights::Folder(set).wstring();
-    if (!set.empty() && dir.empty())
-        LOG_WARN("DLSS-NR: Model weights '{}' is not a folder name; the DLL's own weights are used", set);
-    g_nr.weightsSelect(dir.c_str());
+    DlssNr::Weights::Select(g_nr.weightsSelect, cfg.DlssNrWeightsSet.value_or_default(), "");
 }
 
 // The forwarder's account of what each weights read got (stock or which file), into OptiScaler.log.
-void LogWeightsReads()
-{
-    if (g_nr.weightsTakeLog == nullptr)
-        return;
-    char text[4096] {};
-    if (g_nr.weightsTakeLog(text, (int) sizeof(text)) <= 0)
-        return;
-    std::string_view rest(text);
-    while (!rest.empty())
-    {
-        const auto end = rest.find('\n');
-        const auto line = rest.substr(0, end);
-        if (!line.empty())
-            LOG_INFO("DLSS-NR weights: {}", line);
-        if (end == std::string_view::npos)
-            break;
-        rest.remove_prefix(end + 1);
-    }
-}
+void LogWeightsReads() { DlssNr::Weights::LogReads(g_nr.weightsTakeLog, ""); }
 
 bool TuningMatchesFeature(const Config& cfg, unsigned int requestedPasses)
 {
@@ -7019,7 +6992,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (queue != nullptr)
         {
             if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
+            {
                 g_lastGpuTime = ms;
+                g_lastGpuTimeAtMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now().time_since_epoch())
+                                            .count(),
+                                        std::memory_order_relaxed);
+            }
             // Every completed frame, not only the newest: full and reused frames alternate, and two can complete
             // between reads.
             for (const double sample : g_gpuTime->TakeFresh())
@@ -7366,7 +7345,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         {
             DeferredSr::Cancel();
             Late::Cancel();
-            Late::Say("This option needs a native DirectX 12 game.");
+            Late::Say("Finished Picture needs a native DirectX 12 or Vulkan game.");
             return;
         }
         // Refuse before capture, pre-SR NR and private DLSS, not only when Present discards output.
@@ -8037,9 +8016,19 @@ void CurrentModelSize(unsigned int& width, unsigned int& height)
     height = g_nr.workHeight;
 }
 
-std::optional<double> LastGpuTime() { return g_lastGpuTime; }
+// Only a time measured in the last 2 s, so a switch between this engine and the native Vulkan model (Finished Picture
+// on a Vulkan game) never shows the other one's last number
+std::optional<double> LastGpuTime()
+{
+    const long long now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
 
+    if (now - g_lastGpuTimeAtMs.load(std::memory_order_relaxed) > 2000)
+        return std::nullopt;
 
+    return g_lastGpuTime;
+}
 
 void RequestCapture(unsigned int frames)
 {
@@ -8329,6 +8318,31 @@ void Shutdown()
 
     Late::nativeHdr = {};
     g_compose.reset();
+}
+
+bool ReleaseFinishedIdle(ID3D12GraphicsCommandList* cmd, unsigned long long epoch)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+
+    // The same release as NR switched off for kOffRelease, started now
+    const auto saved = g_offSince;
+    g_offSince = std::chrono::steady_clock::now() - kOffRelease - std::chrono::seconds(1);
+    ReleaseWhileOff(cmd, epoch);
+    g_offSince = saved;
+
+    bool holds = g_nrRetired.Size() != 0;
+    for (int slot = -1; slot < (int) kAllSlots && !holds; ++slot)
+        holds = SlotHolds(slot);
+
+    if (!holds)
+    {
+        Late::nativeHdr = {};
+        Late::nativeReset = true;
+        Late::gameGuidesApplied = 0;
+        g_compose.reset();
+    }
+
+    return holds;
 }
 } // namespace DlssNr
 

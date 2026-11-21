@@ -643,6 +643,10 @@ class NVNGXProxy
     // be gone (NGX shutdown destroys every feature and parameter block) and is never released or evaluated again.
     inline static std::atomic<uint64_t> _dx12Epoch = 0;
     inline static bool _vulkanInited = false;
+    // The device the Vulkan core was started for (null when unknown) and a count of its starts and stops, so a handle
+    // made under an earlier start, or on another device, is known to be gone (the Vulkan twin of _dx12Epoch).
+    inline static VkDevice _vulkanDevice = VK_NULL_HANDLE;
+    inline static std::atomic<uint64_t> _vulkanEpoch = 0;
 
     inline static void LogCallback(const char* message, NVSDK_NGX_Logging_Level loggingLevel,
                                    NVSDK_NGX_Feature sourceComponent)
@@ -1149,11 +1153,23 @@ class NVNGXProxy
 
         _vulkanInited =
             InitVulkanModule(_module, InInstance, InPD, InDevice, InGIPA, InGDPA) == NVSDK_NGX_Result_Success;
+        _vulkanDevice = _vulkanInited ? InDevice : VK_NULL_HANDLE;
+        ++_vulkanEpoch;
 
         return true;
     }
 
-    static void SetVulkanInited(bool value) { _vulkanInited = value; }
+    // `device`: the one the core was started for, when known.
+    static void SetVulkanInited(bool value, VkDevice device = VK_NULL_HANDLE)
+    {
+        _vulkanInited = value;
+        _vulkanDevice = value ? device : VK_NULL_HANDLE;
+        ++_vulkanEpoch;
+    }
+
+    static VkDevice VulkanDevice() { return _vulkanDevice; }
+
+    static uint64_t VulkanEpoch() { return _vulkanEpoch; }
 
     static bool IsVulkanInited() { return _vulkanInited; }
 
