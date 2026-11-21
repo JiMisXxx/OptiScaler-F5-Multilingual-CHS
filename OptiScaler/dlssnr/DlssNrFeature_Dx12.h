@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "DlssNr_FinishedGameFrame.h"
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <shaders/dlssnr/DlssNr_Views.h>
@@ -135,6 +136,9 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
 uint64_t BeginStreamlinePicture();
 void EndStreamlinePicture(uint64_t snapshot, const char* unavailable = nullptr);
 void FinishedPictureUnavailable(const char* message);
+// Only the status line (FinishedPictureStatus), no cancel: a reason Finished Picture on a Vulkan game cannot run this
+// frame.
+void FinishedPictureNote(const char* message);
 // Streamline app-facing buffer, still PRESENT, on its original render queue before interpolation.
 void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue,
                               uint64_t snapshot);
@@ -160,6 +164,21 @@ bool ApplyVirtualUpscalerInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandL
                                ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* historyDistrust,
                                bool depthReversed, bool reset, DXGI_COLOR_SPACE_TYPE colorSpace,
                                D3D12_RESOURCE_STATES pictureState, unsigned long long epoch);
+// Finished Picture on a native Vulkan game (dlssnr/DlssNr_FinishedVk.h, native/VkFrameSource.h): the same pass as
+// ApplyNativeInput, on the picture of the game's swapchain shared across APIs, with the depth and motion the game gave
+// its own upscaler (`depth` may be null; both rest in COMMON, at the game's allocation, and are left in it) and what
+// its call said about the frame (`game`). The picture is in `pictureState` on entry and is left in it. `epoch` is the
+// Vulkan present count.
+bool ApplyFinishedGameGuides(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
+                             ID3D12Resource* depth, ID3D12Resource* motion, const FinishedGameFrame& game,
+                             DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState,
+                             unsigned long long epoch);
+// Finished Picture on a Vulkan game has been idle for a while (or NR is off): lets go of the pass the way a
+// switched-off NR does (the models and surfaces are parked, freed once the GPU is done with `cmd` and a few epochs went
+// by), and of the HDR10 scratch pair and the composition pass once nothing is parked any more. Call it every present
+// while it returns true, on a list that is then executed, with the caller's present count as `epoch`; the caller has
+// waited for its own last list.
+bool ReleaseFinishedIdle(ID3D12GraphicsCommandList* cmd, unsigned long long epoch);
 // A native-input frame went by without NR (NR off, a mode without NR, the virtual upscaler's own pass): the next NR frame
 // starts its history over instead of blending with the picture from before the gap. The two entries above do this
 // themselves for a frame they did not run on.

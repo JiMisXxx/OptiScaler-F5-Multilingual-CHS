@@ -89,9 +89,19 @@ static const ImVec4 kWarnAmber(0.9f, 0.6f, 0.25f, 1.0f);
 
 // The status lines' elapsed time, steadied (DlssNr_SteadyValue.h): redrawn every frame it changed its digits every
 // frame, which frame generation blends into an overlapping, unreadable number. One for both status lines (one is up).
-static std::optional<double> SteadyGpuMs(std::optional<double> ms)
+// `vulkan`: which engine the number is from; the average starts over when it changes (it would blend two engines'
+// times).
+static std::optional<double> SteadyGpuMs(std::optional<double> ms, bool vulkan)
 {
     static DlssNr::SteadyValue steady;
+    static bool lastVulkan = false;
+
+    if (vulkan != lastVulkan)
+    {
+        lastVulkan = vulkan;
+        steady = DlssNr::SteadyValue {};
+    }
+
     return steady.Update(ms, Util::MillisecondsNow());
 }
 
@@ -1439,11 +1449,21 @@ static void RenderEnableToggle(Config* config)
         MenuPages::RequestPage(MenuPages::Page::Input);
 }
 
-// Finished Picture runs on a native DirectX 12 game only.
+// The game's own frame generation (Streamline 2 on DirectX 12) pauses Finished Picture: a native DirectX 12 game. Not
+// the Vulkan model (IsRunningVk) and not a Vulkan swapchain, whose frame generation Finished Picture on Vulkan refuses
+// itself.
 static bool IsNativeDx12Game()
 {
     const auto feature = State::Instance().currentFeature;
-    return !DlssNr::IsRunningVk() && (!feature || (feature->Api() == API::DX12 && !feature->IsWithDx12()));
+    return !DlssNr::IsRunningVk() && State::Instance().swapchainApi != API::Vulkan &&
+           (!feature || (feature->Api() == API::DX12 && !feature->IsWithDx12()));
+}
+
+// Finished Picture runs on a native DirectX 12 game and on a native Vulkan one; not through dxvk (Direct3D 11 calls) or
+// a bridge (the Vulkan frame generation bridge, a Direct3D 11 or Vulkan game on a Direct3D 12 backend).
+static bool FinishedPictureGame(IFeature* feature)
+{
+    return !feature || (!feature->IsWithDx12() && (feature->Api() == API::DX12 || feature->Api() == API::Vulkan));
 }
 
 // The game's own frame generation runs with no picture handoff, so NR on the finished picture pauses every frame.
@@ -1515,7 +1535,7 @@ static void RenderRunningStatus(Config* config, const NrCommon& nr)
         // nothing in it to hang this off.
         // Either backend's timer. They measure the same thing by different means, and only one
         // of them is running.
-        const auto ms = SteadyGpuMs(vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime());
+        const auto ms = SteadyGpuMs(vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime(), vulkan);
 
         // With "Apply the model" off the pass STILL RUNS (so Hold-frame A/B can toggle its edit on
         // a frozen frame) -- it only outputs the clean frame.
@@ -1570,7 +1590,7 @@ static std::string ViewText(const DlssNr::Views::Rect& r)
 
 static void RenderStatusLine(const NrCommon& nr)
 {
-    const auto ms = SteadyGpuMs(nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime());
+    const auto ms = SteadyGpuMs(nr.vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime(), nr.vulkan);
     ScopedMonoFont monoFont {};
     const auto views = nr.vulkan ? DlssNr::Views::Snapshot {} : DlssNr::MultiViewStatus();
 
@@ -1595,6 +1615,13 @@ static void RenderStatusLine(const NrCommon& nr)
     else if (!nr.vulkan && DlssNr::StoodDownForRebuilds())
         ImGui::TextColored(kWarnAmber,
                            "Stood down: the game keeps switching formats or sizes. Runs again once it settles.");
+    else if (nr.finishedPicture && !nr.vulkan && State::Instance().swapchainApi == API::Vulkan && !ms.has_value())
+    {
+        // Finished Picture on a Vulkan game (the D3D12 engine on the private device): what it says about the picture is
+        // the reason it is not running (frame generation on, a screen format it cannot take, ...)
+        const std::string status = DlssNr::FinishedPictureStatus();
+        ImGui::TextDisabled("%s", status.empty() ? "Waiting for a finished picture." : status.c_str());
+    }
     else if (!DlssNr::IsRunning() && !nr.vulkan)
         ImGui::TextDisabled("NR is not running. See Status & Presets.");
     else if (ms.has_value())
@@ -2536,11 +2563,8 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
         if (DlssNrNativeBlend::Reconcile(blend, BlendResolvedNow(config)))
             WriteBlendState(config, blend);
 
-        // Finished Picture runs on a native DirectX 12 game only (the same test as the NR Options line); Vulkan has
-        // none.
-        const auto blendFeature = State::Instance().currentFeature;
-        const bool blendUnsupported =
-            DlssNr::IsRunningVk() || (blendFeature && (blendFeature->Api() != API::DX12 || blendFeature->IsWithDx12()));
+        // Finished Picture runs on a native DirectX 12 or Vulkan game (the same test as the NR Options line)
+        const bool blendUnsupported = !FinishedPictureGame(State::Instance().currentFeature);
         const bool nativeBlend = DlssNrNativeBlend::Active(blend, BlendResolvedNow(config));
 
         // Greyed only while off: a game that cannot run it can still switch a saved "on" off.
@@ -2571,7 +2595,7 @@ static void RenderStatusPage(Config* config, float menuResScale, const NrCommon&
                    "instead.");
 
         if (blendUnsupported && !nativeBlend)
-            ImGui::TextWrapped("Needs a native DirectX 12 game (Finished Picture does not run on Vulkan).");
+            ImGui::TextWrapped("Finished Picture needs a native DirectX 12 or Vulkan game.");
 
         // Not greyed: the player may turn the game's frame generation off afterwards.
         if (GameFgPausesFinishedPicture())
@@ -3506,17 +3530,19 @@ static void RenderOptionsPage(Config* config, float menuResScale, const NrCommon
                    "After Super Resolution (default): on the upscaled picture.\n"
                    "Before Super Resolution: on the smaller picture; cheaper.\n"
                    "Finished Picture: after the game's effects; may help green noise, but also changes HUD and menus "
-                   "(DirectX 12). With native Streamline 2 frame generation and a registered application-picture "
-                   "handoff, NR runs before interpolation; otherwise it pauses. With Optical F5Low's upscaler pass "
-                   "and XeFG or F5Low frame generation, NR runs on the pass's output instead, before frame "
-                   "generation.\n"
+                   "(DirectX 12 and native Vulkan). On DirectX 12, with native Streamline 2 frame generation and a "
+                   "registered application-picture handoff, NR runs before interpolation; otherwise it pauses. With "
+                   "Optical F5Low's upscaler pass and XeFG or F5Low frame generation, NR runs on the pass's output "
+                   "instead, before frame generation. On Vulkan it needs frame generation off, and does not run "
+                   "through dxvk, the Vulkan frame generation bridge, or a screen in HLG, Display P3 or "
+                   "A2R10G10B10.\n"
                    "With Ray Reconstruction, NR always runs after.");
 
         if (finishedPicture && enabled)
         {
-            const auto feature = State::Instance().currentFeature;
-            if (feature && (feature->Api() != API::DX12 || feature->IsWithDx12()))
-                ImGui::TextWrapped("This option needs a native DirectX 12 game.");
+            // A native Vulkan game runs it too (dlssnr/DlssNr_FinishedVk.h): its status line is NR's own, below
+            if (!FinishedPictureGame(State::Instance().currentFeature))
+                ImGui::TextWrapped("Finished Picture needs a native DirectX 12 or Vulkan game.");
             else if (GameFgPausesFinishedPicture())
             {
                 ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
@@ -4094,21 +4120,22 @@ static void RenderPostLutSection(Config* config)
         lutFiles = ScanLutFolder();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    HelpMarker("Applies a colour grade (.cube LUT) to the game's picture. Put files in OptiScaler\\LUTs and press "
-               "Rescan. Enable LUTs switches the whole stack off and on and keeps its settings.\n"
-               "With Neural Rendering on, it grades the picture NR returns, so the model never sees it and exposure, "
-               "skin detection and reuse are not affected. With NR before Super Resolution the grade is applied before "
-               "the upscaler; in Finished Picture mode it grades the finished picture, UI included (D3D12; Vulkan does "
-               "not run that mode). With NR off, it grades the OptiScaler upscaler's output, before the game draws its "
-               "HUD (needs an OptiScaler upscaler).\n"
-               "Add LUT adds another after the last one, up to four. They are applied top to bottom (the tick box "
-               "switches a layer off and on and keeps its settings, the arrows move it, x removes it); each strength "
-               "blends that layer only. Strong grades stack up.\n"
-               "Look input: a LUT made for a camera log space (ARRILogC4AWG4-to-..., S-Log3, ...) needs the picture in "
-               "that space. Auto reads it from the file's header or name and converts the game's picture for it, so no "
-               "conversion LUT is needed in front; an ordinary LUT gets the picture as it is. Exact on Linear HDR "
-               "games, up to paper white on PQ, highlights estimated on SDR. Pick one by hand if Auto guesses wrong; "
-               "None always uses the picture.");
+    HelpMarker(
+        "Applies a colour grade (.cube LUT) to the game's picture. Put files in OptiScaler\\LUTs and press "
+        "Rescan. Enable LUTs switches the whole stack off and on and keeps its settings.\n"
+        "With Neural Rendering on, it grades the picture NR returns, so the model never sees it and exposure, "
+        "skin detection and reuse are not affected. With NR before Super Resolution the grade is applied before "
+        "the upscaler; in Finished Picture mode it grades the finished picture, UI included (DirectX 12 and native "
+        "Vulkan). With NR off, it grades the OptiScaler upscaler's output, before the game draws its "
+        "HUD (needs an OptiScaler upscaler).\n"
+        "Add LUT adds another after the last one, up to four. They are applied top to bottom (the tick box "
+        "switches a layer off and on and keeps its settings, the arrows move it, x removes it); each strength "
+        "blends that layer only. Strong grades stack up.\n"
+        "Look input: a LUT made for a camera log space (ARRILogC4AWG4-to-..., S-Log3, ...) needs the picture in "
+        "that space. Auto reads it from the file's header or name and converts the game's picture for it, so no "
+        "conversion LUT is needed in front; an ordinary LUT gets the picture as it is. Exact on Linear HDR "
+        "games, up to paper white on PQ, highlights estimated on SDR. Pick one by hand if Auto guesses wrong; "
+        "None always uses the picture.");
 
     if (ImGui::TreeNode("Status##postlut"))
     {
