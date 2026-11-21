@@ -4,6 +4,7 @@
 #include "F5Low.h"
 #include "F5LowVkRules.h"
 #include "f5low_frames.h"
+#include "f5low_pacer.h"
 
 #include <State.h>
 #include <Util.h>
@@ -227,6 +228,7 @@ struct F5Low_Vk::Job
     VkSemaphore realWait = VK_NULL_HANDLE;
     double intervalMs = 0.0;
     uint32_t set = 0;
+    int64_t arriveTicks = 0;
     bool hasPresentId = false;
     uint64_t presentId = 0;
     bool hasFence = false;
@@ -240,6 +242,12 @@ struct F5Low_Vk::Job
     uint32_t groupMode = 0;
 };
 
+struct F5Low_Vk::PacerCtx
+{
+    F5LowPacerBatch batch {};
+    bool meterReported = false;
+};
+
 struct F5Low_Vk::Impl
 {
     // f5low.dll's frames-only API
@@ -250,6 +258,25 @@ struct F5Low_Vk::Impl
     decltype(&f5lowFramesResize) resize = nullptr;
     decltype(&f5lowFramesDestroy) destroy = nullptr;
     decltype(&f5lowFramesLastError) lastError = nullptr;
+    decltype(&f5lowFramesGpuSm) gpuSm = nullptr;
+
+    // f5low's pacer: every export found, and the pacer made with the context
+    decltype(&f5lowPacerCreate) pacerCreate = nullptr;
+    decltype(&f5lowPacerDestroy) pacerDestroy = nullptr;
+    decltype(&f5lowPacerFrameArrived) pacerFrameArrived = nullptr;
+    decltype(&f5lowPacerTarget) pacerTarget = nullptr;
+    decltype(&f5lowPacerStale) pacerStale = nullptr;
+    decltype(&f5lowPacerMeterResult) pacerMeterResult = nullptr;
+    decltype(&f5lowPacerPresented) pacerPresented = nullptr;
+    decltype(&f5lowPacerBatchDone) pacerBatchDone = nullptr;
+    decltype(&f5lowPacerGetInfo) pacerGetInfo = nullptr;
+    decltype(&f5lowPacerNowTicks) pacerNowTicks = nullptr;
+    decltype(&f5lowPacerTicksPerSecond) pacerTicksPerSecond = nullptr;
+    decltype(&f5lowPacerWaitUntil) pacerWaitUntil = nullptr;
+    decltype(&f5lowPacerTimerRaise) pacerTimerRaise = nullptr;
+    bool pacerExports = false;
+    F5LowPacer pacer = nullptr;
+    int64_t ticksPerSecond = 0;
 
     F5LowFramesContext context = nullptr;
     DXGI_FORMAT contextFormat = DXGI_FORMAT_UNKNOWN;
@@ -374,7 +401,25 @@ F5Low_Vk::F5Low_Vk() : IFGFeature_Vk(), IFGFeature(), _impl(std::make_unique<Imp
     _extraQueues[0].flags = VK_QUEUE_GRAPHICS_BIT;
     _extraQueues[0].present = true;
 
-    LOG_INFO("F5Low (Vulkan): frames-only API found, up to {} generated frames per game frame", _maxInterpolationCount);
+    s.gpuSm = reinterpret_cast<decltype(s.gpuSm)>(GetProcAddress(s.module, "f5lowFramesGpuSm"));
+
+    const auto load = [&](auto& pointer, const char* name)
+    {
+        pointer = reinterpret_cast<std::remove_reference_t<decltype(pointer)>>(GetProcAddress(s.module, name));
+        return pointer != nullptr;
+    };
+
+    s.pacerExports = load(s.pacerCreate, "f5lowPacerCreate") & load(s.pacerDestroy, "f5lowPacerDestroy") &
+                     load(s.pacerFrameArrived, "f5lowPacerFrameArrived") & load(s.pacerTarget, "f5lowPacerTarget") &
+                     load(s.pacerStale, "f5lowPacerStale") & load(s.pacerMeterResult, "f5lowPacerMeterResult") &
+                     load(s.pacerPresented, "f5lowPacerPresented") & load(s.pacerBatchDone, "f5lowPacerBatchDone") &
+                     load(s.pacerGetInfo, "f5lowPacerGetInfo") & load(s.pacerNowTicks, "f5lowPacerNowTicks") &
+                     load(s.pacerTicksPerSecond, "f5lowPacerTicksPerSecond") &
+                     load(s.pacerWaitUntil, "f5lowPacerWaitUntil") & load(s.pacerTimerRaise, "f5lowPacerTimerRaise");
+
+    LOG_INFO("F5Low (Vulkan): frames-only API found, up to {} generated frames per game frame; f5low's pacer {}",
+             _maxInterpolationCount,
+             s.pacerExports ? "found" : "missing (an older f5low.dll): plain spacing, metering off unless forced");
 }
 
 F5Low_Vk::~F5Low_Vk()
@@ -718,7 +763,31 @@ void F5Low_Vk::WorkerLoop()
             s.busy = true;
         }
 
-        const uint32_t presentedGenerated = RunGenerated(job, PacedOnCpu(job.metered));
+        // f5low's pacer plans the batch (when to present each frame, whether the driver meters it); without it the
+        // plain spacing and the fallback metering rule
+        PacerCtx pacerCtx;
+        PacerCtx* pacer = nullptr;
+
+        if (s.pacer != nullptr)
+        {
+            F5LowPacerFrame frame {};
+            frame.structSize = sizeof(frame);
+            frame.arriveTicks = job.arriveTicks != 0 ? job.arriveTicks : s.pacerNowTicks();
+            frame.generated = job.generated;
+            frame.displayPaced = VsyncPaces(_presentMode) ? 1u : 0u;
+            pacerCtx.batch.structSize = sizeof(pacerCtx.batch);
+
+            if (s.pacerFrameArrived(s.pacer, &frame, &pacerCtx.batch) == F5LOW_PACER_OK)
+            {
+                pacer = &pacerCtx;
+                job.metered = MeterThisBatch(true, pacerCtx.batch.meterWanted, false, _meteringAvailable);
+            }
+        }
+
+        const uint32_t presentedGenerated = RunGenerated(job, pacer == nullptr && PacedOnCpu(job.metered), pacer);
+
+        if (pacer != nullptr)
+            PacerStart(*pacer, job.generated + 1, false);
 
         // The game's own image after the generated ones, with what the game chained to its present
         VkPresentIdKHR presentId { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
@@ -791,10 +860,22 @@ void F5Low_Vk::WorkerLoop()
 
             if (job.metered)
                 NoteMeterFeedback(presented, meterConfig.presentConfigFeedback);
+
+            if (pacer != nullptr)
+                PacerPresented(*pacer, job, job.generated + 1, false, presented, meterConfig.presentConfigFeedback);
         }
+
+        if (pacer != nullptr)
+            s.pacerBatchDone(s.pacer, &pacer->batch);
 
         _meterWasOn = job.metered && !_meterHealth.off;
         xefg::AddShownPresent(_shownTotal, presentedGenerated + 1);
+
+        {
+            std::lock_guard lock(_statMutex);
+            _statGenerated += presentedGenerated;
+            ++_statBatches;
+        }
 
         {
             std::lock_guard lock(s.jobMutex);
@@ -1322,6 +1403,7 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
     // The time between two game presents. The game thread is not held by our pacing (the worker paces), so this is the
     // game's own cadence.
     const double entryMs = Util::MillisecondsNow();
+    _arriveTicks = _impl->pacerNowTicks != nullptr ? _impl->pacerNowTicks() : 0;
 
     if (_lastEntryMs > 0.0)
         _intervalMs = NextInterval(_intervalMs, entryMs - _lastEntryMs);
@@ -1409,6 +1491,24 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
 // through; the result is not kept anywhere else, so it is never taken for the driver's.
 VkResult F5Low_Vk::AskRecreateIfRaised(VkResult result)
 {
+    // Per game present: the 1 ms timer follows generating, and the stats line comes every kStatsEvery frames
+    if (auto& s = *_impl; s.pacer != nullptr)
+    {
+        const bool raise = TimerWanted(!_generationOff, true);
+
+        if (raise != _timerRaised)
+        {
+            s.pacerTimerRaise(s.pacer, raise ? 1u : 0u);
+            _timerRaised = raise;
+        }
+    }
+
+    if (++_statFrames >= kStatsEvery)
+    {
+        _statFrames = 0;
+        LogStats();
+    }
+
     if (result != VK_SUCCESS)
         return result;
 
@@ -1681,6 +1781,8 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless, uint3
                  magic_enum::enum_name(dxgiColor), info.maxGenerated);
     }
 
+    EnsurePacer();
+
     for (uint32_t k = 0; k < count; k++)
     {
         if (s.out[set][k].Matches(width, height, vkColor))
@@ -1854,7 +1956,166 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless, uint3
 
 // The generated frames of one job, spaced by the game's frame interval: for each, acquire an image, copy the shared
 // output into it, present. The pacing waits are in here and nowhere that holds the swapchain lock.
-uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced)
+// Whether the game's next frame has its copies done already (a job queued behind this one whose copy in finished): what
+// f5lowPacerStale reads as "the next game frame is finished on the GPU"
+bool F5Low_Vk::NextGameFrameDone()
+{
+    auto& s = *_impl;
+    VkFence fence = VK_NULL_HANDLE;
+
+    {
+        std::lock_guard lock(s.jobMutex);
+
+        if (!s.jobs.empty())
+            fence = s.slots[s.jobs.front().slot].fences[0];
+    }
+
+    return fence != VK_NULL_HANDLE && vkGetFenceStatus(_device, fence) == VK_SUCCESS;
+}
+
+// Before frame k (1-based; generated + 1 is the game's own): where on the schedule it goes and the wait for it. True:
+// the generated frame is stale and left out (told to the pacer as dropped by the caller).
+bool F5Low_Vk::PacerStart(PacerCtx& pc, uint32_t k, bool generatedFrame)
+{
+    auto& s = *_impl;
+    F5LowPacerTarget target {};
+    target.structSize = sizeof(target);
+
+    if (s.pacerTarget(s.pacer, &pc.batch, k, &target) != F5LOW_PACER_OK)
+        return false;
+
+    if (generatedFrame && s.pacerStale(s.pacer, &pc.batch, k, s.pacerNowTicks(), NextGameFrameDone() ? 1u : 0u) == 1)
+    {
+        LOG_DEBUG("F5Low (Vulkan): generated frame {} is stale, left out", k);
+        return true;
+    }
+
+    // Sleep to its release time, then (the present waits for the GPU through its semaphore) present
+    if ((target.flags & F5LOW_PACER_TARGET_PACED) != 0 && target.releaseTicks != 0)
+        s.pacerWaitUntil(target.releaseTicks);
+
+    return false;
+}
+
+void F5Low_Vk::PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dropped, VkResult result,
+                              uint32_t feedback)
+{
+    auto& s = *_impl;
+    const int64_t now = s.pacerNowTicks();
+
+    // The driver's answer to the batch's metering config comes with its first present
+    if (job.metered && !pc.meterReported && !dropped)
+    {
+        pc.meterReported = true;
+        s.pacerMeterResult(s.pacer, &pc.batch,
+                           MeterStatus(result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR, feedback), 0);
+    }
+
+    F5LowPacerPresented what {};
+    what.structSize = sizeof(what);
+    what.presentTicks = now;
+    what.flags = dropped ? F5LOW_PACER_PRESENT_DROPPED : 0;
+    s.pacerPresented(s.pacer, &pc.batch, k, &what);
+
+    if (!dropped && s.ticksPerSecond > 0)
+    {
+        std::lock_guard lock(_statMutex);
+
+        if (_lastPresentTicks != 0)
+        {
+            const double ms =
+                static_cast<double>(now - _lastPresentTicks) * 1000.0 / static_cast<double>(s.ticksPerSecond);
+            _spacing.Add(ms);
+
+            const double step =
+                static_cast<double>(pc.batch.stepTicks) * 1000.0 / static_cast<double>(s.ticksPerSecond);
+            const double slot =
+                static_cast<double>(now - pc.batch.baseTicks) * 1000.0 / static_cast<double>(s.ticksPerSecond);
+
+            if (Late(slot, step * k, step))
+                ++_spacing.late;
+        }
+
+        _lastPresentTicks = now;
+    }
+}
+
+// f5low's pacer is made once the generator's context is (its GPU gives the pacer the metering rules); the host says it
+// can meter only with VK_NV_present_metering on the device, and never that it can burst
+void F5Low_Vk::EnsurePacer()
+{
+    auto& s = *_impl;
+
+    if (!s.pacerExports || s.pacer != nullptr || s.context == nullptr)
+        return;
+
+    F5LowPacerCreateInfo info {};
+    info.apiVersion = F5LOW_PACER_API_VERSION;
+    info.structSize = sizeof(info);
+    info.flags = PacerFlags(_meteringAvailable);
+    info.ticksPerSecond = 0;
+    info.gpuSm = s.gpuSm != nullptr ? s.gpuSm(s.context) : 0;
+    info.maxGenerated =
+        static_cast<uint32_t>(std::min(_maxInterpolationCount, static_cast<int>(F5LOW_PACER_MAX_GENERATED)));
+    info.refreshHz = DisplayRefreshFps(Util::MillisecondsNow());
+
+    if (s.pacerCreate(&info, &s.pacer) != F5LOW_PACER_OK || s.pacer == nullptr)
+    {
+        s.pacer = nullptr;
+        LOG_WARN("F5Low (Vulkan): f5low's pacer could not be made, plain spacing");
+        return;
+    }
+
+    s.ticksPerSecond = s.pacerTicksPerSecond();
+    LOG_INFO(
+        "F5Low (Vulkan): f5low's pacer made (sm_{}, flags 0x{:X}), the batches' times and the metering come from it",
+        info.gpuSm, info.flags);
+}
+
+// One line every kStatsEvery game frames: what the output did
+void F5Low_Vk::LogStats()
+{
+    auto& s = *_impl;
+    F5LowPacerInfo info {};
+    info.structSize = sizeof(info);
+    const bool haveInfo = s.pacer != nullptr && s.pacerGetInfo(s.pacer, &info) == F5LOW_PACER_OK;
+
+    SpacingStats spacing;
+    uint64_t generated = 0, batches = 0;
+
+    {
+        std::lock_guard lock(_statMutex);
+        spacing = _spacing;
+        generated = _statGenerated;
+        batches = _statBatches;
+        _spacing = {};
+        _statGenerated = 0;
+        _statBatches = 0;
+    }
+
+    uint64_t gateWaits = 0;
+    double gateMs = 0.0;
+
+    {
+        std::lock_guard lock(_gateMutex);
+        gateWaits = _gateWaits;
+        gateMs = _gateWaitTotalMs;
+        _gateWaits = 0;
+        _gateWaitTotalMs = 0.0;
+    }
+
+    LOG_INFO(
+        "F5Low (Vulkan) stats: interval {:.2f} ms, generated {:.2f}/frame, pacing {} (mode {}, active {}), metering {} "
+        "(feedback 0x{:X}, refused {}), present spacing mean {:.2f} sd {:.2f} max {:.2f} ms, late {}, gate waits {} "
+        "({:.1f} ms)",
+        haveInfo ? info.intervalMs : _intervalMs,
+        batches > 0 ? static_cast<double>(generated) / static_cast<double>(batches) : 0.0,
+        s.pacer != nullptr ? "f5low pacer" : "plain", haveInfo ? info.pacingMode : -1, haveInfo ? info.pacingActive : 0,
+        _meteringOn.load() || _meterWasOn.load() ? "on" : "off", _lastFeedback, haveInfo ? info.meteringRefused : 0,
+        spacing.mean, spacing.Sd(), spacing.max, spacing.late, gateWaits, gateMs);
+}
+
+uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)
 {
     auto& s = *_impl;
     auto& slot = s.slots[job.slot];
@@ -1868,8 +2129,19 @@ uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced)
 
     for (uint32_t k = 0; k < job.generated; k++)
     {
-        if (paced && k > 0)
+        // f5low's pacer places the frame (and leaves a stale one out); without it the plain spacing
+        if (pacer != nullptr)
+        {
+            if (PacerStart(*pacer, k + 1, true))
+            {
+                PacerPresented(*pacer, job, k + 1, true, VK_SUCCESS, 0);
+                continue;
+            }
+        }
+        else if (paced && k > 0)
+        {
             WaitUntil(baseMs + k * spacingMs);
+        }
 
         uint32_t shownIndex = 0;
 
@@ -1949,6 +2221,9 @@ uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced)
 
         if (presented == VK_SUCCESS || presented == VK_SUBOPTIMAL_KHR)
             ++presentedGenerated;
+
+        if (pacer != nullptr && presented != VK_TIMEOUT)
+            PacerPresented(*pacer, job, k + 1, false, presented, meterConfig.presentConfigFeedback);
 
         if (presented != VK_SUCCESS && presented != VK_SUBOPTIMAL_KHR)
         {
@@ -2325,6 +2600,7 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     job.realWait = slot.inDone;
     job.intervalMs = _intervalMs;
     job.metered = _meteringOn;
+    job.arriveTicks = _arriveTicks;
 
     // The present wait needs an id on the real present: the game's (carried) or ours
     if (!job.hasPresentId && _frameOwnId != 0)
@@ -2396,6 +2672,11 @@ bool F5Low_Vk::DecideMetering()
 
     const bool on = !refused && MeteringOn(forced, _meteringAvailable, vsync);
 
+    if (_impl->pacerExports)
+        LOG_INFO("F5Low (Vulkan): with f5low's pacer the batches are metered when it asks for it (FlipMetering in "
+                 "f5low.ini, "
+                 "the GPU, V-Sync); the line below is the fallback rule only");
+
     LOG_INFO("F5Low (Vulkan): flip metering {} (FlipMetering={}, VK_NV_present_metering {}, present mode {}{}{})",
              on ? "on" : "off", setting, _meteringAvailable ? "enabled" : "not on the device", _presentMode,
              vsync ? ", V-Sync paces the presents" : "", refused ? ", refused by the driver before" : "");
@@ -2464,6 +2745,12 @@ bool F5Low_Vk::GateAcquire(VkDevice device, VkSwapchainKHR swapchain, uint64_t t
     const double waitStartMs = Util::MillisecondsNow();
     const auto result = WaitForPresent(device, swapchain, id, waitNs);
     _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - waitStartMs));
+
+    {
+        std::lock_guard statLock(_gateMutex);
+        ++_gateWaits;
+        _gateWaitTotalMs += Util::MillisecondsNow() - waitStartMs;
+    }
 
     // A polling game is not held and nothing is counted
     if (timeoutNs == 0 && result == VK_TIMEOUT)
@@ -2694,6 +2981,13 @@ void F5Low_Vk::ReleaseAll(const char* why)
         s.destroy(s.context);
 
     s.context = nullptr;
+
+    if (s.pacer != nullptr)
+    {
+        s.pacerDestroy(s.pacer);
+        s.pacer = nullptr;
+        _timerRaised = false;
+    }
 
     if (!s.deviceGone && _device != VK_NULL_HANDLE)
     {

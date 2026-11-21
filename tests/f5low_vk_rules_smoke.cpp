@@ -272,6 +272,30 @@ int main()
     CHECK(std::fabs(ReflexCapForVulkanF5Low(120.0f, 3) - 40.0f) < 1e-4f);
     CHECK(ReflexCapForVulkanF5Low(120.0f, 1) == 120.0f);
 
+    // pacer glue: the export or the plain spacing, flags, metering, status
+    CHECK(UsePacer(true, true) && !UsePacer(true, false) && !UsePacer(false, true));
+    CHECK(PacerFlags(true) == 0x4u && PacerFlags(false) == 0u);
+    CHECK((PacerFlags(true) & 0x2u) == 0); // never the burst
+    CHECK(MeterThisBatch(true, 1, false, true));   // the pacer wants it
+    CHECK(!MeterThisBatch(true, 0, true, true));   // the pacer does not, whatever the fallback says
+    CHECK(MeterThisBatch(false, 0, true, true));   // no pacer: the fallback rule
+    CHECK(!MeterThisBatch(false, 0, false, true));
+    CHECK(!MeterThisBatch(true, 1, false, false)); // no extension on the device
+    CHECK(MeterStatus(false, 0) == 0);
+    CHECK(MeterStatus(true, 0) == 1);
+    CHECK(MeterStatus(false, 4) == 1);
+    CHECK(TimerWanted(true, true) && !TimerWanted(false, true) && !TimerWanted(true, false));
+    {
+        SpacingStats stats;
+        stats.Add(8.0);
+        stats.Add(10.0);
+        stats.Add(12.0);
+        CHECK(std::fabs(stats.mean - 10.0) < 1e-9);
+        CHECK(std::fabs(stats.Sd() - 2.0) < 1e-9);
+        CHECK(stats.max == 12.0);
+        CHECK(Late(21.0, 10.0, 8.0) && !Late(13.0, 10.0, 8.0));
+    }
+
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);
     CHECK(RemainingMs(50.0, 20.5) == 29);

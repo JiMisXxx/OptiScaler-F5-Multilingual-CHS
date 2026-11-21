@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 // F5Low on a native Vulkan swapchain (framegen/f5low/F5Low_Vk.h): the pure counting and timing rules, host-tested in
@@ -491,6 +492,56 @@ inline float ReflexCapForVulkanF5Low(float shownCapFps, uint32_t shownPerRendere
 {
     return shownPerRendered > 1 ? shownCapFps / static_cast<float>(shownPerRendered) : shownCapFps;
 }
+
+// The pacer export of f5low.dll (f5low_pacer.h): used when every f5lowPacer* function was found and the pacer was made;
+// otherwise the spacing is the plain one.
+inline bool UsePacer(bool exportsFound, bool created) { return exportsFound && created; }
+
+// F5LOW_PACER_FLAG_HOST_CAN_METER (0x4) only with VK_NV_present_metering and its feature on the device; the burst flag
+// (0x2) is never set (no swapchain made for it).
+inline uint32_t PacerFlags(bool meteringOnDevice) { return meteringOnDevice ? 0x4u : 0u; }
+
+// Whether this batch is metered: the pacer's answer (meterWanted) when there is one, else the fallback rule; always
+// needs the extension on the device
+inline bool MeterThisBatch(bool pacerPresent, uint32_t meterWanted, bool fallbackOn, bool meteringOnDevice)
+{
+    return meteringOnDevice && (pacerPresent ? meterWanted != 0 : fallbackOn);
+}
+
+// The status handed to f5lowPacerMeterResult: 0 accepted, 1 a refusal (a failed present or presentConfigFeedback != 0)
+inline int32_t MeterStatus(bool presentFailed, uint32_t feedback) { return (presentFailed || feedback != 0) ? 1 : 0; }
+
+// The 1 ms timer is raised while frames are generated
+inline bool TimerWanted(bool generating, bool pacerPresent) { return generating && pacerPresent; }
+
+// Present spacing of the shown frames (ms): mean, standard deviation, largest, and how many ran late
+struct SpacingStats
+{
+    uint64_t count = 0;
+    double mean = 0.0;
+    double m2 = 0.0;
+    double max = 0.0;
+    uint64_t late = 0;
+
+    void Add(double ms)
+    {
+        ++count;
+        const double delta = ms - mean;
+        mean += delta / static_cast<double>(count);
+        m2 += delta * (ms - mean);
+
+        if (ms > max)
+            max = ms;
+    }
+
+    double Sd() const { return count > 1 ? std::sqrt(m2 / static_cast<double>(count - 1)) : 0.0; }
+};
+
+// A present is late when it came more than half a step after its slot
+inline bool Late(double presentMs, double slotMs, double stepMs) { return presentMs > slotMs + stepMs * 0.5; }
+
+// The stats line comes every this many game frames
+inline constexpr uint32_t kStatsEvery = 120;
 
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.
 inline bool CanPace(double intervalMs, uint32_t count) { return intervalMs > 0.0 && count > 0; }

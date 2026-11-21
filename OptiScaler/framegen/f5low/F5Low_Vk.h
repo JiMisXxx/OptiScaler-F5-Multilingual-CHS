@@ -25,6 +25,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
   public:
     struct Impl;
     struct Job;
+    struct PacerCtx;
 
   private:
     std::unique_ptr<Impl> _impl;
@@ -88,6 +89,18 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     uint32_t _inlineGenerated = 0;
     bool _warnedCapMode = false;
 
+    // f5low's pacer (f5low_pacer.h), when the f5low.dll has it
+    bool _timerRaised = false;
+    std::mutex _statMutex;
+    F5LowVk::SpacingStats _spacing;
+    int64_t _lastPresentTicks = 0;
+    uint64_t _statGenerated = 0;
+    uint64_t _statBatches = 0;
+    uint32_t _statFrames = 0;
+    uint64_t _gateWaits = 0;
+    double _gateWaitTotalMs = 0.0;
+    int64_t _arriveTicks = 0;
+
     // Device extensions this output enabled (or found enabled): present id + present wait bound how far the game runs
     // ahead, present metering lets the RTX 50 display hardware space the flips of a batch
     bool _presentWaitOn = false;
@@ -142,7 +155,12 @@ class F5Low_Vk : public virtual IFGFeature_Vk
 
     // The generated frames of a job: acquire, copy, present, spaced. On the worker, or on the game thread without a
     // present queue. Returns after the last generated frame was presented.
-    uint32_t RunGenerated(const Job& job, bool paced);
+    uint32_t RunGenerated(const Job& job, bool paced, PacerCtx* pacer = nullptr);
+    bool PacerStart(PacerCtx& pc, uint32_t k, bool generatedFrame);
+    void PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dropped, VkResult result, uint32_t feedback);
+    bool NextGameFrameDone();
+    void EnsurePacer();
+    void LogStats();
     bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);
     VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD lockTimeoutMs);
     VkResult DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, uint64_t ownId = 0, uint32_t meterBatch = 0);
