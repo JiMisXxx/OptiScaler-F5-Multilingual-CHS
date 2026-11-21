@@ -61,9 +61,9 @@ enum class DepthReadability
     Unknown
 };
 
-// The depth and the motion the game's own upscaler call was given, kept at that call (Finished Picture on a Vulkan game,
-// dlssnr/DlssNr_FinishedVk.h) and shared as D3D12 textures. Used instead of the producer's own: the picture is then NR's
-// input exactly as on a D3D12 game.
+// The depth and the motion the game's own upscaler call was given, kept at that call (Finished Picture on a Vulkan
+// game, dlssnr/DlssNr_FinishedVk.h) and shared as D3D12 textures. Used instead of the producer's own: the picture is
+// then NR's input exactly as on a D3D12 game.
 struct GameGuides
 {
     ID3D12Resource* depth = nullptr;  // R32_FLOAT at the game's allocation, null: no depth. Rests in COMMON.

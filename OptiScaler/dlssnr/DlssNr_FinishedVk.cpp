@@ -51,7 +51,8 @@ struct Retired
 struct SlotImages
 {
     Image depth, motion;
-    VkImageView depthOnly = VK_NULL_HANDLE; // the depth-aspect view of the game's depth+stencil image, until the slot is reused
+    VkImageView depthOnly =
+        VK_NULL_HANDLE; // the depth-aspect view of the game's depth+stencil image, until the slot is reused
 };
 
 // Everything made on the game's device. One device at a time (the one its DLSS runs on).
@@ -81,10 +82,10 @@ struct Objects
 std::mutex g_mutex;
 GuideRing g_ring;
 Objects g_obj;
-std::atomic<uint32_t> g_armed { 0 };                 // g_ring.Armed(), for the submit hooks' fast path
-std::atomic<uint64_t> g_lastCapture { UINT64_MAX };   // the present count at the last capture
+std::atomic<uint32_t> g_armed { 0 };                // g_ring.Armed(), for the submit hooks' fast path
+std::atomic<uint64_t> g_lastCapture { UINT64_MAX }; // the present count at the last capture
 std::chrono::steady_clock::time_point g_lastCaptureTime {};
-std::string g_refusal;                               // under g_mutex
+std::string g_refusal; // under g_mutex
 
 uint64_t PresentNow() { return State::Instance().vulkanPresentCount.load(std::memory_order_relaxed); }
 
@@ -118,9 +119,9 @@ void DestroyImage(VkDevice device, Image& image)
     image = Image {};
 }
 
-// A storage image the copy at present can also read. Concurrent across the device's queue families: the game's DLSS call and
-// its present can be on different queues (Doom presents from async compute), and the image never changes layout after its
-// first use, so there is no ownership to hand over.
+// A storage image the copy at present can also read. Concurrent across the device's queue families: the game's DLSS
+// call and its present can be on different queues (Doom presents from async compute), and the image never changes
+// layout after its first use, so there is no ownership to hand over.
 bool MakeImage(Objects& o, Image& out, uint32_t width, uint32_t height, VkFormat format)
 {
     VkImageCreateInfo info {};
@@ -155,7 +156,8 @@ bool MakeImage(Objects& o, Image& out, uint32_t width, uint32_t height, VkFormat
     allocate.allocationSize = need.size;
     allocate.memoryTypeIndex = FindMemory(o.memory, need.memoryTypeBits);
 
-    if (allocate.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(o.device, &allocate, nullptr, &out.memory) != VK_SUCCESS ||
+    if (allocate.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory(o.device, &allocate, nullptr, &out.memory) != VK_SUCCESS ||
         vkBindImageMemory(o.device, out.image, out.memory, 0) != VK_SUCCESS)
     {
         DestroyImage(o.device, out);
@@ -191,8 +193,8 @@ void DestroyRetired(Objects& o, bool all)
                   });
 }
 
-// Everything on the device. The caller knows no work of ours is in flight (the game destroys the device, or no capture was
-// made for many frames).
+// Everything on the device. The caller knows no work of ours is in flight (the game destroys the device, or no capture
+// was made for many frames).
 void Destroy(Objects& o)
 {
     if (o.device == VK_NULL_HANDLE)
@@ -257,7 +259,8 @@ bool BuildPipeline(Objects& o, const unsigned char* code, size_t size, VkPipelin
     return made == VK_SUCCESS;
 }
 
-// The two pipelines and their descriptor sets, on first use (and again after the game's device changes). A failure is kept
+// The two pipelines and their descriptor sets, on first use (and again after the game's device changes). A failure is
+// kept
 // (`failed`): the capture does not try again on this device, and the status line says why.
 bool EnsureObjects(VkPhysicalDevice physical, VkDevice device)
 {
@@ -424,8 +427,9 @@ void RecordPass(const Objects& o, VkCommandBuffer cmd, VkPipeline pipeline, VkDe
     };
     vkUpdateDescriptorSets(o.device, 2, writes, 0, nullptr);
 
-    // The previous contents are not needed (only the region is written, and only the region is read): UNDEFINED as the old
-    // layout lets the driver drop them. The image stays in GENERAL from here on, which the copy at present reads too.
+    // The previous contents are not needed (only the region is written, and only the region is read): UNDEFINED as the
+    // old layout lets the driver drop them. The image stays in GENERAL from here on, which the copy at present reads
+    // too.
     VkImageMemoryBarrier toWrite {};
     toWrite.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     toWrite.srcAccessMask = 0;
@@ -469,18 +473,30 @@ std::string FormatName(VkFormat format)
 {
     switch (format)
     {
-    case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
-    case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
-    case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
-    case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
-    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
-    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return "A2R10G10B10_UNORM_PACK32";
-    case VK_FORMAT_R16G16B16A16_SFLOAT: return "R16G16B16A16_SFLOAT";
-    case VK_FORMAT_R16G16B16A16_UNORM: return "R16G16B16A16_UNORM";
-    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return "B10G11R11_UFLOAT_PACK32";
-    case VK_FORMAT_R5G6B5_UNORM_PACK16: return "R5G6B5_UNORM_PACK16";
-    case VK_FORMAT_B5G6R5_UNORM_PACK16: return "B5G6R5_UNORM_PACK16";
-    default: return "format " + std::to_string((int) format);
+    case VK_FORMAT_B8G8R8A8_UNORM:
+        return "B8G8R8A8_UNORM";
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        return "B8G8R8A8_SRGB";
+    case VK_FORMAT_R8G8B8A8_UNORM:
+        return "R8G8B8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        return "R8G8B8A8_SRGB";
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        return "A2B10G10R10_UNORM_PACK32";
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+        return "A2R10G10B10_UNORM_PACK32";
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+        return "R16G16B16A16_SFLOAT";
+    case VK_FORMAT_R16G16B16A16_UNORM:
+        return "R16G16B16A16_UNORM";
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+        return "B10G11R11_UFLOAT_PACK32";
+    case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        return "R5G6B5_UNORM_PACK16";
+    case VK_FORMAT_B5G6R5_UNORM_PACK16:
+        return "B5G6R5_UNORM_PACK16";
+    default:
+        return "format " + std::to_string((int) format);
     }
 }
 
@@ -492,8 +508,8 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
 
     const auto& cfg = *Config::Instance();
 
-    // The model before Super Resolution, and "generate before SR, apply after" are the D3D12 residual placements (mode 2 of
-    // DlssNr_Dx12.cpp): not built on Vulkan.
+    // The model before Super Resolution, and "generate before SR, apply after" are the D3D12 residual placements (mode
+    // 2 of DlssNr_Dx12.cpp): not built on Vulkan.
     if (cfg.DlssNrRunBeforeSr.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default())
     {
         std::lock_guard lock(g_mutex);
@@ -523,8 +539,8 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     if (motionRead == GuideRead::Refused)
     {
         std::lock_guard lock(g_mutex);
-        g_refusal = "Finished Picture on Vulkan cannot read the game's motion vectors (" +
-                    FormatName(motionInfo.Format) + ").";
+        g_refusal =
+            "Finished Picture on Vulkan cannot read the game's motion vectors (" + FormatName(motionInfo.Format) + ").";
         static VkFormat saidMotion = VK_FORMAT_UNDEFINED;
 
         if (saidMotion != motionInfo.Format)
@@ -537,7 +553,8 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     }
 
     GuideRead depthRead = GuideRead::Refused;
-    const VkImageAspectFlags depthAspect = ImageViewOk(depth) ? depth->Resource.ImageViewInfo.SubresourceRange.aspectMask : 0;
+    const VkImageAspectFlags depthAspect =
+        ImageViewOk(depth) ? depth->Resource.ImageViewInfo.SubresourceRange.aspectMask : 0;
 
     if (ImageViewOk(depth))
     {
@@ -595,10 +612,10 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     // Exactly the regions the consumer reads (the same function the D3D12 capture and the Vulkan model use)
     const uint32_t depthAllocWidth = frame.hasDepth ? depth->Resource.ImageViewInfo.Width : 0;
     const uint32_t depthAllocHeight = frame.hasDepth ? depth->Resource.ImageViewInfo.Height : 0;
-    const auto regions = ResolveGuideRegions({ depthAllocWidth, depthAllocHeight }, { motionInfo.Width, motionInfo.Height },
-                                             { frame.renderWidth, frame.renderHeight },
-                                             { frame.outputWidth, frame.outputHeight }, frame.mvLowRes, frame.depthBaseX,
-                                             frame.depthBaseY, frame.motionBaseX, frame.motionBaseY);
+    const auto regions =
+        ResolveGuideRegions({ depthAllocWidth, depthAllocHeight }, { motionInfo.Width, motionInfo.Height },
+                            { frame.renderWidth, frame.renderHeight }, { frame.outputWidth, frame.outputHeight },
+                            frame.mvLowRes, frame.depthBaseX, frame.depthBaseY, frame.motionBaseX, frame.motionBaseY);
 
     if (!regions.motion.valid())
     {
@@ -610,8 +627,9 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     if (frame.hasDepth && !regions.depth.valid())
         frame.hasDepth = false;
 
-    // The depth-aspect view of a depth+stencil image (a view over both aspects cannot be sampled); kept in the slot until it
-    // is written again, four captures on. Made before the slot is known; a depth that cannot be viewed is no depth.
+    // The depth-aspect view of a depth+stencil image (a view over both aspects cannot be sampled); kept in the slot
+    // until it is written again, four captures on. Made before the slot is known; a depth that cannot be viewed is no
+    // depth.
     VkImageView depthOnlyView = VK_NULL_HANDLE;
     VkImageView depthSource = VK_NULL_HANDLE;
 
@@ -672,7 +690,8 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
 
     slot.depthOnly = depthOnlyView;
 
-    RecordPass(g_obj, cmd, g_obj.motionPipeline, g_obj.sets[index][1], motionInfo.ImageView, slot.motion, regions.motion);
+    RecordPass(g_obj, cmd, g_obj.motionPipeline, g_obj.sets[index][1], motionInfo.ImageView, slot.motion,
+               regions.motion);
 
     if (frame.hasDepth)
         RecordPass(g_obj, cmd, g_obj.depthPipeline, g_obj.sets[index][0], depthSource, slot.depth, regions.depth);

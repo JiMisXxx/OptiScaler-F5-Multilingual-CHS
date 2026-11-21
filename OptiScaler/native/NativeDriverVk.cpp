@@ -66,14 +66,17 @@ bool g_frameGenerationMode = false;
 std::mutex g_refusalMutex;
 std::string g_refusal;
 
-// Finished Picture on a game that calls its own DLSS (dlssnr/DlssNr_FinishedVk.h): the frame is made from the guides the game
-// gave that call, not from Optical F5Low's motion estimate, by a D3D12 list of its own (native/GuideRunner.h).
+// Finished Picture on a game that calls its own DLSS (dlssnr/DlssNr_FinishedVk.h): the frame is made from the guides
+// the game gave that call, not from Optical F5Low's motion estimate, by a D3D12 list of its own (native/GuideRunner.h).
 std::unique_ptr<native::GuideRunner> g_guideRunner;
-std::atomic<bool> g_fpWanted { false }; // Finished Picture is on and the game calls its DLSS: the status line is NR's own
-std::atomic<bool> g_fpRan { false };    // NR ran on the last present from the game's guides
+// Finished Picture is on and the game calls its DLSS: the status line is NR's own
+std::atomic<bool> g_fpWanted { false };
+// NR ran on the last present from the game's guides
+std::atomic<bool> g_fpRan { false };
 
-// Frame generation on this swapchain: OptiScaler's own (FSR FG, DLSS-G output, ...) or the game's DLSS-G. Finished Picture
-// takes its pictures from the game's present, which these replace or follow with frames of their own: a later story.
+// Frame generation on this swapchain: OptiScaler's own (FSR FG, DLSS-G output, ...) or the game's DLSS-G. Finished
+// Picture takes its pictures from the game's present, which these replace or follow with frames of their own: a later
+// story.
 bool FrameGenerationOn(uint64_t present)
 {
     auto& state = State::Instance();
@@ -92,8 +95,8 @@ DXGI_COLOR_SPACE_TYPE ToDxgiSpace(native::ColorSpace space)
                                               : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 }
 
-// One present from the game's guides: the copy in (with the game's depth and motion beside the picture), NR on the D3D12
-// side, the copy back. The frame source is set to this present already. True when the picture went through NR.
+// One present from the game's guides: the copy in (with the game's depth and motion beside the picture), NR on the
+// D3D12 side, the copy back. The frame source is set to this present already. True when the picture went through NR.
 bool RunGameGuides(const DlssNr::FinishedVk::Guides& taken, uint64_t presentCount)
 {
     g_source.SetGameGuides(&taken);
@@ -217,14 +220,17 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     if (fpWanted)
     {
         if (bridged)
-            DlssNr::FinishedPictureNote("Finished Picture does not run on the Vulkan frame generation bridge yet. Turn the "
-                                        "bridge route off, or pick After Super Resolution.");
+            DlssNr::FinishedPictureNote(
+                "Finished Picture does not run on the Vulkan frame generation bridge yet. Turn the "
+                "bridge route off, or pick After Super Resolution.");
         else if (FrameGenerationOn(presentCount))
-            DlssNr::FinishedPictureNote("Finished Picture does not run with frame generation on a Vulkan game yet. Turn "
-                                        "frame generation off, or pick After Super Resolution.");
+            DlssNr::FinishedPictureNote(
+                "Finished Picture does not run with frame generation on a Vulkan game yet. Turn "
+                "frame generation off, or pick After Super Resolution.");
         else if (width == 0 || !DlssNr::FinishedVk::Take(device, presentCount, width, height, taken))
         {
-            // Nothing of the game's to use at this present (not submitted yet, another picture size, an unreadable guide)
+            // Nothing of the game's to use at this present (not submitted yet, another picture size, an unreadable
+            // guide)
             const std::string why = DlssNr::FinishedVk::Refusal();
             DlssNr::FinishedPictureNote(why.empty() ? "Waiting for the game's depth and motion." : why.c_str());
             g_fpRan.store(false, std::memory_order_relaxed);

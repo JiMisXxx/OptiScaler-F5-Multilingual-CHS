@@ -37,9 +37,10 @@ class VkFrameSource : public IFrameSource
     void SetPresent(VkDevice device, VkPhysicalDevice physical, VkQueue queue, VkSwapchainKHR swapchain,
                     uint32_t imageIndex, const VkSemaphore* waits, uint32_t waitCount);
 
-    // Finished Picture on a Vulkan game that calls its own DLSS (dlssnr/DlssNr_FinishedVk.h): the capture this present uses,
-    // or null (nothing: the producer's own guides). Set before Acquire, every present. With one, Acquire copies the game's
-    // depth and motion into the shared guide images next to the picture and does not stand aside for the game's upscaler.
+    // Finished Picture on a Vulkan game that calls its own DLSS (dlssnr/DlssNr_FinishedVk.h): the capture this present
+    // uses, or null (nothing: the producer's own guides). Set before Acquire, every present. With one, Acquire copies
+    // the game's depth and motion into the shared guide images next to the picture and does not stand aside for the
+    // game's upscaler.
     void SetGameGuides(const DlssNr::FinishedVk::Guides* guides);
 
     // Frees the shared guide images once the game has stopped calling its DLSS for a while (`presentCount`: the Vulkan
@@ -137,8 +138,8 @@ class VkFrameSource : public IFrameSource
     void ReleaseDepth();
     void Release();
 
-    // The game's guides of this frame (SetGameGuides): the ring images into the shared guide images, in the copy-in command
-    // buffer. False (with _error) when they could not be shared.
+    // The game's guides of this frame (SetGameGuides): the ring images into the shared guide images, in the copy-in
+    // command buffer. False (with _error) when they could not be shared.
     bool RecordGuides(VkCommandBuffer copyIn, uint32_t family);
     void ReleaseGuides();
 

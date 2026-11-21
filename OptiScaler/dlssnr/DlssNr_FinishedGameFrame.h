@@ -14,7 +14,7 @@ struct FinishedGameFrame
     bool depthInverted = false; // DLSS create flag DepthInverted
     bool mvLowRes = false;      // DLSS create flag MVLowRes
     bool rayReconstruction = false;
-    bool hasDepth = false;      // a depth the capture could read (NR runs without one)
+    bool hasDepth = false;                      // a depth the capture could read (NR runs without one)
     uint32_t outputWidth = 0, outputHeight = 0; // the upscaler's output: must be the swapchain's size
     uint32_t renderWidth = 0, renderHeight = 0; // DLSS render subrect (0: the whole allocation)
     uint32_t depthBaseX = 0, depthBaseY = 0;

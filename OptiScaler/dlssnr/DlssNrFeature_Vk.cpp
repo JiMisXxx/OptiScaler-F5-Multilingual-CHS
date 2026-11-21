@@ -1055,11 +1055,11 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {
-        // Finished Picture on a native Vulkan game: NR runs on the finished picture at present, on the private D3D12 device
-        // the picture is shared with (native/NativeDriverVk.cpp), through the same pass as the D3D12 Finished Picture and
-        // with its post-NR stack. So the Vulkan model is not built here (one NR model only): this call keeps the depth and
-        // motion the game gave its upscaler, for that present (dlssnr/DlssNr_FinishedVk.h). Only after Super Resolution
-        // (the pre-SR call of "Before Super Resolution" is refused with the capture's status).
+        // Finished Picture on a native Vulkan game: NR runs on the finished picture at present, on the private D3D12
+        // device the picture is shared with (native/NativeDriverVk.cpp), through the same pass as the D3D12 Finished
+        // Picture and with its post-NR stack. So the Vulkan model is not built here (one NR model only): this call
+        // keeps the depth and motion the game gave its upscaler, for that present (dlssnr/DlssNr_FinishedVk.h). Only
+        // after Super Resolution (the pre-SR call of "Before Super Resolution" is refused with the capture's status).
         if (!beforeSr)
             DlssNr::FinishedVk::Capture(cmdBuffer, params, physicalDevice, device, rayReconstruction);
         return;

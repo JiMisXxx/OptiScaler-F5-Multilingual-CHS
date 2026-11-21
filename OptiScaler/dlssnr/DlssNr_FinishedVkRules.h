@@ -1,15 +1,16 @@
 #pragma once
 
 // The rules of Finished Picture on a native Vulkan game (dlssnr/DlssNr_FinishedVk.h), apart from any Vulkan object so a
-// host test can run them (tests/nr_finished_vk_rules_smoke.cpp): which formats of the game's depth and motion images the
-// capture pass can read, and the bookkeeping of the capture ring -- which slots hold a frame, whether the game's
+// host test can run them (tests/nr_finished_vk_rules_smoke.cpp): which formats of the game's depth and motion images
+// the capture pass can read, and the bookkeeping of the capture ring -- which slots hold a frame, whether the game's
 // command buffer that wrote one was really submitted, and which slot a present uses.
 //
-// The D3D12 Finished Picture knows when the game executes the command list that holds its capture (FinishedPictureSubmitted,
-// DlssNr_Late.inl). On Vulkan the same knowledge comes from the vkQueueSubmit hooks: a slot is "armed" with the command
-// buffer the capture was recorded into, becomes "submitted" when that command buffer is in a submit, and is dropped when
-// the command buffer is begun again or freed first (the game recorded something else into it), or when it stays unsent for
-// more than a few presents. A present only ever uses a submitted slot: a recording that never ran leaves no stale guides.
+// The D3D12 Finished Picture knows when the game executes the command list that holds its capture
+// (FinishedPictureSubmitted, DlssNr_Late.inl). On Vulkan the same knowledge comes from the vkQueueSubmit hooks: a slot
+// is "armed" with the command buffer the capture was recorded into, becomes "submitted" when that command buffer is in
+// a submit, and is dropped when the command buffer is begun again or freed first (the game recorded something else into
+// it), or when it stays unsent for more than a few presents. A present only ever uses a submitted slot: a recording
+// that never ran leaves no stale guides.
 
 #include "DlssNr_FinishedGameFrame.h"
 #include "../shaders/dlssnr/DlssNr_FinishedReady.h"
@@ -25,9 +26,9 @@ namespace DlssNr::FinishedVkRules
 // How the capture pass reads a guide image through the view the game's upscaler call handed over.
 enum class GuideRead
 {
-    Refused,   // not a format the pass can sample as floats
-    View,      // the game's own view is read as it is (colour formats, depth-only formats)
-    DepthOnly  // a depth+stencil view: the pass makes its own depth-aspect view
+    Refused,  // not a format the pass can sample as floats
+    View,     // the game's own view is read as it is (colour formats, depth-only formats)
+    DepthOnly // a depth+stencil view: the pass makes its own depth-aspect view
 };
 
 // The motion vectors: two or four float or normalised channels, the first two are the vector.
@@ -90,17 +91,17 @@ class GuideRing
   public:
     struct Slot
     {
-        uint64_t serial = 0;       // order of capture; 0: never used
-        uint64_t cmd = 0;          // the command buffer the capture was recorded into, while it is unsent
-        bool armed = false;        // recorded, not yet seen in a submit
-        bool submitted = false;    // seen in a submit, not yet used or dropped
-        uint64_t armedAt = 0;      // the present count at the recording (for Expire)
+        uint64_t serial = 0;    // order of capture; 0: never used
+        uint64_t cmd = 0;       // the command buffer the capture was recorded into, while it is unsent
+        bool armed = false;     // recorded, not yet seen in a submit
+        bool submitted = false; // seen in a submit, not yet used or dropped
+        uint64_t armedAt = 0;   // the present count at the recording (for Expire)
         FinishedGameFrame frame {};
     };
 
-    // A capture is recorded into `cmd` at present count `now`. Returns the slot to write. A game that calls its upscaler
-    // twice in one command buffer (two views, two features) gets two slots, both sent by the one submit; a command buffer
-    // recorded over is the begin/reset hook's to say (Forget), not told apart here.
+    // A capture is recorded into `cmd` at present count `now`. Returns the slot to write. A game that calls its
+    // upscaler twice in one command buffer (two views, two features) gets two slots, both sent by the one submit; a
+    // command buffer recorded over is the begin/reset hook's to say (Forget), not told apart here.
     size_t Begin(uint64_t cmd, uint64_t now, const FinishedGameFrame& frame)
     {
         const size_t index = _next++ % kSlots;
@@ -185,8 +186,8 @@ class GuideRing
     }
 
     // The slot a present at epoch `epoch` composes on a picture of `width` x `height`: the newest submitted capture of
-    // that size inside the window of FinishedStale (one present; the same rule the D3D12 slots use). Everything older is
-    // used up with it, and a game reset flag of a capture that was dropped unapplied rides on the one that is used.
+    // that size inside the window of FinishedStale (one present; the same rule the D3D12 slots use). Everything older
+    // is used up with it, and a game reset flag of a capture that was dropped unapplied rides on the one that is used.
     // False when there is none.
     bool Pick(uint64_t epoch, uint32_t width, uint32_t height, size_t& index, bool& reset)
     {
@@ -264,8 +265,8 @@ class GuideRing
     bool _carriedReset = false;
 };
 
-// NR drops its history when nothing was applied yet or the capture of this frame is more than two game frames of presents
-// after the last applied one (the D3D12 rule, one present per game frame: FinishedHistoryGap).
+// NR drops its history when nothing was applied yet or the capture of this frame is more than two game frames of
+// presents after the last applied one (the D3D12 rule, one present per game frame: FinishedHistoryGap).
 inline bool HistoryGap(uint64_t lastAppliedEpoch, uint64_t captureEpoch)
 {
     return DlssNr::FinishedHistoryGap(lastAppliedEpoch, captureEpoch, 1);

@@ -101,7 +101,10 @@ GuideRunner::Result GuideRunner::Run(ID3D12CommandQueue* queue, const FrameInput
 
     if (!Ready() || queue == nullptr || input.picture == nullptr || !apply)
     {
-        result.stoppedAt = !Ready() ? "not ready" : queue == nullptr ? "no queue" : !apply ? "no consumer" : "no picture";
+        result.stoppedAt = !Ready()           ? "not ready"
+                           : queue == nullptr ? "no queue"
+                           : !apply           ? "no consumer"
+                                              : "no picture";
         return result;
     }
 

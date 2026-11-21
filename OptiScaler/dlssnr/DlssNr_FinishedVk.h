@@ -3,17 +3,18 @@
 // Finished Picture on a native Vulkan game: the capture half.
 //
 // "NR Pass at: Finished Picture" runs Neural Rendering on the picture the game presents, with the depth and motion the
-// game gave its own upscaler. On D3D12 those are copied at the upscaler call and used at present (DlssNr_Late.inl). On a
-// native Vulkan game this module does the first half: at the game's DLSS evaluate (EvaluateAtSeamVk, where it used to
+// game gave its own upscaler. On D3D12 those are copied at the upscaler call and used at present (DlssNr_Late.inl). On
+// a native Vulkan game this module does the first half: at the game's DLSS evaluate (EvaluateAtSeamVk, where it used to
 // return) a small compute pass in the game's command buffer samples the depth and the motion vectors through the views
 // NGX handed over and writes them to images of its own (a ring of four, written only in the region the upscaler reads,
-// at the same texel position, as the D3D12 capture keeps the game's allocation). At present, native/VkFrameSource copies
-// the newest submitted slot into images it shares with the private D3D12 device, where NR runs on the picture through
-// the same code as on D3D12 (DlssNr::ApplyFinishedGameGuides): the look is the D3D12 Finished Picture's by construction.
+// at the same texel position, as the D3D12 capture keeps the game's allocation). At present, native/VkFrameSource
+// copies the newest submitted slot into images it shares with the private D3D12 device, where NR runs on the picture
+// through the same code as on D3D12 (DlssNr::ApplyFinishedGameGuides): the look is the D3D12 Finished Picture's by
+// construction.
 //
 // "Recorded but not executed": a slot is used only once its command buffer was seen in a vkQueueSubmit
-// (hooks/VulkanwDx12_Hooks.cpp calls NoteSubmit); begin/reset/free of the buffer first drops it, and an unsent one expires
-// after a few presents (dlssnr/DlssNr_FinishedVkRules.h).
+// (hooks/VulkanwDx12_Hooks.cpp calls NoteSubmit); begin/reset/free of the buffer first drops it, and an unsent one
+// expires after a few presents (dlssnr/DlssNr_FinishedVkRules.h).
 //
 // Legal on a compute-only present queue (Doom presents from async compute): the capture is a dispatch in the game's
 // own command buffer, wherever its DLSS call is; the present side only copies.
@@ -40,16 +41,16 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
 // `device`: the newest submitted capture that fits. Uses it up. False when there is none.
 bool Take(VkDevice device, uint64_t presentEpoch, uint32_t width, uint32_t height, Guides& out);
 
-// The game called its DLSS within the last few presents: the game's own upscaler is running, so Finished Picture takes its
-// guides from it rather than from Optical F5Low's motion estimate.
+// The game called its DLSS within the last few presents: the game's own upscaler is running, so Finished Picture takes
+// its guides from it rather than from Optical F5Low's motion estimate.
 bool Recent(uint64_t presentCount);
 
 // Why the last capture could not be made (the format of the game's motion vectors, ...), empty when it could. For the
 // status line while nothing can be applied.
 std::string Refusal();
 
-// Once per present (the game's present thread): drops recordings that were never submitted, retires replaced images, and
-// lets go of everything after the game has stopped calling its DLSS for a while.
+// Once per present (the game's present thread): drops recordings that were never submitted, retires replaced images,
+// and lets go of everything after the game has stopped calling its DLSS for a while.
 void OnPresent(uint64_t presentCount);
 
 // From the vkQueueSubmit / vkQueueSubmit2 hooks: the game submits these command buffers. A relaxed load when no capture

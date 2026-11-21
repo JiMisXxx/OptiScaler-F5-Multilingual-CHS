@@ -136,7 +136,8 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
 uint64_t BeginStreamlinePicture();
 void EndStreamlinePicture(uint64_t snapshot, const char* unavailable = nullptr);
 void FinishedPictureUnavailable(const char* message);
-// Only the status line (FinishedPictureStatus), no cancel: a reason Finished Picture on a Vulkan game cannot run this frame.
+// Only the status line (FinishedPictureStatus), no cancel: a reason Finished Picture on a Vulkan game cannot run this
+// frame.
 void FinishedPictureNote(const char* message);
 // Streamline app-facing buffer, still PRESENT, on its original render queue before interpolation.
 void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue,
@@ -164,9 +165,10 @@ bool ApplyVirtualUpscalerInput(ID3D12CommandQueue* queue, ID3D12GraphicsCommandL
                                bool depthReversed, bool reset, DXGI_COLOR_SPACE_TYPE colorSpace,
                                D3D12_RESOURCE_STATES pictureState, unsigned long long epoch);
 // Finished Picture on a native Vulkan game (dlssnr/DlssNr_FinishedVk.h, native/VkFrameSource.h): the same pass as
-// ApplyNativeInput, on the picture of the game's swapchain shared across APIs, with the depth and motion the game gave its own
-// upscaler (`depth` may be null; both rest in COMMON, at the game's allocation, and are left in it) and what its call said
-// about the frame (`game`). The picture is in `pictureState` on entry and is left in it. `epoch` is the Vulkan present count.
+// ApplyNativeInput, on the picture of the game's swapchain shared across APIs, with the depth and motion the game gave
+// its own upscaler (`depth` may be null; both rest in COMMON, at the game's allocation, and are left in it) and what
+// its call said about the frame (`game`). The picture is in `pictureState` on entry and is left in it. `epoch` is the
+// Vulkan present count.
 bool ApplyFinishedGameGuides(ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* cmd, ID3D12Resource* color,
                              ID3D12Resource* depth, ID3D12Resource* motion, const FinishedGameFrame& game,
                              DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState,

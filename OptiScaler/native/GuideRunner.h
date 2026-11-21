@@ -1,10 +1,10 @@
 #pragma once
 
-// The D3D12 half of Finished Picture on a native Vulkan game (native/VkFrameSource.h, dlssnr/DlssNr_FinishedVk.h): one command
-// list on the private D3D12 device that waits for the copy in, runs the consumer (DLSS-NR on the shared picture, with the
-// depth and motion the game's own upscaler call was given) and signals when the picture may be copied back. The producer
-// of Optical F5Low (native/NativeProducer.h) does the same around its optical flow; here the game supplies the guides, so
-// there is no flow, trust mask or depth finder, and none of their cost.
+// The D3D12 half of Finished Picture on a native Vulkan game (native/VkFrameSource.h, dlssnr/DlssNr_FinishedVk.h): one
+// command list on the private D3D12 device that waits for the copy in, runs the consumer (DLSS-NR on the shared
+// picture, with the depth and motion the game's own upscaler call was given) and signals when the picture may be copied
+// back. The producer of Optical F5Low (native/NativeProducer.h) does the same around its optical flow; here the game
+// supplies the guides, so there is no flow, trust mask or depth finder, and none of their cost.
 //
 // Not built with the precompiled header: no game headers in here.
 
@@ -24,8 +24,8 @@ class GuideRunner
 
     struct Result
     {
-        bool submitted = false;        // the work was sent: output.done is valid
-        bool ran = false;              // the consumer ran on the picture
+        bool submitted = false;          // the work was sent: output.done is valid
+        bool ran = false;                // the consumer ran on the picture
         const char* stoppedAt = nullptr; // when nothing was sent: the step that gave up (for the log)
         long stoppedHr = 0;
     };
@@ -41,8 +41,8 @@ class GuideRunner
     ID3D12Device* Device() const { return _device; }
     const std::string& Error() const { return _error; }
 
-    // One frame, on `queue` (a direct queue of Device()): waits for input.ready, records, sends, and gives the point the
-    // adapter waits on in output.done.
+    // One frame, on `queue` (a direct queue of Device()): waits for input.ready, records, sends, and gives the point
+    // the adapter waits on in output.done.
     Result Run(ID3D12CommandQueue* queue, const FrameInput& input, const ApplyFn& apply, FrameOutput& output);
 
     // Waits (at most a few seconds) for the last frame the runner sent.

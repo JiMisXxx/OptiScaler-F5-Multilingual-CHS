@@ -561,8 +561,8 @@ bool VkFrameSource::RecordGuides(VkCommandBuffer copyIn, uint32_t family)
 {
     const auto& g = _guides;
 
-    const auto share = [&](SharedImageVk& shared, uint32_t width, uint32_t height, DXGI_FORMAT dxgi, VkFormat vk,
-                           const char* what)
+    const auto share =
+        [&](SharedImageVk& shared, uint32_t width, uint32_t height, DXGI_FORMAT dxgi, VkFormat vk, const char* what)
     {
         if (shared.Matches(width, height, vk))
             return true;
@@ -609,8 +609,9 @@ AcquireStatus VkFrameSource::Acquire(FrameInput& input)
     if (_device == VK_NULL_HANDLE || _queue == VK_NULL_HANDLE || _swapchain == VK_NULL_HANDLE)
         return AcquireStatus::Unavailable;
 
-    // Bridged, the picture is copied in all the same: the D3D12 swapchain presents it, producer or not. With the game's own
-    // guides (Finished Picture) the game's upscaler call is what the frame is made from, not a reason to stand aside.
+    // Bridged, the picture is copied in all the same: the D3D12 swapchain presents it, producer or not. With the game's
+    // own guides (Finished Picture) the game's upscaler call is what the frame is made from, not a reason to stand
+    // aside.
     const bool waiting = !_haveGuides && GameUpscalerCalledRecently();
 
     if (waiting && !_bridged)
