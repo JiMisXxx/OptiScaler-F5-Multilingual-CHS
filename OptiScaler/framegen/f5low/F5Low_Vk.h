@@ -52,6 +52,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     std::string _nameCache;   // built once in the constructor
     bool _removed = false;    // the D3D12 device was removed: stays so across swapchains
     bool _retiredOld = false; // a failed create retired the game's old swapchain
+    int _createdWanted = 1;   // the multiplier the swapchain was made for
+    int _askedWanted = 0;     // the raise the game was last asked to recreate its swapchain for
+    VkResult AskRecreateIfRaised(VkResult result);
     bool _loggedBehind = false;
     bool _loggedGenerating = false; // the first generated frame of this swapchain was logged
 

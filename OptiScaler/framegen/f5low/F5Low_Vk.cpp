@@ -896,6 +896,8 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _generationOff = true;
     _loggedBehind = false;
     _loggedGenerating = false;
+    _createdWanted = _wanted;
+    _askedWanted = 0;
     s.nextSet = 0;
     s.setSlot[0] = s.setSlot[1] = -1;
 
@@ -1040,7 +1042,7 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
         pPresentInfo->pSwapchains[0] != _swapchain || _failures >= 3 || _headroom == 0)
     {
         _generationOff = true;
-        return DirectPresent(queue, pPresentInfo);
+        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo));
     }
 
     if (queue != _gameQueue)
@@ -1052,15 +1054,30 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
         }
 
         _generationOff = true;
-        return DirectPresent(queue, pPresentInfo);
+        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo));
     }
 
     VkPresentInfoKHR finalInfo = *pPresentInfo;
 
     if (Generate(queue, pPresentInfo, pending, finalInfo) == Outcome::Queued)
-        return static_cast<VkResult>(_impl->lastResult.load());
+        return AskRecreateIfRaised(static_cast<VkResult>(_impl->lastResult.load()));
 
-    return DirectPresent(queue, &finalInfo);
+    return AskRecreateIfRaised(DirectPresent(queue, &finalInfo));
+}
+
+// The multiplier was raised past the spare images of this swapchain: the game is told its swapchain is suboptimal once,
+// so it makes a new one (CreateSwapchain then asks the driver for the new count). Only on top of a present that went
+// through; the result is not kept anywhere else, so it is never taken for the driver's.
+VkResult F5Low_Vk::AskRecreateIfRaised(VkResult result)
+{
+    if (result != VK_SUCCESS || !AskRecreate(_wanted, _createdWanted, _headroom, _askedWanted))
+        return result;
+
+    _askedWanted = _wanted;
+    LOG_INFO("F5Low (Vulkan): multiplier {}x needs more spare swapchain images ({} now), asking the game to make a new "
+             "swapchain",
+             _wanted + 1, _headroom);
+    return VK_SUBOPTIMAL_KHR;
 }
 
 void F5Low_Vk::WaitOwnWork()
@@ -1456,8 +1473,8 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless, uint3
             s.depthSource = depth.format;
             s.depthWidth = depth.imageWidth;
             s.depthHeight = depth.imageHeight;
-            LOG_INFO("F5Low (Vulkan): sharing the depth at {}x{}, Vulkan format {}", s.depthWidth, s.depthHeight,
-                     magic_enum::enum_name(depth.format));
+            LOG_INFO("F5Low (Vulkan): sharing the depth at {}x{}, Vulkan format {} ({})", s.depthWidth, s.depthHeight,
+                     static_cast<int>(depth.format), magic_enum::enum_name(depth.format));
         }
     }
 

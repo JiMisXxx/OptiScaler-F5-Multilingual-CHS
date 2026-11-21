@@ -101,6 +101,14 @@ int main()
     CHECK(GeneratedAfter(1, 3, 3) == 0);
     CHECK(GeneratedAfter(-2, 3, 3) == 0);
 
+    // asking for a new swapchain after a raise
+    CHECK(AskRecreate(3, 1, 1, 0));   // raised 2x -> 4x, one spare image
+    CHECK(!AskRecreate(3, 1, 1, 3));  // already asked for 3
+    CHECK(AskRecreate(4, 1, 1, 3));   // changed again
+    CHECK(!AskRecreate(1, 3, 3, 0));  // lowered
+    CHECK(!AskRecreate(3, 3, 3, 0));  // the swapchain was made for it
+    CHECK(!AskRecreate(3, 1, 3, 0));  // enough spare images already
+
     // device group present info: one device only
     CHECK(SingleDeviceMask(1));
     CHECK(SingleDeviceMask(4));

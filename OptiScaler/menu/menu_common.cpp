@@ -5734,9 +5734,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             ShowHelpMarker(
                 "Frames shown per game frame (ini: [XeFG] InterpolationCount).\n"
-                "A lower value applies at once. A higher one needs spare swapchain images, which the game's\n"
-                "swapchain gets when it is made: after a raise, change the resolution or window mode once\n"
-                "(or restart) so the game makes a new swapchain.");
+                "A lower value applies at once. A higher one needs more spare swapchain images, so the game\n"
+                "is asked to make a new swapchain (the picture may blink once).");
         }
     }
 

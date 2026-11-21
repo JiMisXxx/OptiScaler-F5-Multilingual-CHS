@@ -117,6 +117,14 @@ inline bool DeviceGroupCarryable(uint32_t swapchainCount, uint32_t mode, uint32_
     return swapchainCount == 1 && SingleDeviceMask(mask0);
 }
 
+// Asking the game to make a new swapchain (a SUBOPTIMAL present) so it gets the spare images a raised multiplier needs:
+// only for a raise past what the swapchain was made for and past its spare images, once per wanted count (a game that
+// does not recreate is not asked again until the count changes), never for a lowered one.
+inline bool AskRecreate(int wanted, int createdFor, uint32_t headroom, int askedFor)
+{
+    return wanted > createdFor && wanted > static_cast<int>(headroom) && wanted != askedFor;
+}
+
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.
 inline bool CanPace(double intervalMs, uint32_t count) { return intervalMs > 0.0 && count > 0; }
 } // namespace F5LowVk
