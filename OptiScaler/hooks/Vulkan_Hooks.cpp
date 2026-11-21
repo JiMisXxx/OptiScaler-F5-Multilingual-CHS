@@ -33,6 +33,7 @@
 #include <native/VkFrameSource.h>
 #include <native/VkPresentBridge.h>
 #include <dlssnr/DlssNr_ExposureScan_Vk.h>
+#include <dlssnr/DlssNr_FinishedVk.h>
 #include <resource_tracking/GenericDepth_Vk.h>
 
 #include <detours/detours.h>
@@ -1359,6 +1360,8 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     const auto hookStartMs = Util::MillisecondsNow();
 
     State::Instance().vulkanPresentCount.fetch_add(1, std::memory_order_relaxed);
+    // Finished Picture: the game's submits from here on are for a later frame than this present
+    DlssNr::FinishedVk::BeginPresent();
     NoteDroppedLogLinesOnPresent();
 
     // The device this present is on: the queue's own, not the last one the game made. A game that makes more devices after

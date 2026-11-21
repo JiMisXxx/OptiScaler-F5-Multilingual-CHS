@@ -180,6 +180,15 @@ Before Super Resolution: apply NR to the smaller pre-upscale image instead. No e
 
 Finished Picture: apply NR after the game has finished its lighting and effects, which may help with green noise. Works with frame generation on or off in native DirectX 12 games (SDR, HDR10, scRGB), and can also change the HUD and menus.
 
+Finished Picture also runs on native Vulkan games that call DLSS, with the same look and the same colour handling as on DirectX 12. At the game's DLSS call OptiScaler keeps the game's depth and motion vectors; at present the finished picture is shared with a private DirectX 12 device, NR runs there, and the result is copied back (no blit, so it also works when the game presents from a compute queue). The native Vulkan NR model is not built while Finished Picture is on, so the Vulkan-only NR controls give way to the ones that apply. On Vulkan:
+
+- Frame generation must be off (OptiScaler's own or the game's DLSS-G): the menu says so and the picture is left as the game made it.
+- It does not run through dxvk, nor on the Vulkan frame generation bridge.
+- "Run the model before Super Resolution" and "Generate before SR" are not available (the status line says so).
+- Screens in B8G8R8A8, R8G8B8A8 (UNORM or sRGB), A2B10G10R10 and RGBA16F work, in sRGB, HDR10 (ST 2084) and scRGB. A2R10G10B10, HLG, Display P3 and other colour spaces are refused and named in the status line.
+- The game's upscaler output must be the screen's size.
+- When Finished Picture is off for about ten seconds the private DirectX 12 pass and its model are released; the first frame after switching it on again rebuilds them.
+
 ## Reuse bottleneck
 
 Recomputes the model's coarsest stage (its 32x18 bottleneck) only every other frame and reuses the last result in between, which saves roughly a tenth of the model's GPU time.

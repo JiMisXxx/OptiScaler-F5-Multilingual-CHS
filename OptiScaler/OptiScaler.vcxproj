@@ -533,6 +533,10 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_ExposureMatch.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan_Dx11.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan_Vk.h" />
+    <ClInclude Include="dlssnr\DlssNr_FinishedGameFrame.h" />
+    <ClInclude Include="dlssnr\DlssNr_FinishedVk.h" />
+    <ClInclude Include="dlssnr\DlssNr_FinishedVkGuides.h" />
+    <ClInclude Include="dlssnr\DlssNr_FinishedVkRules.h" />
     <ClInclude Include="dlssnr\DlssNr_ColourEncodingStatus.h" />
     <ClInclude Include="dlssnr\DlssNr_NativeMode.h" />
     <ClInclude Include="dlssnr\DlssNr_LutStatus.h" />
@@ -622,6 +626,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\DepthFinderCore.h" />
     <ClInclude Include="native\FrameContract.h" />
     <ClInclude Include="native\NativeProducer.h" />
+    <ClInclude Include="native\GuideRunner.h" />
     <ClInclude Include="native\Dx12FrameSource.h" />
     <ClInclude Include="native\SharedFrame.h" />
     <ClInclude Include="native\DepthCopyDx11.h" />
@@ -1020,6 +1025,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="native\GuideRunner.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="native\Dx12FrameSource.cpp" />
     <ClCompile Include="native\DepthCopyDx11.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
@@ -1196,6 +1206,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\DlssNr_ExposureAutoScan.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan_Dx11.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan_Vk.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_FinishedVk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ColourEncodingStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_LutStatus.cpp" />
     <ClCompile Include="dlssnr\DlssNr_Proxy.cpp" />
