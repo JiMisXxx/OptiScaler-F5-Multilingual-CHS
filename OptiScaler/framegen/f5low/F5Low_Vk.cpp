@@ -1206,25 +1206,93 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
     }
 
     // A game's per-present mode info saying MAILBOX goes out as IMMEDIATE too when our swapchain was made with it (the
-    // generated frames do): the value is rewritten in the game's array for this call and put back after
-    VkPresentModeKHR* chainedMode = nullptr;
+    // generated frames do). The game's structs are const and may be shared: nothing of theirs is written. The chain up
+    // to and including the mode info is rebuilt from local copies (the structs we know the size of; ours stay as they
+    // are, the driver writes into them), the rest is pointed to as it is. An unknown struct in front leaves the present
+    // alone.
+    alignas(8) unsigned char chainStore[8][64] {};
+    VkPresentModeKHR localMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    VkPresentInfoKHR modePresent {};
 
     if (_tearing)
     {
-        for (auto* node = static_cast<const VkBaseInStructure*>(info->pNext); node != nullptr; node = node->pNext)
+        const auto sizeOf = [](VkStructureType type) -> size_t
         {
-            if (node->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT)
+            switch (type)
+            {
+            case VK_STRUCTURE_TYPE_PRESENT_ID_KHR:
+                return sizeof(VkPresentIdKHR);
+            case VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT:
+                return sizeof(VkSwapchainPresentFenceInfoEXT);
+            case VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR:
+                return sizeof(VkDeviceGroupPresentInfoKHR);
+            default:
+                return 0;
+            }
+        };
+
+        VkBaseOutStructure* previous = nullptr;
+        VkBaseOutStructure* first = nullptr;
+        size_t used = 0;
+        bool ok = true;
+        const VkBaseInStructure* modeNode = nullptr;
+
+        const auto append = [&](VkBaseOutStructure* node)
+        {
+            (previous != nullptr ? previous->pNext : first) = node;
+            previous = node;
+        };
+
+        for (auto* node = static_cast<const VkBaseInStructure*>(info->pNext); node != nullptr && ok; node = node->pNext)
+        {
+            if (node->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT)
+            {
+                modeNode = node;
+                break;
+            }
+
+            if (node == reinterpret_cast<const VkBaseInStructure*>(&idInfo) ||
+                node == reinterpret_cast<const VkBaseInStructure*>(&meterInfo))
+            {
+                append(const_cast<VkBaseOutStructure*>(reinterpret_cast<const VkBaseOutStructure*>(node)));
                 continue;
+            }
 
-            const auto* mode = reinterpret_cast<const VkSwapchainPresentModeInfoEXT*>(node);
+            const size_t size = sizeOf(node->sType);
 
-            if (mode->swapchainCount >= 1 && mode->pPresentModes != nullptr &&
-                mode->pPresentModes[0] == VK_PRESENT_MODE_MAILBOX_KHR)
-                chainedMode = const_cast<VkPresentModeKHR*>(&mode->pPresentModes[0]);
+            if (size == 0 || size > sizeof(chainStore[0]) || used >= 8)
+            {
+                ok = false;
+                break;
+            }
+
+            std::memcpy(chainStore[used], node, size);
+            append(reinterpret_cast<VkBaseOutStructure*>(chainStore[used++]));
         }
 
-        if (chainedMode != nullptr)
-            *chainedMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        if (ok && modeNode != nullptr)
+        {
+            const auto* mode = reinterpret_cast<const VkSwapchainPresentModeInfoEXT*>(modeNode);
+
+            if (mode->swapchainCount == 1 && mode->pPresentModes != nullptr &&
+                mode->pPresentModes[0] == VK_PRESENT_MODE_MAILBOX_KHR)
+            {
+                VkSwapchainPresentModeInfoEXT local = *mode;
+                local.pPresentModes = &localMode;
+                static_assert(sizeof(VkSwapchainPresentModeInfoEXT) <= sizeof(chainStore[0]));
+
+                if (used < 8)
+                {
+                    std::memcpy(chainStore[used], &local, sizeof(local));
+                    append(reinterpret_cast<VkBaseOutStructure*>(chainStore[used++]));
+                    previous->pNext =
+                        const_cast<VkBaseOutStructure*>(reinterpret_cast<const VkBaseOutStructure*>(modeNode->pNext));
+                    modePresent = *info;
+                    modePresent.pNext = first;
+                    info = &modePresent;
+                }
+            }
+        }
     }
 
     if (!DrainWorker(kBlockMs))
@@ -1235,9 +1303,6 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
     AddOurWait(drainedMs - startMs);
 
     const auto result = PresentOn(queue, *info, RemainingMs(kBlockMs, drainedMs - startMs));
-
-    if (chainedMode != nullptr)
-        *chainedMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
     // The swapchain lock and the driver's block (FIFO with a full queue) are the game thread's wait too
     AddOurWait(Util::MillisecondsNow() - drainedMs);
