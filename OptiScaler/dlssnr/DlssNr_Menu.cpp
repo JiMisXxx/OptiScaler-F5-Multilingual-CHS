@@ -685,20 +685,30 @@ static DlssNr::WeightsRules::Models ScanWeightsSet(const std::string& name)
     return m;
 }
 
-static void ModelWeightsCombo(Config* config, bool modelA)
+// cardHelp: the card's one HelpMarker, drawn on the first combo's line
+static void ModelWeightsCombo(Config* config, bool modelA, const char* cardHelp)
 {
     static std::vector<DlssNr::WeightsRules::Set> sets;
     auto& option = modelA ? config->DlssNrWeightsSetA : config->DlssNrWeightsSetB;
     const std::string current = option.value_or_default();
     static const std::string stock = "Stock (the DLL's own)";
 
-    // The current folder may have been removed or have no file for this model: say so instead of showing it as fine
+    // The current folder may have been removed or have no file for this model: say so instead of showing it as fine.
+    // Scanned when the value changes or a list opens, not every frame.
+    static std::string scanned[2];
+    static DlssNr::WeightsRules::Models scannedModels[2];
+    static bool scannedOnce[2] = {};
+    const int slot = modelA ? 0 : 1;
+    if (!scannedOnce[slot] || scanned[slot] != current)
+    {
+        scannedOnce[slot] = true;
+        scanned[slot] = current;
+        scannedModels[slot] = current.empty() ? DlssNr::WeightsRules::Models {} : ScanWeightsSet(current);
+    }
     std::string shown = stock;
     if (!current.empty())
-    {
-        const auto has = ScanWeightsSet(current);
-        shown = (modelA ? has.a : has.b) ? current : current + " (no file for this model)";
-    }
+        shown =
+            (modelA ? scannedModels[slot].a : scannedModels[slot].b) ? current : current + " (no file for this model)";
 
     const char* label = modelA ? "Preset A weights" : "Preset B weights";
     if (ImGui::BeginCombo(label, shown.c_str()))
@@ -706,6 +716,7 @@ static void ModelWeightsCombo(Config* config, bool modelA)
         if (ImGui::IsWindowAppearing())
         {
             sets.clear();
+            scannedOnce[slot] = false;
             std::error_code ec;
             for (const auto& entry : std::filesystem::directory_iterator(DlssNr::Weights::Root(), ec))
                 if (entry.is_directory(ec))
@@ -723,22 +734,24 @@ static void ModelWeightsCombo(Config* config, bool modelA)
                 option = name;
         ImGui::EndCombo();
     }
-    HelpMarker(modelA ? "Weights for every pass on Preset A (main model)."
-                      : "Weights for every pass on Preset B or Default (small model).");
+    if (cardHelp != nullptr)
+        HelpMarker(cardHelp);
 
     if (current.empty())
         return;
 
-    // Preset A (1) runs Model A; Default, B and the legacy 3 run Model B on 310.9 DLLs (310.8 has only Model A, which
-    // this note does not know about). Passes 4 and up use Pass 1's; the driver proxy runs one pass.
+    // Preset A (1) runs Model A; Default, B and the legacy 3 run Model B on 310.9 DLLs (310.8 has only Model A, so
+    // the line says "on 310.9 DLLs": the model DLL's version is not known here). Passes 4 and up use Pass 1's; the
+    // driver proxy runs one pass.
     const unsigned passes =
         config->DlssNrUseProxy.value_or_default() ? 1u : std::max(1u, config->DlssNrPasses.value_or_default());
     bool usesA = false, usesB = false;
     for (unsigned pass = 0; pass < std::min(passes, 3u); ++pass)
         (DlssNr::Profiles::PassPreset(*config, pass) == 1u ? usesA : usesB) = true;
     if (DlssNr::WeightsRules::NotUsedNow(true, modelA, usesA, usesB))
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), modelA ? "Not used now: no pass runs Preset A."
-                                                                  : "Not used now: no pass runs Preset B or Default.");
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                           modelA ? "Not used now: no pass runs Preset A (on 310.9 DLLs)."
+                                  : "Not used now: no pass runs Preset B or Default (on 310.9 DLLs).");
 }
 
 // The card above the passes: the weights are shared by every pass, so they are not part of Pass 1
@@ -746,23 +759,29 @@ static void ModelWeightsCard(Config* config, float menuResScale)
 {
     if (NrCard card("Model weights (all passes)", menuResScale); card.IsOpen())
     {
-        ModelWeightsCombo(config, true);
-        ModelWeightsCombo(config, false);
-        HelpMarker("A weights set is a folder in OptiScaler\nr_weights with weight files exported for this DLL. "
-                   "Every pass on that preset uses it. Stock: the weights inside nvngx_dlssnr.dll. A file is used "
-                   "only by the DLL it was made for; otherwise the stock weights run and OptiScaler.log says why. "
-                   "Changing a set rebuilds Neural Rendering (a short hitch). DirectX 12 and Vulkan (native or "
-                   "bridged); DirectX 11 only when bridged to DirectX 12.");
+        ModelWeightsCombo(
+            config, true,
+            "A weights set is a folder in OptiScaler\\nr_weights with weight files exported for this DLL. Every pass "
+            "on that preset uses it: Preset A is the main model, Preset B and Default the small model. Stock: the "
+            "weights inside nvngx_dlssnr.dll. A file is used only by the DLL it was made for; otherwise the stock "
+            "weights run and OptiScaler.log says why. Changing a set rebuilds Neural Rendering (a short hitch). "
+            "DirectX 12 and Vulkan (native or bridged); DirectX 11 only when bridged to DirectX 12.");
+        ModelWeightsCombo(config, false, nullptr);
 
         // Selection reaches the model on the D3D12 path (native D3D12, or a D3D11/Vulkan bridge to it) and on native
         // Vulkan; a D3D11 game not bridged to D3D12 does not reach it.
         const auto& state = State::Instance();
         const bool reachesModel = DlssNr::IsRunningVk() || state.swapchainApi != API::DX11 ||
                                   state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
-        if (!reachesModel && (!config->DlssNrWeightsSetA.value_or_default().empty() ||
-                              !config->DlssNrWeightsSetB.value_or_default().empty()))
+        const bool anySet = !config->DlssNrWeightsSetA.value_or_default().empty() ||
+                            !config->DlssNrWeightsSetB.value_or_default().empty();
+        if (!reachesModel && anySet)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
                                "No effect here yet: DirectX 11 only when bridged to DirectX 12.");
+        else if (anySet && DlssNr::Weights::g_needsNewForwarder)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                               "These sets need the forwarder from this release (nvngx.dll_dlssnr.dll); both models "
+                               "run stock.");
     }
 }
 

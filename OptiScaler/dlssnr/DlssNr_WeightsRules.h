@@ -23,10 +23,12 @@ struct Models
 inline bool StartsWithNoCase(std::string_view text, std::string_view prefix)
 {
     return text.size() >= prefix.size() &&
-           std::equal(prefix.begin(), prefix.end(), text.begin(),
-                      [](char l, char r) { return std::tolower((unsigned char) l) == std::tolower((unsigned char) r); });
+           std::equal(prefix.begin(), prefix.end(), text.begin(), [](char l, char r)
+                      { return std::tolower((unsigned char) l) == std::tolower((unsigned char) r); });
 }
 
+// A set folder's files are <RESOURCE>.<CRC32>.bin, where RESOURCE is the model DLL's resource name exactly:
+// WEIGHTS_HT (Model A) or WEIGHTS_CC_SMALL_FP8 (Model B). The forwarder matches the resource name exactly too.
 inline void NoteFile(Models& m, std::string_view file)
 {
     if (StartsWithNoCase(file, "WEIGHTS_HT."))
@@ -57,18 +59,43 @@ struct Pair
     bool operator==(const Pair&) const = default;
 };
 
-// The old single [DlssNr] WeightsSet, taken for both models when neither new key is in the file: a model keeps the
-// folder only when the folder has that model's file, else stock. Returns false when nothing is to migrate.
-inline bool Migrate(const std::string& oldSet, bool newKeysPresent, Models oldHas, Pair& out)
+inline bool IsAuto(std::string_view value) { return StartsWithNoCase(value, "auto") && value.size() == 4; }
+
+// The old [DlssNr] WeightsSet, taken for both models when neither new key is in the file. No folder is looked at: the
+// first config read runs before the OptiScaler folder is known, so a folder check there found nothing and dropped the
+// player's set. A model whose file the folder lacks shows that in the menu and runs stock (the forwarder logs it).
+// Empty or "auto" = unset: nothing to migrate.
+inline bool Migrate(const std::string& oldSet, bool newKeysPresent, Pair& out)
 {
     out = {};
-    if (oldSet.empty() || newKeysPresent)
+    if (oldSet.empty() || IsAuto(oldSet) || newKeysPresent)
         return false;
-    if (oldHas.a)
-        out.a = oldSet;
-    if (oldHas.b)
-        out.b = oldSet;
+    out.a = oldSet;
+    out.b = oldSet;
     return true;
+}
+
+// A forwarder without dlssnr_weights_select2 has one folder for both models. It can serve the sets when both models
+// take the same one, or when only one model has a set and that folder holds only that model's file (so the other
+// model finds nothing there and stays stock). Anything else cannot be served: select nothing, both run stock.
+inline bool OldForwarderCanServe(const std::string& a, const std::string& b, Models folderOfTheOnlySet,
+                                 std::string& set)
+{
+    set.clear();
+    if (a == b)
+    {
+        set = a;
+        return true;
+    }
+    if (!a.empty() && !b.empty())
+        return false;
+    const bool onlyA = !a.empty();
+    if (onlyA ? (folderOfTheOnlySet.a && !folderOfTheOnlySet.b) : (folderOfTheOnlySet.b && !folderOfTheOnlySet.a))
+    {
+        set = onlyA ? a : b;
+        return true;
+    }
+    return false;
 }
 
 // The amber "Not used now" line: a set is chosen for a model and no pass runs that model. Passes 1-3 count,

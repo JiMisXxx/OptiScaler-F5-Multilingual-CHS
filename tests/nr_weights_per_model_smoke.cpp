@@ -33,14 +33,47 @@ int main()
     NoteFile(none, "WEIGHTS_HT");
     CHECK(!none.a && !none.b);
 
-    // Migration: both models take the old set only where the folder has that model's file
+    // Migration: both models take the old set, whatever is on disk (the first config read runs before the
+    // OptiScaler folder is known, so there is nothing to look at)
     Pair out;
-    CHECK(Migrate("Strong", false, { true, true }, out) && out.a == "Strong" && out.b == "Strong");
-    CHECK(Migrate("Strong", false, { false, true }, out) && out.a.empty() && out.b == "Strong");
-    CHECK(Migrate("Strong", false, { true, false }, out) && out.a == "Strong" && out.b.empty());
-    CHECK(Migrate("Strong", false, { false, false }, out) && out.a.empty() && out.b.empty()); // migrated, to stock
-    CHECK(!Migrate("Strong", true, { true, true }, out));  // a new key is in the file: nothing to migrate
-    CHECK(!Migrate("", false, { true, true }, out));       // no old set
+    CHECK(Migrate("Strong", false, out) && out.a == "Strong" && out.b == "Strong");
+    CHECK(!Migrate("Strong", true, out)); // a new key is in the file: nothing to migrate
+    CHECK(!Migrate("", false, out));      // no old set
+    CHECK(!Migrate("auto", false, out) && out.a.empty() && out.b.empty()); // "auto" = unset
+    CHECK(!Migrate("AUTO", false, out));
+    CHECK(Migrate("automatic", false, out) && out.a == "automatic"); // only the exact word is unset
+
+    // The failure the first version had: it looked in the folder, found nothing at that time (folder not known yet)
+    // and migrated to stock, which the next Save wrote over the player's set
+    {
+        const auto folderCheckedMigration = [](const std::string& oldSet, Models folder) -> Pair
+        {
+            Pair p;
+            if (!oldSet.empty())
+            {
+                if (folder.a)
+                    p.a = oldSet;
+                if (folder.b)
+                    p.b = oldSet;
+            }
+            return p;
+        };
+        const Pair oldResult = folderCheckedMigration("StrongB-SSS1", Models {}); // no folder access
+        CHECK(oldResult.a.empty() && oldResult.b.empty());                         // the set was lost
+        Migrate("StrongB-SSS1", false, out);
+        CHECK(out.a == "StrongB-SSS1" && out.b == "StrongB-SSS1");                 // now kept for both
+    }
+
+    // An old forwarder (one folder for both models)
+    std::string set;
+    CHECK(OldForwarderCanServe("S", "S", {}, set) && set == "S");
+    CHECK(OldForwarderCanServe("", "", {}, set) && set.empty());
+    CHECK(!OldForwarderCanServe("S", "T", { true, true }, set));
+    CHECK(OldForwarderCanServe("S", "", { true, false }, set) && set == "S");  // only A, folder has only A
+    CHECK(!OldForwarderCanServe("S", "", { true, true }, set));                // folder would also serve B
+    CHECK(OldForwarderCanServe("", "T", { false, true }, set) && set == "T");
+    CHECK(!OldForwarderCanServe("", "T", { true, true }, set));
+    CHECK(!OldForwarderCanServe("S", "", { false, true }, set));               // the folder has no file for A
 
     // Lists: a folder shows only in the list of a model it has a file for; both models -> both lists
     const std::vector<Set> sets = { { "BothSet", { true, true } }, { "OnlyA", { true, false } },

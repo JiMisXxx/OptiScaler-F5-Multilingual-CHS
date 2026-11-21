@@ -29,6 +29,7 @@ Exports:
 
 - `dlssnr_weights_select2(dirA, dirB)`: `WEIGHTS_HT*` (Model A, Preset A) is served from `dirA`,
   `WEIGHTS_CC_SMALL_FP8*` (Model B, Preset B / Default) from `dirB`. Null or empty = the DLL's own.
-  Any other `WEIGHTS_*` resource always gets the DLL's own weights (one log line).
+  The resource name is matched exactly. Any other `WEIGHTS_*` resource now always runs the DLL's own weights,
+  even with a set chosen (one log line); before, one folder was served for every `WEIGHTS_*` resource.
 - `dlssnr_weights_select(dir)`: the first version, one folder for both models (kept for older OptiScaler builds).
 - `dlssnr_weights_take_log(buffer, size)`: the log lines since the last call.

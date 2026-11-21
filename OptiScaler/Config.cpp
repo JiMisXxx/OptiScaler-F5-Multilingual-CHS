@@ -1095,35 +1095,20 @@ std::string GetFloatValue(std::optional<float> value)
     return std::to_string(value.value());
 }
 
-// Which models a set folder under OptiScaler/nr_weights has files for (empty or not a plain folder name: none)
-static DlssNr::WeightsRules::Models WeightsFolderModels(const std::string& name)
-{
-    DlssNr::WeightsRules::Models models;
-    if (name.empty() || name.find_first_of("\\/:") != std::string::npos || name.find("..") != std::string::npos)
-        return models;
-
-    const auto root =
-        std::filesystem::path(Config::Instance()->MainDllPath.value_or(Util::DllPath().parent_path().wstring())) /
-        L"nr_weights";
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(root / string_to_wstring(name), ec))
-        DlssNr::WeightsRules::NoteFile(models, wstring_to_string(entry.path().filename().wstring()));
-    return models;
-}
-
 // The old [DlssNr] WeightsSet (one folder for both models) becomes WeightsSetA and WeightsSetB when the file has
-// neither new key; the next Save writes the new keys and no old one.
-static bool MigrateWeightsSet(const std::string& oldSet, bool newKeysPresent, DlssNr::WeightsRules::Pair& out)
+// neither new key (both models take it, no folder is looked at: see WeightsRules::Migrate); the next Save writes the
+// new keys and no old one. Logged once per source: the ini, and a profile.
+static bool MigrateWeightsSet(const std::string& oldSet, bool fromProfile, DlssNr::WeightsRules::Pair& out)
 {
-    if (!DlssNr::WeightsRules::Migrate(oldSet, newKeysPresent, WeightsFolderModels(oldSet), out))
+    if (!DlssNr::WeightsRules::Migrate(oldSet, false, out))
         return false;
 
-    static bool logged = false;
-    if (!logged)
+    static bool logged[2] = {};
+    if (!logged[fromProfile])
     {
-        logged = true;
-        LOG_INFO("NR model weights: old WeightsSet '{}' taken for Model A: '{}', Model B: '{}' (empty = stock)", oldSet,
-                 out.a, out.b);
+        logged[fromProfile] = true;
+        LOG_INFO("NR model weights: old WeightsSet '{}' in the {} taken for Model A and Model B", oldSet,
+                 fromProfile ? "profile" : "ini");
     }
     return true;
 }
@@ -1790,7 +1775,7 @@ static DlssNrProfiles::Section KeptSection(const CSimpleIniA& from)
         old != nullptr && !section.contains("WeightsSetA") && !section.contains("WeightsSetB"))
     {
         DlssNr::WeightsRules::Pair migrated;
-        if (MigrateWeightsSet(old, false, migrated))
+        if (MigrateWeightsSet(old, true, migrated))
         {
             section["WeightsSetA"] = migrated.a;
             section["WeightsSetB"] = migrated.b;

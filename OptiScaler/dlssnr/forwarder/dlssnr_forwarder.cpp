@@ -143,8 +143,9 @@ HRSRC WINAPI hkFindResourceA(HMODULE module, LPCSTR name, LPCSTR type)
     std::lock_guard<std::mutex> lock(g_mutex);
     HGLOBAL handle = LoadResource(module, resource); // the same handle the model's own LoadResource gets
     g_served.erase(handle);
-    const bool isA = strncmp(name, "WEIGHTS_HT", 10) == 0;
-    const bool isB = strncmp(name, "WEIGHTS_CC_SMALL_FP8", 20) == 0;
+    // The resource name exactly (a set's files are <name>.<CRC32>.bin, which is what OptiScaler lists them by)
+    const bool isA = strcmp(name, "WEIGHTS_HT") == 0;
+    const bool isB = strcmp(name, "WEIGHTS_CC_SMALL_FP8") == 0;
     const std::wstring& setDir = isA ? g_dirA : g_dirB;
     if (!isA && !isB) // a resource that belongs to neither model: always the DLL's own
     {

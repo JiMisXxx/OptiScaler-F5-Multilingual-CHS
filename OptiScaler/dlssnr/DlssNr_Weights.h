@@ -5,6 +5,7 @@
 #include <dlssnr/DlssNr_WeightsRules.h>
 #include <misc/CustomProviders.h>
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -44,6 +45,9 @@ inline void Load(Exports& exports, HMODULE forwarder)
     exports.select = (SelectFn) GetProcAddress(forwarder, "dlssnr_weights_select");
 }
 
+// Set by Select: the chosen sets cannot be served (old forwarder, or none); the menu says so
+inline std::atomic<bool> g_needsNewForwarder { false };
+
 inline std::wstring Dir(const std::string& set, const char* api)
 {
     const auto dir = Folder(set).wstring();
@@ -53,10 +57,11 @@ inline std::wstring Dir(const std::string& set, const char* api)
 }
 
 // Hands the forwarder the sets the next feature create reads, one per model (both APIs: it watches the model DLL
-// either way). An older forwarder has one folder for both models: used when both models take the same set or only
-// one model has a set; two different sets need the forwarder from this release.
+// either way). An older forwarder has one folder for both models (WeightsRules::OldForwarderCanServe); sets it cannot
+// serve are not selected at all, both models run stock, and g_needsNewForwarder says so.
 inline void Select(const Exports& exports, const std::string& setA, const std::string& setB, const char* api)
 {
+    g_needsNewForwarder = false;
     if (exports.select2 != nullptr)
     {
         const auto dirA = Dir(setA, api);
@@ -67,18 +72,32 @@ inline void Select(const Exports& exports, const std::string& setA, const std::s
     if (exports.select == nullptr)
     {
         if (!setA.empty() || !setB.empty())
+        {
+            g_needsNewForwarder = true;
             LOG_WARN("DLSS-NR{}: Model weights need the forwarder from this release (nvngx.dll_dlssnr.dll); "
                      "the DLL's own weights are used",
                      api);
+        }
         return;
     }
-    std::string set = setA.empty() ? setB : setA;
-    if (!setA.empty() && !setB.empty() && setA != setB)
+
+    WeightsRules::Models onlySet;
+    const std::string& single = setA.empty() ? setB : setA;
+    if (setA.empty() != setB.empty() && !Folder(single).empty())
     {
-        LOG_WARN("DLSS-NR{}: The forwarder is too old for separate Model A and Model B weights (nvngx.dll_dlssnr.dll "
-                 "from this release); Model A uses '{}', Model B the DLL's own",
-                 api, setA);
-        set = setA;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(Folder(single), ec))
+            WeightsRules::NoteFile(onlySet, wstring_to_string(entry.path().filename().wstring()));
+    }
+    std::string set;
+    if (!WeightsRules::OldForwarderCanServe(setA, setB, onlySet, set))
+    {
+        g_needsNewForwarder = true;
+        LOG_WARN("DLSS-NR{}: This forwarder (nvngx.dll_dlssnr.dll) is too old for these Model A and Model B weights "
+                 "('{}', '{}'); both models run the DLL's own weights. Use the forwarder from this release.",
+                 api, setA, setB);
+        exports.select(L"");
+        return;
     }
     const auto dir = Dir(set, api);
     exports.select(dir.c_str());
