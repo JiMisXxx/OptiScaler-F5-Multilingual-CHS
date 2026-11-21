@@ -42,14 +42,14 @@ inline const char* OutputName(Output output)
     }
 }
 
-// The FG Output combo's entry: the name, and where the route is the native swapchain a note on the two that need
-// the bridge, so it is read before the entry is chosen.
+// The FG Output combo's entry: the name, and where the route is the native swapchain a short note on the two that
+// need the bridge, so it is read before the entry is chosen (short: the combo's preview shows it too).
 inline std::string OutputLabel(Output output, bool nativeRoute)
 {
     std::string label = OutputName(output);
 
     if (nativeRoute && OutputNeedsBridge(output))
-        label += " (needs the bridge)";
+        label += " (bridge)";
 
     return label;
 }
@@ -82,30 +82,102 @@ inline std::string BridgeNeededLine(Output chosen)
     return std::string(OutputName(chosen)) + " runs on D3D12: it needs the Vulkan bridge.";
 }
 
-// Where Neural Rendering runs. The game's upscaler runs on its D3D12 copy (dlss_12, ffx_12, fsr21_12) while the route is
-// on, and stays there when the route is left through the ini (on12Backend); Neural Rendering follows it. Optical F5Low's
-// modes run it on Vulkan, with the bridge only presenting.
+// Where Neural Rendering runs on a Vulkan game. The native seam runs it on Vulkan; every other way runs it on a D3D12
+// device of its own: the game's upscaler on its D3D12 copy (the route, or a *_12 upscaler chosen as the Vulkan one),
+// Optical F5Low's NR only / NR + frame generation (private device, or the bridge's, with copies), and Finished Picture.
 enum class RunsOn
 {
+    NrOff,
     Vulkan,
-    D3D12Bridge
+    D3D12GameCopy, // the game's upscaler on its D3D12 copy, the route is off or the bridge is not up yet
+    D3D12Bridge,   // the same, the route on and the bridge up
+    D3D12F5Low,    // Optical F5Low's NR only / NR + frame generation
+    D3D12FinishedPicture,
+    D3D12,                    // running on D3D12, which no setting explains
+    FinishedPictureNotRunning // Finished Picture is on and does not run on Vulkan (yet)
 };
 
-inline RunsOn NrRunsOn(bool routeOn, bool on12Backend)
+// Whether Finished Picture runs on a native Vulkan game (it is made there by a Vulkan frame source on a private D3D12
+// device). False where this branch's base is; the branch that adds it sets it true: the rule below is the only place.
+inline constexpr bool kFinishedPictureRunsOnVulkan = false;
+
+struct NrInputs
 {
-    return routeOn || on12Backend ? RunsOn::D3D12Bridge : RunsOn::Vulkan;
+    bool nrEnabled = false;
+    bool routeOn = false;
+    bool bridgeUp = false;
+    bool upscalerOnD3D12 = false; // the Vulkan upscaler setting is a *_12 one
+    bool motionModeOn = false;    // Optical F5Low NR only or NR + frame generation
+    bool finishedPicture = false; // the setting (the route turns it off)
+    bool finishedPictureRunsOnVulkan = kFinishedPictureRunsOnVulkan;
+    bool runningVk = false;    // DlssNr::IsRunningVk(): the native Vulkan seam is running Neural Rendering
+    bool runningD3D12 = false; // DlssNr::IsRunning(): the D3D12 side is
+};
+
+inline RunsOn NrRunsOn(const NrInputs& in)
+{
+    if (!in.nrEnabled)
+        return RunsOn::NrOff;
+
+    // What is running wins over what the settings suggest
+    if (in.runningVk)
+        return RunsOn::Vulkan;
+
+    RunsOn byDesign = RunsOn::Vulkan;
+
+    if (in.routeOn)
+        byDesign = in.bridgeUp ? RunsOn::D3D12Bridge : RunsOn::D3D12GameCopy;
+    else if (in.motionModeOn)
+        byDesign = RunsOn::D3D12F5Low;
+    else if (in.finishedPicture)
+        byDesign = in.finishedPictureRunsOnVulkan ? RunsOn::D3D12FinishedPicture : RunsOn::FinishedPictureNotRunning;
+    else if (in.upscalerOnD3D12)
+        byDesign = RunsOn::D3D12GameCopy;
+
+    if (in.runningD3D12 && (byDesign == RunsOn::Vulkan || byDesign == RunsOn::FinishedPictureNotRunning))
+        return RunsOn::D3D12;
+
+    return byDesign;
 }
 
-inline const char* RunsOnText(RunsOn runsOn)
+// The route card's line, and the Neural Rendering pages' (which already have the NR off line above it: nothing here).
+inline std::string RunsOnText(RunsOn runsOn)
 {
-    return runsOn == RunsOn::D3D12Bridge ? "D3D12 (Vulkan bridge)" : "Vulkan (native swapchain)";
+    switch (runsOn)
+    {
+    case RunsOn::Vulkan:
+        return "Vulkan (native swapchain)";
+    case RunsOn::D3D12GameCopy:
+        return "D3D12 (game's upscaler copy)";
+    case RunsOn::D3D12Bridge:
+        return "D3D12 (Vulkan bridge)";
+    case RunsOn::D3D12F5Low:
+        return "D3D12 (Optical F5Low, copies)";
+    case RunsOn::D3D12FinishedPicture:
+        return "D3D12 (Finished Picture, copies)";
+    case RunsOn::D3D12:
+        return "D3D12";
+    case RunsOn::FinishedPictureNotRunning:
+        return "none (Finished Picture does not run on Vulkan yet)";
+    default:
+        return "off";
+    }
 }
+
+inline std::string CardRunsOnLine(RunsOn runsOn)
+{
+    return runsOn == RunsOn::NrOff ? "Neural Rendering is off." : "Neural Rendering runs on: " + RunsOnText(runsOn);
+}
+
+// The page line is not drawn while Neural Rendering is off
+inline std::string PageRunsOnLine(RunsOn runsOn) { return "Runs on: " + RunsOnText(runsOn); }
 
 // The route is off, no Optical F5Low mode is on (it makes the upscaler call itself), and the Vulkan upscaler setting is
-// still a D3D12 copy: Neural Rendering silently stays on D3D12.
-inline bool LeftoverD3D12Upscaler(bool routeOffered, bool routeOn, bool motionModeOn, bool on12Backend)
+// DLSS on D3D12: only the route sets that one (the others, ffx_12 and fsr21_12, are choices of the Upscaler page), so
+// Neural Rendering silently stays on D3D12.
+inline bool LeftoverD3D12Upscaler(bool routeOffered, bool routeOn, bool motionModeOn, bool dlssOn12Backend)
 {
-    return routeOffered && !routeOn && !motionModeOn && on12Backend;
+    return routeOffered && !routeOn && !motionModeOn && dlssOn12Backend;
 }
 
 inline std::string LeftoverLine(const std::string& backendCode)
@@ -117,22 +189,37 @@ inline std::string LeftoverLine(const std::string& backendCode)
 inline const char* NativeSummary() { return "Native swapchain: FSR FG, DLSS-G. One device, no copies."; }
 inline const char* BridgeSummary() { return "Bridge: also F5Low, XeFG. Adds a D3D12 device and copies."; }
 
-// The Status page's "Vulkan route" row. The F5Low modes: the bridge presents, Neural Rendering stays on Vulkan.
+// The Status page's "Vulkan route" row: the route, then where Neural Rendering runs.
 inline std::string StatusText(bool routeOn, bool f5lowFrameGeneration, bool leftover, bool bridgeUp,
-                              const std::string& backendCode)
+                              const std::string& backendCode, RunsOn runsOn)
 {
+    std::string text;
+
     if (routeOn)
-        return "Bridge, game's upscaler (Neural Rendering on D3D12)";
+        text = "Bridge, game's upscaler";
+    else if (f5lowFrameGeneration)
+        text = "Bridge, Optical F5Low NR + frame generation";
+    else if (leftover)
+        text = "Native swapchain, but the upscaler is still " + backendCode;
+    else if (bridgeUp)
+        text = "Native swapchain after a restart (the bridge is still up)";
+    else
+        text = "Native swapchain";
 
-    if (f5lowFrameGeneration)
-        return "Bridge, Optical F5Low NR + frame generation (Neural Rendering on Vulkan)";
-
-    if (leftover)
-        return "Native swapchain, but the upscaler is still " + backendCode + " (Neural Rendering on D3D12)";
-
-    if (bridgeUp)
-        return "Native swapchain after a restart (the bridge is still up)";
-
-    return "Native swapchain (Neural Rendering on Vulkan)";
+    switch (runsOn)
+    {
+    case RunsOn::NrOff:
+        return text + " (Neural Rendering off)";
+    case RunsOn::Vulkan:
+        return text + " (Neural Rendering on Vulkan)";
+    case RunsOn::D3D12F5Low:
+        return text + " (Neural Rendering on D3D12, Optical F5Low copies)";
+    case RunsOn::D3D12FinishedPicture:
+        return text + " (Neural Rendering on D3D12, Finished Picture copies)";
+    case RunsOn::FinishedPictureNotRunning:
+        return text + " (Finished Picture does not run on Vulkan yet)";
+    default:
+        return text + " (Neural Rendering on D3D12)";
+    }
 }
 } // namespace DlssNrVulkanRoute

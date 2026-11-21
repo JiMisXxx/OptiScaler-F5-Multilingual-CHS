@@ -221,9 +221,9 @@ inline std::string NeuralRenderingText(bool enabled, const std::string& failure,
 
 // The "Vulkan route" row of a Vulkan game (the words are DlssNr_VulkanRoute.h's, as the route card reads them)
 inline std::string VulkanRouteText(bool routeOn, bool f5lowFrameGeneration, bool leftover, bool bridgeUp,
-                                   const std::string& backendCode)
+                                   const std::string& backendCode, DlssNrVulkanRoute::RunsOn runsOn)
 {
-    return DlssNrVulkanRoute::StatusText(routeOn, f5lowFrameGeneration, leftover, bridgeUp, backendCode);
+    return DlssNrVulkanRoute::StatusText(routeOn, f5lowFrameGeneration, leftover, bridgeUp, backendCode, runsOn);
 }
 
 // Optical F5Low's mode, and whether it stands aside because the game calls an upscaler of its own

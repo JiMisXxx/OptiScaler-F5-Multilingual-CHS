@@ -1207,8 +1207,8 @@ static void EnterGameUpscalerRoute(Config* config)
     // D3D12 one: rebuilt all the same, so it is made on the bridge's device (IFeature_VkwDx12::CreateDx12Device).
     const Upscaler target = FeatureProvider_Vk::On12For(current);
 
-    if (target != current)
-        g_backendBeforeRoute = current;
+    // Recorded even when it is already a D3D12 copy (an ffx_12 the player chose): leaving the route goes back to it
+    g_backendBeforeRoute = current;
 
     SwitchVulkanBackend(config, target);
 }
@@ -1236,7 +1236,8 @@ static const char* VulkanBackendCode(Upscaler backend)
 }
 
 // Back to the Vulkan upscaler the route replaced: the one remembered this session, else (the route came from the ini,
-// or a restart came between) the one the D3D12 copy stands in for. The ini keeps no key of its own for it.
+// or a restart came between) DLSS for dlss_12, the only D3D12 copy the route alone sets. The ini keeps no key of its
+// own for it; an ffx_12 or fsr21_12 is a choice of the Upscaler page and stays.
 static void LeaveGameUpscalerRoute(Config* config)
 {
     Upscaler back;
@@ -1249,7 +1250,7 @@ static void LeaveGameUpscalerRoute(Config* config)
     {
         const Upscaler current = config->VulkanUpscaler.value_or_default();
 
-        if (!FeatureProvider_Vk::IsOn12(current))
+        if (current != Upscaler::DLSS_on12)
             return;
 
         back = FeatureProvider_Vk::Off12For(current);
@@ -5365,11 +5366,34 @@ struct VulkanRouteState
     bool f5lowFg = false; // Optical F5Low's NR + frame generation
     bool bridgeUp = false;
     bool gameCallsUpscaler = false;
-    bool leftover = false; // the route is off but the Vulkan upscaler is still a D3D12 copy
+    bool leftover = false; // the route is off but the Vulkan upscaler is still dlss_12, which only the route sets
     Upscaler backend = Upscaler::FSR22;
+    DlssNrVulkanRoute::RunsOn runsOn = DlssNrVulkanRoute::RunsOn::Vulkan;
 };
 
-static VulkanRouteState ReadVulkanRoute(Config* config)
+static VulkanRouteState g_routeCache;
+static int g_routeCacheFrame = -1;
+
+// Read once per drawn frame (the card, the combo, the pages and the Status page all ask); a click that changes the
+// route drops it, so the rest of that frame reads the new state.
+static void DropVulkanRouteCache() { g_routeCacheFrame = -1; }
+
+static VulkanRouteState ReadVulkanRouteNow(Config* config);
+
+static const VulkanRouteState& ReadVulkanRoute(Config* config)
+{
+    const int frame = ImGui::GetFrameCount();
+
+    if (frame != g_routeCacheFrame)
+    {
+        g_routeCache = ReadVulkanRouteNow(config);
+        g_routeCacheFrame = frame;
+    }
+
+    return g_routeCache;
+}
+
+static VulkanRouteState ReadVulkanRouteNow(Config* config)
 {
     using namespace DlssNrNativeMode;
 
@@ -5389,13 +5413,26 @@ static VulkanRouteState ReadVulkanRoute(Config* config)
     state.gameCallsUpscaler = NativeGameCallsUpscaler(api);
     state.backend = config->VulkanUpscaler.value_or_default();
     state.leftover = DlssNrVulkanRoute::LeftoverD3D12Upscaler(true, state.routeOn, shown != Shown::Off,
-                                                              FeatureProvider_Vk::IsOn12(state.backend));
+                                                              state.backend == Upscaler::DLSS_on12);
+
+    DlssNrVulkanRoute::NrInputs in;
+    in.nrEnabled = config->DlssNrEnabled.value_or_default();
+    in.routeOn = state.routeOn;
+    in.bridgeUp = state.bridgeUp;
+    in.upscalerOnD3D12 = FeatureProvider_Vk::IsOn12(state.backend);
+    in.motionModeOn = shown == Shown::NrOnly || shown == Shown::NrAndFrameGeneration;
+    in.finishedPicture = config->DlssNrFinishedPicture.value_or_default();
+    in.runningVk = DlssNr::IsRunningVk();
+    in.runningD3D12 = DlssNr::IsRunning();
+    state.runsOn = DlssNrVulkanRoute::NrRunsOn(in);
     return state;
 }
 
 // The route card's second choice, also the "Use the bridge" button of the output combo.
 static void UseBridgeRoute(Config* config)
 {
+    DropVulkanRouteCache();
+
     // Frame generation reads the game's upscaler call: the motion modes stand down, and NR, if on, runs on that call's
     // output (after SR), not on the finished picture.
     const DlssNrNativeMode::Keys keys = DlssNrNativeMode::KeysForRouteOn();
@@ -5423,14 +5460,16 @@ static void DrawLeftoverFix(Config* config, const VulkanRouteState& route, const
     const Upscaler back = FeatureProvider_Vk::Off12For(route.backend);
 
     ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
-    ImGui::TextWrapped("%s Use the Vulkan one.",
-                       DlssNrVulkanRoute::LeftoverLine(VulkanBackendCode(route.backend)).c_str());
+    ImGui::TextWrapped("%s", DlssNrVulkanRoute::LeftoverLine(VulkanBackendCode(route.backend)).c_str());
     ImGui::PopStyleColor();
 
     const std::string label = std::string("Use the Vulkan upscaler (") + VulkanBackendCode(back) + ")##leftover" + id;
 
     if (ImGui::SmallButton(label.c_str()))
+    {
+        DropVulkanRouteCache();
         SwitchVulkanBackend(config, back);
+    }
 
     ImGui::Spacing();
 }
@@ -5447,8 +5486,9 @@ StatusSummary CurrentStatusSummary(Config* config)
     summary.backend = BackendName();
 
     if (const auto route = ReadVulkanRoute(config); route.offered)
-        summary.vulkanRoute = DlssNrVulkanRoute::StatusText(route.routeOn, route.f5lowFg, route.leftover,
-                                                            route.bridgeUp, VulkanBackendCode(route.backend));
+        summary.vulkanRoute =
+            DlssNrVulkanRoute::StatusText(route.routeOn, route.f5lowFg, route.leftover, route.bridgeUp,
+                                          VulkanBackendCode(route.backend), route.runsOn);
 
     return summary;
 }
@@ -5627,8 +5667,7 @@ void RenderVulkanRoute(Config* config)
 
     ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
     ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
-    ImGui::TextDisabled("Neural Rendering runs on: %s",
-                        DlssNrVulkanRoute::RunsOnText(DlssNrVulkanRoute::NrRunsOn(routeOn, route.leftover)));
+    ImGui::TextDisabled("%s", DlssNrVulkanRoute::CardRunsOnLine(route.runsOn).c_str());
     DrawLeftoverFix(config, route, "route");
 
     if (f5lowFg)
@@ -5689,12 +5728,15 @@ void RenderVulkanRunsOn(Config* config)
     if (!route.offered)
         return;
 
-    ImGui::TextDisabled("Runs on: %s",
-                        DlssNrVulkanRoute::RunsOnText(DlssNrVulkanRoute::NrRunsOn(route.routeOn, route.leftover)));
-    ImGui::SameLine();
-    HelpMarker("Native swapchain: Neural Rendering runs on Vulkan, in the game's own device.\n"
-               "Bridge (Frame Generation page, Vulkan route): the game's upscaler runs on its D3D12 copy and Neural "
-               "Rendering runs on D3D12.");
+    if (route.runsOn != DlssNrVulkanRoute::RunsOn::NrOff)
+    {
+        ImGui::TextDisabled("%s", DlssNrVulkanRoute::PageRunsOnLine(route.runsOn).c_str());
+        ImGui::SameLine();
+        HelpMarker("Native swapchain: Neural Rendering runs on Vulkan, in the game's own device.\n"
+                   "Everything else runs it on a D3D12 device with copies: the game's upscaler on its D3D12 copy "
+                   "(Frame Generation page, Vulkan route), Optical F5Low, and Finished Picture.");
+    }
+
     DrawLeftoverFix(config, route, "nrpage");
 }
 
@@ -5735,7 +5777,7 @@ void RenderBridgeNeeded(Config* config, uint32_t fgOutput)
     }
     else
     {
-        if (ImGui::SmallButton("Use Optical F5Low NR + frame generation##fgbridge"))
+        if (ImGui::SmallButton("Set on the Optical F5Low page##fgbridge"))
             MenuPages::RequestPage(MenuPages::Page::NrF5Low);
 
         // A game often makes no upscaler call only for a while (its menus): the route stays one click away

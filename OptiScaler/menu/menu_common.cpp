@@ -4059,8 +4059,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                   (uint32_t) DlssNrVulkanRoute::Output::DLSSG == (uint32_t) FGOutput::DLSSG &&
                   (uint32_t) DlssNrVulkanRoute::Output::XeFG == (uint32_t) FGOutput::XeFG &&
                   (uint32_t) DlssNrVulkanRoute::Output::F5Low == (uint32_t) FGOutput::F5Low);
-    for (auto& option : outputOptions)
-        option.label = DlssNrVulkanRoute::OutputLabel((DlssNrVulkanRoute::Output) option.value, vulkanNativeRoute);
+    for (const auto output : { FGOutput::XeFG, FGOutput::F5Low })
+        outputOptions[(uint32_t) output].label =
+            DlssNrVulkanRoute::OutputLabel((DlssNrVulkanRoute::Output) output, vulkanNativeRoute);
 
     // F5Low output requirements: the XeFG ones, plus an NVIDIA GPU and f5low.dll in the plugins folder
     auto constexpr f5lowOutputIndex = (uint32_t) FGOutput::F5Low;
