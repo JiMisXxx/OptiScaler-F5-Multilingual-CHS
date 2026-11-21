@@ -1270,6 +1270,7 @@ class Config
     // [F5Low] KeepGameDlssg: with the DLSS-G generator the game's own nvngx_dlssg.dll is kept from loading (two DLSS-G
     // copies fault the GPU); true lets it load
     CustomOptional<bool> F5LowKeepGameDlssg { false };
+    CustomOptional<bool> F5LowVulkanLatencyGate { true }; // F5Low on Vulkan: bound how far the game runs ahead
     // Keeps Streamline from picking up the driver's OTA/downloaded plugins; only files in
     // OptiScaler/streamline are used for sl.* plugins and nvngx_dlssg.dll
     CustomOptional<bool> FGStreamlineIgnoreOTA { false };

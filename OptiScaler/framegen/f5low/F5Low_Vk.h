@@ -66,23 +66,33 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     // ahead, present metering lets the RTX 50 display hardware space the flips of a batch
     bool _presentWaitOn = false;
     bool _meteringAvailable = false;
-    bool _meteringOn = false;
-    bool _gateOn = false;
+    std::atomic<bool> _meteringOn { false };
+    std::atomic<bool> _meterWasOn { false }; // the last batch was metered: the next present that is not closes it
+    std::atomic<bool> _gateEnabled { false };
     uint32_t _gateBound = 0;
-    uint32_t _gateTimeouts = 0;
+    int _presentMode = 0;
+    std::mutex _gateMutex; // _gate, the ids, _meterHealth
+    F5LowVk::GateState _gate;
+    F5LowVk::MeterHealth _meterHealth;
     uint64_t _ownPresentId = 0;
     uint64_t _issuedIds[F5LowVk::kGateRing] {};
     uint64_t _issuedCount = 0;
-    uint64_t _frameOwnId = 0;  // the id this frame's present carries when the game chained none
-    uint32_t _inlineBatch = 0; // generated + 1 of a frame whose generated frames ran inline (no worker)
+    uint64_t _frameOwnId = 0; // the id this frame's present carries when the game chained none
+    uint32_t _inlineBatch =
+        0; // presented generated frames + 1 of a frame whose generated frames ran inline (no worker)
     uint32_t _gameMinImages = 0;
+    uint32_t _meterLogs = 0;
+    uint32_t _lastFeedback = 0;
+    std::vector<VkBool32*>
+        _switchedFlags; // feature flags switched on in the game's own structs, put back after the create
     std::vector<const char*> _deviceExtensions;
     VkPhysicalDevicePresentIdFeaturesKHR _presentIdFeature {};
     VkPhysicalDevicePresentWaitFeaturesKHR _presentWaitFeature {};
     VkPhysicalDevicePresentMeteringFeaturesNV _meteringFeature {};
     bool DecideMetering();
     void NoteIssued(uint64_t id);
-    void GateAcquire(VkDevice device, VkSwapchainKHR swapchain);
+    bool GateAcquire(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeoutNs);
+    void NoteMeterFeedback(VkResult result, uint32_t feedback);
     bool _loggedGenerating = false; // the first generated frame of this swapchain was logged
 
     void SetReason(const std::string& reason);
@@ -104,7 +114,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
 
     // The generated frames of a job: acquire, copy, present, spaced. On the worker, or on the game thread without a
     // present queue. Returns after the last generated frame was presented.
-    void RunGenerated(const Job& job, bool paced);
+    uint32_t RunGenerated(const Job& job, bool paced);
     bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);
     VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD lockTimeoutMs);
     VkResult DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, uint64_t ownId = 0, uint32_t meterBatch = 0);

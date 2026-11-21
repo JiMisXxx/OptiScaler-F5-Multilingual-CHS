@@ -148,17 +148,49 @@ int main()
     CHECK(SpareImagesUpFront(3) == 3);
     CHECK(SpareImagesUpFront(0) == 1);
     CHECK(SpareImagesUpFront(9) == 5);
+    CHECK(SpareImagesToAsk(true, 5, 2) == 5);  // bounded: the most
+    CHECK(SpareImagesToAsk(false, 5, 2) == 2); // no bound: what the multiplier needs
+    CHECK(SpareImagesToAsk(false, 3, 5) == 3);
     CHECK(LatencyBound(4) == 3);
-    CHECK(LatencyBound(2) == 1);
-    CHECK(LatencyBound(1) == 1);
+    CHECK(LatencyBound(3) == 2);
+    CHECK(LatencyBound(2) == 2); // never below 2
+    CHECK(LatencyBound(1) == 2);
     CHECK(GateUsable(3));
     CHECK(!GateUsable(kGateRing));
     CHECK(GateWaitNumber(0, 3) == 0); // nothing issued: no wait
     CHECK(GateWaitNumber(2, 3) == 0); // third present may go out
     CHECK(GateWaitNumber(3, 3) == 1); // the fourth needs the first on screen
     CHECK(GateWaitNumber(10, 3) == 8);
+    CHECK(OwnIdAfterGame(5, 9) == 9);
+    CHECK(OwnIdAfterGame(9, 5) == 9);
 
-    // flip metering: f5low's words, auto = RTX 50, needs the device feature
+    // the gate gives up after 5 timeouts in a row, neutral results change nothing, it comes back later
+    {
+        GateState gate;
+        for (uint32_t i = 0; i < kGateGiveUp - 1; ++i)
+            GateOnWait(gate, WaitOutcome::Timeout, 10.0);
+        CHECK(gate.on);
+        GateOnWait(gate, WaitOutcome::Neutral, 11.0);
+        CHECK(gate.on && gate.timeouts == kGateGiveUp - 1);
+        GateOnWait(gate, WaitOutcome::Done, 12.0); // a good wait clears the count
+        CHECK(gate.timeouts == 0);
+        for (uint32_t i = 0; i < kGateGiveUp; ++i)
+            GateOnWait(gate, WaitOutcome::Timeout, 100.0);
+        CHECK(!gate.on);
+        GateOnPresent(gate, 200.0);
+        CHECK(!gate.on);
+        for (uint32_t i = 0; i < kGateRearmPresents; ++i)
+            GateOnPresent(gate, 200.0 + i);
+        CHECK(gate.on && gate.timeouts == 0); // 120 presents
+        for (uint32_t i = 0; i < kGateGiveUp; ++i)
+            GateOnWait(gate, WaitOutcome::Timeout, 1000.0);
+        CHECK(!gate.on);
+        GateOnPresent(gate, 1000.0 + kGateRearmMs); // or 3 s
+        CHECK(gate.on);
+    }
+
+    // flip metering: f5low's words; without the pacer export it is off unless forced on, never on V-Sync or without
+    // the device extension
     CHECK(FlipMeteringForced("auto") == -1);
     CHECK(FlipMeteringForced("") == -1);
     CHECK(FlipMeteringForced(nullptr) == -1);
@@ -171,13 +203,35 @@ int main()
     CHECK(FlipMeteringForced("yes") == 1);
     CHECK(FlipMeteringForced("sometimes") == -1);
     CHECK(FlipMeteringForced("averyverylongword") == -1);
-    CHECK(MeteringOn(-1, true, true));
-    CHECK(!MeteringOn(-1, false, true));  // auto on an older GPU
-    CHECK(MeteringOn(1, false, true));    // forced on
-    CHECK(!MeteringOn(0, true, true));    // forced off
-    CHECK(!MeteringOn(1, true, false));   // no extension on the device
-    CHECK(PacedOnCpu(false));
-    CHECK(!PacedOnCpu(true));
+    CHECK(!MeteringOn(-1, true, false)); // auto = off here
+    CHECK(MeteringOn(1, true, false));   // forced on
+    CHECK(!MeteringOn(1, true, true));   // V-Sync paces
+    CHECK(!MeteringOn(1, false, false)); // no extension
+    CHECK(!MeteringOn(0, true, false));
+    CHECK(PacedOnCpu(false) && !PacedOnCpu(true));
+    CHECK(VsyncPaces(2) && VsyncPaces(3) && !VsyncPaces(0) && !VsyncPaces(1));
+
+    // the driver's feedback: 8 bad in a row turn it off, a good one clears the count
+    {
+        MeterHealth health;
+        for (uint32_t i = 0; i < kMeterRefusals - 1; ++i)
+            MeterNote(health, MeterNegative(false, 1));
+        CHECK(!health.off);
+        MeterNote(health, MeterNegative(false, 0));
+        CHECK(health.bad == 0);
+        for (uint32_t i = 0; i < kMeterRefusals; ++i)
+            MeterNote(health, MeterNegative(true, 0));
+        CHECK(health.off);
+        MeterNote(health, false);
+        CHECK(health.off);
+    }
+
+    // batch size on a present: presented + 1 when metered, 1 to close a metered run, else none
+    CHECK(BatchConfig(true, false, 3) == 4);
+    CHECK(BatchConfig(true, true, 1) == 2);  // a cut-short batch
+    CHECK(BatchConfig(true, true, 0) == 1);
+    CHECK(BatchConfig(false, true, 0) == 1); // closes the metered run
+    CHECK(BatchConfig(false, false, 0) == 0);
 
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);

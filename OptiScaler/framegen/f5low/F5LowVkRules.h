@@ -196,10 +196,21 @@ inline uint32_t SpareImagesUpFront(int maxInterpolations)
     return static_cast<uint32_t>(std::clamp(maxInterpolations, 1, static_cast<int>(kMaxGenerated)));
 }
 
+// The spare images to ask for: the most the session may generate when the latency bound keeps them from adding queue
+// depth, else only what the multiplier needs (and a recreate when it is raised).
+inline uint32_t SpareImagesToAsk(bool bounded, int maxInterpolations, int wanted)
+{
+    return bounded ? SpareImagesUpFront(maxInterpolations) : SpareImagesUpFront(std::min(wanted, maxInterpolations));
+}
+
 // The game's latency bound: how many of its presents may be unshown at once. Without us it had gameMinImages images,
-// one on screen and the rest in flight. The extra images must not add depth to that, whatever the multiplier.
+// one on screen and the rest in flight; never below 2, a bound of 1 would serialise a game that is not generating.
 inline constexpr uint32_t kGateRing = 8; // present ids remembered
-inline uint32_t LatencyBound(uint32_t gameMinImages) { return gameMinImages > 1 ? gameMinImages - 1 : 1; }
+inline uint32_t LatencyBound(uint32_t gameMinImages)
+{
+    const uint32_t bound = gameMinImages > 1 ? gameMinImages - 1 : 1;
+    return bound < 2 ? 2 : bound;
+}
 inline bool GateUsable(uint32_t bound) { return bound >= 1 && bound < kGateRing; }
 
 // Before the game acquires for its next present (number issued + 1): the number (1-based) of the present that has to be
@@ -210,8 +221,61 @@ inline uint64_t GateWaitNumber(uint64_t issued, uint32_t bound)
     return next > bound ? next - bound : 0;
 }
 
-// The gate gives up (stands aside, logged) after this many waits in a row that ran into their limit
+// The gate stands aside after this many waits in a row that ran into their limit, and comes back after
+// kGateRearmPresents presents or kGateRearmMs (a minimise or an Alt-Tab must not switch it off for good).
 inline constexpr uint32_t kGateGiveUp = 5;
+inline constexpr uint32_t kGateRearmPresents = 120;
+inline constexpr double kGateRearmMs = 3000.0;
+
+enum class WaitOutcome
+{
+    Done,
+    Timeout,
+    Neutral // OUT_OF_DATE / SURFACE_LOST: the swapchain is going, says nothing about the gate
+};
+
+struct GateState
+{
+    bool on = true;
+    uint32_t timeouts = 0;
+    uint32_t presentsSinceOff = 0;
+    double offSinceMs = 0.0;
+};
+
+inline void GateOnWait(GateState& gate, WaitOutcome outcome, double nowMs)
+{
+    if (outcome == WaitOutcome::Neutral)
+        return;
+
+    if (outcome == WaitOutcome::Done)
+    {
+        gate.timeouts = 0;
+        return;
+    }
+
+    if (gate.on && ++gate.timeouts >= kGateGiveUp)
+    {
+        gate.on = false;
+        gate.presentsSinceOff = 0;
+        gate.offSinceMs = nowMs;
+    }
+}
+
+// Per game present: a gate that stood aside comes back after a while
+inline void GateOnPresent(GateState& gate, double nowMs)
+{
+    if (gate.on)
+        return;
+
+    if (++gate.presentsSinceOff >= kGateRearmPresents || nowMs - gate.offSinceMs >= kGateRearmMs)
+    {
+        gate.on = true;
+        gate.timeouts = 0;
+    }
+}
+
+// Our own present id counter stays above the ids a game supplies (0 is no id)
+inline uint64_t OwnIdAfterGame(uint64_t own, uint64_t gameId) { return gameId > own ? gameId : own; }
 
 // FlipMetering= as f5low reads it (src/oob_driver.h): -1 auto, 0 off ("0", "off", "false", "no"), 1 on ("1", "on",
 // "true", "yes"), case and surrounding spaces ignored, anything else counts as auto.
@@ -254,17 +318,55 @@ inline int FlipMeteringForced(const char* setting)
     return -1;
 }
 
-// Hardware flip metering (VK_NV_present_metering): needs the extension and its feature on the device; auto = RTX 50 and
-// newer (the display hardware spaces the flips there, on older GPUs nothing does), a forced 1 / 0 wins.
-inline bool MeteringOn(int forced, bool rtx50OrNewer, bool deviceHasIt)
+// VK_PRESENT_MODE_FIFO_KHR = 2, FIFO_RELAXED_KHR = 3: V-Sync paces the presents, metering has nothing to add
+inline bool VsyncPaces(int presentMode) { return presentMode == 2 || presentMode == 3; }
+
+// Hardware flip metering (VK_NV_present_metering) without the pacer export (an older f5low.dll): off unless forced on
+// (FlipMetering=1), and never on a V-Sync swapchain or without the extension on the device. The pacer export decides
+// it itself when there is one.
+inline bool MeteringOn(int forced, bool deviceHasIt, bool vsyncPaces)
 {
-    if (!deviceHasIt)
+    if (!deviceHasIt || vsyncPaces)
         return false;
 
-    return forced >= 0 ? forced == 1 : rtx50OrNewer;
+    return forced == 1;
 }
 
-// Whether the generated frames of a batch are spaced on the CPU: not when the driver meters them
+// The driver's feedback on a metered batch: anything reported counts against it until its meaning is known, and after
+// kMeterRefusals in a row it is off for the session
+inline constexpr uint32_t kMeterRefusals = 8;
+
+struct MeterHealth
+{
+    uint32_t bad = 0;
+    bool off = false;
+};
+
+inline void MeterNote(MeterHealth& health, bool negative)
+{
+    if (health.off)
+        return;
+
+    if (!negative)
+        health.bad = 0;
+    else if (++health.bad >= kMeterRefusals)
+        health.off = true;
+}
+
+inline bool MeterNegative(bool presentFailed, uint32_t feedback) { return presentFailed || feedback != 0; }
+
+// numFramesPerBatch on a present: a metered batch sends its presented frames + 1 (a cut-short batch is smaller), the
+// first present after one that was not metered sends 1 (the batch is closed), otherwise nothing is chained (0).
+inline uint32_t BatchConfig(bool metered, bool lastWasMetered, uint32_t presentedGenerated)
+{
+    if (metered)
+        return presentedGenerated + 1;
+
+    return lastWasMetered ? 1u : 0u;
+}
+
+// The generated frames of a batch are spaced on the CPU unless the driver meters them (the first present of a
+// metered batch still goes out on its schedule)
 inline bool PacedOnCpu(bool metered) { return !metered; }
 
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.
