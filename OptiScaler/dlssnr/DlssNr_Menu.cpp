@@ -476,15 +476,15 @@ static void RenderTuneForThisScene(uint32_t source, CustomOptional<float>& trim,
                    "press Apply or Save as point.");
 
         if (!cal.available && !cal.unavailable.empty())
-            ImGui::TextDisabled("Not available: %s", cal.unavailable.c_str());
+            ImGui::TextDisabled(OptiI18n::Text("Not available: %s"), OptiI18n::Text(cal.unavailable.c_str()));
 
         if (mine && !cal.startError.empty())
-            ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
+            ImGui::TextDisabled(OptiI18n::Text("Could not start: %s"), OptiI18n::Text(cal.startError.c_str()));
         else if (mine && !cal.aborted.empty())
         {
             // Wrapped: a stop now says what it measured, and an unwrapped line runs off the panel.
             ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
-            ImGui::TextWrapped("Stopped: %s", cal.aborted.c_str());
+            ImGui::TextWrapped(OptiI18n::Text("Stopped: %s"), OptiI18n::Text(cal.aborted.c_str()));
             ImGui::PopStyleColor();
         }
     }
@@ -524,14 +524,15 @@ static void RenderMeasureDetail()
                "To compare: on a still scene press it, change one setting, press again. A few percent is noise.");
 
     if (!cal.measureAvailable && !cal.measureUnavailable.empty())
-        ImGui::TextDisabled("Not available: %s", cal.measureUnavailable.c_str());
+        ImGui::TextDisabled(OptiI18n::Text("Not available: %s"),
+                            OptiI18n::Text(cal.measureUnavailable.c_str()));
 
     if (cal.measure && !cal.startError.empty())
-        ImGui::TextDisabled("Could not start: %s", cal.startError.c_str());
+        ImGui::TextDisabled(OptiI18n::Text("Could not start: %s"), OptiI18n::Text(cal.startError.c_str()));
     else if (cal.measure && !cal.aborted.empty())
     {
         ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
-        ImGui::TextWrapped("Stopped: %s", cal.aborted.c_str());
+        ImGui::TextWrapped(OptiI18n::Text("Stopped: %s"), OptiI18n::Text(cal.aborted.c_str()));
         ImGui::PopStyleColor();
     }
 
@@ -972,7 +973,7 @@ static bool PresetButton(const char* label, bool active, float width = 0.0f)
     }
 
     // One "###" ID for both states, so the mark appearing does not drop keyboard/gamepad focus.
-    const std::string shown = std::string(active ? kActiveMark : "") + label + "###" + label;
+    const std::string shown = std::string(active ? kActiveMark : "") + OptiI18n::Text(label) + "###" + label;
     const bool pressed = ImGui::Button(shown.c_str(), ImVec2(width, 0.0f));
 
     if (active)
@@ -1986,17 +1987,19 @@ static void RenderF5LowPage(Config* config, const NrCommon& nr)
     if (auto card = ScopedCollapsingHeader("Lighter NR", ImGuiTreeNodeFlags_DefaultOpen); card.IsHeaderOpen())
     {
         if (!config->DlssNrDetailReuse.value_or_default())
-            ImGui::TextUnformatted("Reuse detail between frames: Off");
+            ImGui::TextUnformatted(OptiI18n::Text("Reuse detail between frames: Off"));
         else
         {
             const auto status = DlssNr::DetailReuseStatus();
             if (!status.why.empty())
-                ImGui::TextWrapped("Reuse detail between frames: On, %s", status.why.c_str());
+                ImGui::TextWrapped(OptiI18n::Text("Reuse detail between frames: On, %s"),
+                                   OptiI18n::Text(status.why.c_str()));
             else if (status.active)
-                ImGui::Text("Reuse detail between frames: On (full %llu | reused %llu%s)", status.full, status.reused,
-                            status.holding ? " | paused while moving fast" : "");
+                ImGui::Text(OptiI18n::Text("Reuse detail between frames: On (full %llu | reused %llu%s)"), status.full,
+                            status.reused,
+                            status.holding ? OptiI18n::Text(" | paused while moving fast") : "");
             else
-                ImGui::TextUnformatted("Reuse detail between frames: On");
+                ImGui::TextUnformatted(OptiI18n::Text("Reuse detail between frames: On"));
         }
         HelpMarker(
             "Runs the model every other frame (or every 3rd) to cut NR's cost by about half (or two thirds); with "
@@ -5558,7 +5561,9 @@ static void DrawLeftoverFix(Config* config, const VulkanRouteState& route, const
     const Upscaler back = FeatureProvider_Vk::Off12For(route.backend);
 
     ImGui::PushStyleColor(ImGuiCol_Text, kWarnAmber);
-    ImGui::TextWrapped("%s", DlssNrVulkanRoute::LeftoverLine(VulkanBackendCode(route.backend)).c_str());
+    ImGui::TextWrapped(
+        OptiI18n::Text("The game's upscaler runs on its D3D12 copy (%s), so Neural Rendering runs on D3D12."),
+        VulkanBackendCode(route.backend));
     ImGui::PopStyleColor();
 
     const std::string label = std::string("Use the Vulkan upscaler (") + VulkanBackendCode(back) + ")##leftover" + id;
@@ -5874,9 +5879,9 @@ void RenderBridgeNeeded(Config* config, uint32_t fgOutput)
         ImGui::TextWrapped("%s", BridgeNeededLine(output).c_str());
     else
         ImGui::TextWrapped(
-            "%s The game makes no upscaler call now, which the bridge's route needs; Optical F5Low's NR + "
-            "frame generation does not.",
-            BridgeNeededLine(output).c_str());
+            "%s %s", BridgeNeededLine(output).c_str(),
+            OptiI18n::Text("The game makes no upscaler call now, which the bridge's route needs; Optical F5Low's NR + "
+                           "frame generation does not."));
 
     ImGui::PopStyleColor();
 

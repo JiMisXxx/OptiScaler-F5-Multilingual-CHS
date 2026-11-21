@@ -6971,7 +6971,8 @@ void MenuCommon::RenderFramerateLowLatency(RenderMenuContext& ctx)
                        "back to make the one in between; these calls take that latency back.");
     }
 
-    ImGui::TextWrapped("Status: [%s]: %s", StatusLabel(status.decision), ReasonText(status));
+    ImGui::TextWrapped(OptiI18n::Text("Status: [%s]: %s"), OptiI18n::Text(StatusLabel(status.decision)),
+                       OptiI18n::Text(ReasonText(status)));
 
     if (status.offKeptForFrameGeneration)
         ImGui::TextDisabled("DLSS FG needs Reflex: the game's Reflex stays on.");

@@ -17,6 +17,7 @@
 #include <proxies/FfxApi_Proxy.h>
 #include <proxies/XeSS_Proxy.h>
 #include <upscalers/IFeature.h>
+#include "../i18n/OptiI18n.h"
 
 namespace
 {
@@ -369,8 +370,10 @@ void RenderFork(Config* config, float menuResScale)
                 Row("  Model",
                     NrModelText(config->DlssNrPreset.value_or_default(), config->DlssNrWeightsSetA.value_or_default(),
                                 config->DlssNrWeightsSetB.value_or_default()));
-                Row("  Passes", NrPassesText(config->DlssNrPasses.value_or_default(),
-                                             config->DlssNrWorkingScale.value_or_default()));
+                const uint32_t nrPasses = config->DlssNrPasses.value_or_default();
+                Row("  Passes",
+                    StrFmt(OptiI18n::Text(nrPasses == 1 ? "%u pass, working scale %.2f" : "%u passes, working scale %.2f"),
+                           nrPasses, config->DlssNrWorkingScale.value_or_default()));
                 Row("  Pass at", NrPlacementText(config->DlssNrFinishedPicture.value_or_default(),
                                                  config->DlssNrRunBeforeSr.value_or_default(),
                                                  config->DlssNrDeferredDlss.value_or_default()));
