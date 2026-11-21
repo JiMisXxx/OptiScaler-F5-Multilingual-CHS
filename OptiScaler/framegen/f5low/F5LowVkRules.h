@@ -369,6 +369,129 @@ inline uint32_t BatchConfig(bool metered, bool lastWasMetered, uint32_t presente
 // metered batch still goes out on its schedule)
 inline bool PacedOnCpu(bool metered) { return !metered; }
 
+// Which swapchains generate (F5Low on D3D12 takes 8-bit RGBA/BGRA and HDR10; FP16/scRGB are refused). VkFormat numbers:
+// R8G8B8A8 UNORM 37 / SRGB 43, B8G8R8A8 UNORM 44 / SRGB 50, A2R10G10B10_UNORM_PACK32 58, A2B10G10R10_UNORM_PACK32 64,
+// R16G16B16A16_SFLOAT 97; colour space HDR10_ST2084_EXT 1000104008. A2B10G10R10 is DXGI's R10G10B10A2; A2R10G10B10 has
+// no DXGI twin (channel order), so it is refused.
+enum class SwapchainSupport
+{
+    Ok,
+    OkHdr10,
+    RefusedFp16,
+    RefusedOrder,
+    RefusedFormat
+};
+
+inline SwapchainSupport ClassifySwapchain(int format, long long colorSpace)
+{
+    switch (format)
+    {
+    case 37:
+    case 43:
+    case 44:
+    case 50:
+        return SwapchainSupport::Ok;
+    case 64:
+        return colorSpace == 1000104008 ? SwapchainSupport::OkHdr10 : SwapchainSupport::Ok;
+    case 58:
+        return SwapchainSupport::RefusedOrder;
+    case 97:
+        return SwapchainSupport::RefusedFp16;
+    default:
+        return SwapchainSupport::RefusedFormat;
+    }
+}
+
+inline bool SwapchainGenerates(SwapchainSupport support)
+{
+    return support == SwapchainSupport::Ok || support == SwapchainSupport::OkHdr10;
+}
+
+// The reasons, in the words of the D3D12 F5Low checks where there is one
+inline const char* SwapchainReason(SwapchainSupport support)
+{
+    switch (support)
+    {
+    case SwapchainSupport::RefusedFp16:
+        return "only HDR10 output is supported";
+    case SwapchainSupport::RefusedOrder:
+        return "the swapchain's 10-bit format has its channels in an order the generator does not take (A2R10G10B10), "
+               "only A2B10G10R10 is supported";
+    case SwapchainSupport::RefusedFormat:
+        return "the swapchain's format is not supported (8-bit RGBA/BGRA and HDR10 are)";
+    default:
+        return "";
+    }
+}
+
+// What a frame's hudless picture does for the generator (the D3D12 uiMode: the hudless one when the input has it and it
+// matches, else colour only)
+enum class HudlessMode
+{
+    ColourOnly, // the input offers none
+    Used,
+    NoLayout,     // offered, but not in a readable state
+    SizeMismatch, // not the swapchain's size
+    FormatMismatch
+};
+
+inline HudlessMode HudlessModeOf(bool offered, bool layoutOk, bool sizeOk, bool formatOk)
+{
+    if (!offered)
+        return HudlessMode::ColourOnly;
+
+    if (!layoutOk)
+        return HudlessMode::NoLayout;
+
+    if (!sizeOk)
+        return HudlessMode::SizeMismatch;
+
+    return formatOk ? HudlessMode::Used : HudlessMode::FormatMismatch;
+}
+
+inline const char* HudlessText(HudlessMode mode)
+{
+    switch (mode)
+    {
+    case HudlessMode::Used:
+        return "the game's hudless picture is passed to the generator";
+    case HudlessMode::NoLayout:
+        return "colour only (the hudless picture is not in a readable state)";
+    case HudlessMode::SizeMismatch:
+        return "colour only (the hudless picture is not the swapchain's size)";
+    case HudlessMode::FormatMismatch:
+        return "colour only (the hudless picture's format differs from the swapchain's)";
+    default:
+        return "colour only (the input offers no hudless picture)";
+    }
+}
+
+// Dynamic MFG on Vulkan: the setting is the most; it runs unless the count follows the game's DLSS FG. A count of 0 is
+// 1X (generate nothing, still feed the generator); the count kept for when it is back is `kept`.
+inline bool DynamicRuns(bool dynamicSet, bool followsGame, int maxCount)
+{
+    return dynamicSet && !followsGame && maxCount > 1;
+}
+
+inline int CountAfterDynamic(int chosen, int kept) { return chosen >= 1 ? chosen : kept; }
+
+// Whether "Dynamic MFG holds back" is true: it chose 1X (the status line says so only then)
+inline bool DynamicHolds(bool running, int chosen) { return running && chosen == 0; }
+
+// Whether the game's window is the foreground one (the count is kept while it is not): its process owns it
+inline bool InFront(unsigned long foregroundPid, unsigned long ownPid)
+{
+    return foregroundPid != 0 && foregroundPid == ownPid;
+}
+
+// Whether the game's own Reflex cap is divided for F5Low's shown frames: per rendered frame when it generates, no
+// driver multiplier on Vulkan (the driver never hears our multiplier; its minimum interval counts the game's own
+// frames)
+inline float ReflexCapForVulkanF5Low(float shownCapFps, uint32_t shownPerRendered)
+{
+    return shownPerRendered > 1 ? shownCapFps / static_cast<float>(shownPerRendered) : shownCapFps;
+}
+
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.
 inline bool CanPace(double intervalMs, uint32_t count) { return intervalMs > 0.0 && count > 0; }
 } // namespace F5LowVk

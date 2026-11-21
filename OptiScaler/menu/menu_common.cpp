@@ -4575,7 +4575,10 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
         if (state.activeFgOutput == FGOutput::F5Low && state.currentVkFG != nullptr)
         {
             vkOffReason = state.currentVkFG->StatusLine();
-            in.offReason = vkOffReason.empty() ? "passing frames through (nothing generated yet)" : vkOffReason.c_str();
+            // "Dynamic MFG holds back" is for when it really does
+            if (!state.currentVkFG->DynamicHold())
+                in.offReason =
+                    vkOffReason.empty() ? "passing frames through (nothing generated yet)" : vkOffReason.c_str();
         }
         in.interpolated = static_cast<int>(fg->GetInterpolatedFrameCount());
 

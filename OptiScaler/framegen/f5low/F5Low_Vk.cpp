@@ -6,6 +6,9 @@
 #include "f5low_frames.h"
 
 #include <State.h>
+#include <Util.h>
+#include <low_latency/input/input_common.h>
+#include <framegen/xefg/XeFG_DynamicTarget.h>
 #include <Config.h>
 #include <hooks/Vulkan_Hooks.h>
 #include <native/NativeDriverVk.h>
@@ -415,21 +418,159 @@ std::string F5Low_Vk::StatusLine() const
     return _reason;
 }
 
-void F5Low_Vk::UpdateCount()
+void F5Low_Vk::UpdateCount(bool perFrame)
 {
-    const int target = Config::Instance()->FGInterpolationCount(
-        Config::Instance()->FGXeFGInterpolationCount.value_or_default(), _maxInterpolationCount);
+    auto* config = Config::Instance();
+    const int target =
+        config->FGInterpolationCount(config->FGXeFGInterpolationCount.value_or_default(), _maxInterpolationCount);
+    const bool dynamic =
+        DynamicRuns(config->FGXeFGDynamicMFG.value_or_default(), config->FGFollowsGame(), _maxInterpolationCount);
 
-    if (target >= 1 && target != _wanted)
+    if (dynamic && perFrame)
     {
-        LOG_INFO("F5Low (Vulkan): interpolation count {} -> {}", _wanted, target);
-        _wanted = target;
+        if (config->FGXeFGTargetAsCapDMFG.value_or_default() && !_warnedCapMode)
+        {
+            _warnedCapMode = true;
+            LOG_INFO("F5Low (Vulkan): Dynamic MFG's \"use target as cap\" is not available here, the count follows the "
+                     "target without holding it");
+        }
+
+        _dynamicActive = true;
+        const int chosen = DynamicCount(target);
+
+        if (chosen != _wanted)
+        {
+            LOG_INFO("F5Low (Vulkan): Dynamic MFG count {} -> {}", _wanted, chosen);
+            _wanted = chosen;
+        }
+    }
+    else if (!dynamic)
+    {
+        if (_dynamicActive)
+        {
+            _dynamicCount.Reset();
+            _shownPerFrame.Rebase();
+            _shownCount = -1;
+            _dmfgHold = false;
+            _dynamicKept = 0;
+            _dynamicActive = false;
+            _dynamicDrain = true;
+        }
+
+        if (target >= 1 && target != _wanted)
+        {
+            LOG_INFO("F5Low (Vulkan): interpolation count {} -> {}", _wanted, target);
+            _wanted = target;
+        }
     }
 
     // What the multiplier combos, the cap and the status read: the chosen count, as far as the generator and the spare
     // images allow it (what a frame really did is _generationOff and the status line)
     _framesToInterpolate = static_cast<int>(std::max(
         1u, GeneratedCount(_wanted, static_cast<uint32_t>(std::min(_maxInterpolationCount, _countLimit)), _headroom)));
+}
+
+// Dynamic MFG as on D3D12 (XeFG_Dx12::DynamicCount), count mode: the count follows the frame rate target, within the
+// setting. "Use target as cap" is not ported. 1X (count 0) generates nothing but keeps feeding the generator.
+int F5Low_Vk::DynamicCount(int maxCount)
+{
+    auto& state = State::Instance();
+    auto* config = Config::Instance();
+    const double now = Util::MillisecondsNow();
+
+    const float refresh = DisplayRefreshFps(now);
+    const float target =
+        xefg::DynamicTargetFps(config->FGXeFGFramerateTargetDMFG.value_or_default(),
+                               config->FramerateLimit.value_or_default(), refresh, VsyncPaces(_presentMode));
+
+    const int kept = _dynamicKept >= 1 ? std::min(_dynamicKept, maxCount) : maxCount;
+    const int current = _dmfgHold ? 0 : kept;
+
+    // In the background the game is throttled: the count is kept, and it starts over once the game is back in front
+    DWORD pid = 0;
+
+    if (HWND front = GetForegroundWindow(); front != nullptr)
+        GetWindowThreadProcessId(front, &pid);
+
+    if (!InFront(pid, GetCurrentProcessId()))
+    {
+        if (!_dynamicUnfocused)
+            LOG_INFO("F5Low (Vulkan): Dynamic MFG: the game's window lost focus, keeping {}X", current + 1);
+
+        _dynamicUnfocused = true;
+        _dynamicDrain = true;
+        return CountAfterDynamic(current, kept);
+    }
+
+    if (_dynamicUnfocused)
+    {
+        LOG_INFO("F5Low (Vulkan): Dynamic MFG: the game's window is back in front, starting over at {}X", current + 1);
+        _dynamicUnfocused = false;
+        _dynamicCount.Reset();
+        _shownPerFrame.Rebase();
+        _shownCount = -1;
+    }
+
+    // Shown per real frame, measured: started over at a new count
+    if (current != _shownCount)
+    {
+        _shownPerFrame.Restart();
+        _shownCount = current;
+    }
+
+    _shownPerFrame.Update(_shownTotal.load());
+
+    // What the game waited in OptiScaler (its low latency sleep, our gate and drain); piled up while Dynamic was off:
+    // dropped
+    double sleepMs = InputCommon::take_sleep_ms();
+    double waitedMs = _gameWaitMs.exchange(0.0);
+
+    if (_dynamicDrain)
+    {
+        sleepMs = 0.0;
+        waitedMs = 0.0;
+        _dynamicDrain = false;
+    }
+
+    const int rounding = std::clamp(config->FGXeFGRoundingDMFG.value_or_default(), 0, 2);
+    const int minCount = config->FGXeFGDynamicAllow1X.value_or_default() || maxCount == 1 ? 0 : 1;
+
+    const int count = _dynamicCount.Update({ now, state.lastFGFrameTime, sleepMs + waitedMs, target, refresh,
+                                             config->FramerateLimit.value_or_default(), maxCount, current, rounding,
+                                             minCount, _shownPerFrame.Value(), _shownPerFrame.Sample() });
+
+    if (count != current || now - _dynamicLogMs >= 5000.0)
+    {
+        const auto line = std::format("F5Low (Vulkan): Dynamic MFG {}X{}: presented {:.1f} fps, target {:.1f}",
+                                      current + 1, count != current ? std::format(" -> {}X", count + 1) : std::string(),
+                                      _dynamicCount.PresentedFps(), target);
+
+        if (count != current)
+            LOG_INFO("{}", line);
+        else
+            LOG_DEBUG("{}", line);
+
+        _dynamicLogMs = now;
+    }
+
+    _dmfgHold = DynamicHolds(true, count);
+
+    if (count >= 1)
+        _dynamicKept = count;
+
+    return CountAfterDynamic(count, kept);
+}
+
+float F5Low_Vk::DisplayRefreshFps(double nowMs)
+{
+    // The window can move to another display: looked up again every 2 s
+    if (_hwnd != nullptr && (_refreshCheckedMs <= 0.0 || nowMs - _refreshCheckedMs >= 2000.0))
+    {
+        _refreshCheckedMs = nowMs;
+        _refreshRate = Util::GetActiveRefreshRate(_hwnd);
+    }
+
+    return static_cast<float>(std::max(_refreshRate, 0));
 }
 
 void F5Low_Vk::Activate()
@@ -653,6 +794,7 @@ void F5Low_Vk::WorkerLoop()
         }
 
         _meterWasOn = job.metered && !_meterHealth.off;
+        xefg::AddShownPresent(_shownTotal, presentedGenerated + 1);
 
         {
             std::lock_guard lock(s.jobMutex);
@@ -719,6 +861,8 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
 
     if (!DrainWorker(kBlockMs))
         LOG_DEBUG("F5Low (Vulkan): the worker was still busy, presenting the game's image anyway");
+
+    _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - startMs));
 
     const auto result = PresentOn(queue, *info, RemainingMs(kBlockMs, Util::MillisecondsNow() - startMs));
 
@@ -929,11 +1073,14 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     DXGI_FORMAT dxgi = DXGI_FORMAT_UNKNOWN;
     VkFormat sharedFormat = VK_FORMAT_UNDEFINED;
 
-    if (!native::VkSharedPictureFormat(pCreateInfo->imageFormat, &dxgi, &sharedFormat) ||
-        dxgi == DXGI_FORMAT_R16G16B16A16_FLOAT)
+    const auto support = ClassifySwapchain(static_cast<int>(pCreateInfo->imageFormat),
+                                           static_cast<long long>(pCreateInfo->imageColorSpace));
+
+    if (!SwapchainGenerates(support) || !native::VkSharedPictureFormat(pCreateInfo->imageFormat, &dxgi, &sharedFormat))
     {
-        SetReason(std::format("The swapchain format {} is not supported by F5Low (8-bit RGBA/BGRA and HDR10 are)",
-                              static_cast<int>(pCreateInfo->imageFormat)));
+        SetReason(std::format("F5Low: {} (format {}, colour space {})", SwapchainReason(support),
+                              static_cast<int>(pCreateInfo->imageFormat),
+                              static_cast<int>(pCreateInfo->imageColorSpace)));
         return false;
     }
 
@@ -1006,8 +1153,10 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _swapchainFormat = pCreateInfo->imageFormat;
     _swapchainExtent = pCreateInfo->imageExtent;
     _colorSpace = pCreateInfo->imageColorSpace;
-    _hdr10 = pCreateInfo->imageFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
-             pCreateInfo->imageColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
+    _hdr10 = support == SwapchainSupport::OkHdr10;
+    _hwnd = VulkanHooks::SurfaceWindow(pCreateInfo->surface);
+    _hudlessMode = -1;
+    _hudlessLogs = 0;
     _intervalMs = 0.0;
     _lastEntryMs = 0.0;
     _generationOff = true;
@@ -1142,7 +1291,7 @@ bool F5Low_Vk::Present()
 
     _fgFramePresentId++;
 
-    UpdateCount();
+    UpdateCount(true);
 
     UINT64 willDispatchFrame = 0;
     const auto index = GetDispatchIndex(willDispatchFrame);
@@ -1191,6 +1340,7 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
     // needs one on every real present)
     _frameOwnId = 0;
     _inlineBatch = 0;
+    _inlineGenerated = 0;
 
     if (_gateEnabled && pPresentInfo->swapchainCount == 1 && pPresentInfo->pSwapchains[0] == _swapchain)
     {
@@ -1225,7 +1375,9 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
         pPresentInfo->pSwapchains[0] != _swapchain || _failures >= 3 || _headroom == 0)
     {
         _generationOff = true;
-        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo, _frameOwnId));
+        const auto direct = DirectPresent(queue, pPresentInfo, _frameOwnId);
+        xefg::AddShownPresent(_shownTotal, 1);
+        return AskRecreateIfRaised(direct);
     }
 
     if (queue != _gameQueue)
@@ -1237,7 +1389,9 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
         }
 
         _generationOff = true;
-        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo, _frameOwnId));
+        const auto direct = DirectPresent(queue, pPresentInfo, _frameOwnId);
+        xefg::AddShownPresent(_shownTotal, 1);
+        return AskRecreateIfRaised(direct);
     }
 
     VkPresentInfoKHR finalInfo = *pPresentInfo;
@@ -1245,7 +1399,9 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
     if (Generate(queue, pPresentInfo, pending, finalInfo) == Outcome::Queued)
         return AskRecreateIfRaised(static_cast<VkResult>(_impl->lastResult.load()));
 
-    return AskRecreateIfRaised(DirectPresent(queue, &finalInfo, _frameOwnId, _inlineBatch));
+    const auto direct = DirectPresent(queue, &finalInfo, _frameOwnId, _inlineBatch);
+    xefg::AddShownPresent(_shownTotal, 1 + _inlineGenerated);
+    return AskRecreateIfRaised(direct);
 }
 
 // The multiplier was raised past the spare images of this swapchain: the game is told its swapchain is suboptimal once,
@@ -1558,6 +1714,27 @@ bool F5Low_Vk::Prepare(const Pending& p, uint32_t count, bool& useHudless, uint3
             }
 
             useHudless = true;
+        }
+    }
+
+    // Which picture the generator gets: the game's hudless one when the input has it and it fits, else colour only
+    {
+        const auto& hudlessInput = p.hudless;
+        const bool offered = hudlessInput && hudlessInput->image != VK_NULL_HANDLE;
+        DXGI_FORMAT hudlessDxgi = DXGI_FORMAT_UNKNOWN;
+        VkFormat hudlessShared = VK_FORMAT_UNDEFINED;
+        const bool formatOk = offered &&
+                              native::VkSharedPictureFormat(hudlessInput->format, &hudlessDxgi, &hudlessShared) &&
+                              hudlessShared == vkColor;
+        const auto mode = HudlessModeOf(
+            offered, offered && UsableLayout(hudlessInput->layout),
+            offered && hudlessInput->imageWidth == width && hudlessInput->imageHeight == height, formatOk);
+
+        if (static_cast<int>(mode) != _hudlessMode && _hudlessLogs < 8)
+        {
+            ++_hudlessLogs;
+            _hudlessMode = static_cast<int>(mode);
+            LOG_INFO("F5Low (Vulkan): {}", HudlessText(mode));
         }
     }
 
@@ -2174,6 +2351,7 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     // No present queue of our own: the presents and their pacing run here, the real image goes out after (in the same
     // metered batch)
     const uint32_t presentedInline = RunGenerated(job, PacedOnCpu(job.metered));
+    _inlineGenerated = presentedInline;
     _inlineBatch = job.metered ? presentedInline + 1 : 0;
     _meterWasOn = job.metered;
     return Outcome::Direct;
@@ -2283,7 +2461,9 @@ bool F5Low_Vk::GateAcquire(VkDevice device, VkSwapchainKHR swapchain, uint64_t t
         return true;
 
     const uint64_t waitNs = timeoutNs == 0 ? 0 : std::min<uint64_t>(timeoutNs, 100'000'000ull);
+    const double waitStartMs = Util::MillisecondsNow();
     const auto result = WaitForPresent(device, swapchain, id, waitNs);
+    _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - waitStartMs));
 
     // A polling game is not held and nothing is counted
     if (timeoutNs == 0 && result == VK_TIMEOUT)

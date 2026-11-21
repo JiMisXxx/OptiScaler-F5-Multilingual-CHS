@@ -449,6 +449,14 @@ int main()
         CHECK(CapForGame(in).fps == 15.0f);
         in.dlssgFramesToGenerate = 0;
 
+        // F5Low on a native Vulkan swapchain: the shown cap is divided per rendered frame (no driver multiplier there)
+        in.vkF5Low = true;
+        in.xefgShownPerRendered = 3;
+        CHECK(CapForGame(in).fps == 20.0f);
+        in.xefgShownPerRendered = 1;
+        CHECK(CapForGame(in).fps == 60.0f);
+        in.vkF5Low = false;
+
         // Force Disable stops its waits, Input Off and no output running: the limiter (one owner, never none)
         GameCapInputs off = in;
         off.forceDisabled = true;

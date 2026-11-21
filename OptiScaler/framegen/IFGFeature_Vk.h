@@ -124,6 +124,9 @@ class IFGFeature_Vk : public virtual IFGFeature
     // One line for the menu: why the output is not generating, or what it does now. Empty when there is nothing to say.
     virtual std::string StatusLine() const { return {}; }
 
+    // Dynamic MFG holds the output at 1X right now (the status line says "Dynamic MFG holds back" only then)
+    virtual bool DynamicHold() const { return false; }
+
     // A failed CreateSwapchain of the output retired the game's old swapchain: the create that follows is made without
     // it
     virtual bool RetiredOldSwapchain() const { return false; }

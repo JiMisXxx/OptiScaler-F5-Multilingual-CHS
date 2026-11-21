@@ -3,6 +3,7 @@
 #include "../OptiScaler/framegen/f5low/F5LowVkRules.h"
 
 #include <cmath>
+#include <string>
 #include <cstdio>
 
 static int fails = 0;
@@ -232,6 +233,44 @@ int main()
     CHECK(BatchConfig(true, true, 0) == 1);
     CHECK(BatchConfig(false, true, 0) == 1); // closes the metered run
     CHECK(BatchConfig(false, false, 0) == 0);
+
+    // swapchain formats: 8-bit and HDR10 generate, FP16 / scRGB and the A2R10G10B10 order are refused with a reason
+    CHECK(ClassifySwapchain(44, 0) == SwapchainSupport::Ok);
+    CHECK(ClassifySwapchain(50, 0) == SwapchainSupport::Ok);
+    CHECK(ClassifySwapchain(37, 0) == SwapchainSupport::Ok);
+    CHECK(ClassifySwapchain(64, 1000104008LL) == SwapchainSupport::OkHdr10);
+    CHECK(ClassifySwapchain(64, 0) == SwapchainSupport::Ok); // 10-bit SDR
+    CHECK(ClassifySwapchain(58, 1000104008LL) == SwapchainSupport::RefusedOrder);
+    CHECK(ClassifySwapchain(97, 1000104002LL) == SwapchainSupport::RefusedFp16);
+    CHECK(ClassifySwapchain(97, 0) == SwapchainSupport::RefusedFp16);
+    CHECK(ClassifySwapchain(123, 0) == SwapchainSupport::RefusedFormat);
+    CHECK(SwapchainGenerates(SwapchainSupport::OkHdr10) && !SwapchainGenerates(SwapchainSupport::RefusedFp16));
+    CHECK(std::string(SwapchainReason(SwapchainSupport::RefusedFp16)) == "only HDR10 output is supported");
+    CHECK(std::string(SwapchainReason(SwapchainSupport::Ok)).empty());
+
+    // hudless
+    CHECK(HudlessModeOf(false, true, true, true) == HudlessMode::ColourOnly);
+    CHECK(HudlessModeOf(true, false, true, true) == HudlessMode::NoLayout);
+    CHECK(HudlessModeOf(true, true, false, true) == HudlessMode::SizeMismatch);
+    CHECK(HudlessModeOf(true, true, true, false) == HudlessMode::FormatMismatch);
+    CHECK(HudlessModeOf(true, true, true, true) == HudlessMode::Used);
+    CHECK(std::string(HudlessText(HudlessMode::Used)).find("hudless") != std::string::npos);
+
+    // Dynamic MFG glue
+    CHECK(DynamicRuns(true, false, 3));
+    CHECK(!DynamicRuns(true, true, 3));  // follows the game
+    CHECK(!DynamicRuns(false, false, 3));
+    CHECK(!DynamicRuns(true, false, 1)); // nothing to choose from
+    CHECK(CountAfterDynamic(0, 3) == 3); // 1X: the kept count is what comes back
+    CHECK(CountAfterDynamic(2, 3) == 2);
+    CHECK(DynamicHolds(true, 0));
+    CHECK(!DynamicHolds(true, 2));
+    CHECK(!DynamicHolds(false, 0));
+    CHECK(InFront(100, 100) && !InFront(100, 200) && !InFront(0, 0));
+
+    // the game's Reflex cap for F5Low on Vulkan: per rendered frame, no driver multiplier
+    CHECK(std::fabs(ReflexCapForVulkanF5Low(120.0f, 3) - 40.0f) < 1e-4f);
+    CHECK(ReflexCapForVulkanF5Low(120.0f, 1) == 120.0f);
 
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);

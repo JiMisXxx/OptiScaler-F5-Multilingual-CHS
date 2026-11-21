@@ -4,6 +4,9 @@
 
 #include "F5LowVkRules.h"
 
+#include <framegen/xefg/XeFG_DynamicCount.h>
+#include <framegen/xefg/XeFG_ShownRate.h>
+
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -62,6 +65,29 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     VkResult AskRecreateIfRaised(VkResult result);
     bool _loggedBehind = false;
 
+    // Dynamic MFG: the count follows the frame rate (the setting is the most); fed with what the worker and the direct
+    // presents show (xefg::AddShownPresent) and with the time the game waits in OptiScaler
+    XeFG_DynamicCount _dynamicCount;
+    xefg::ShownPerFrame _shownPerFrame;
+    std::atomic<uint64_t> _shownTotal { 0 };
+    std::atomic<double> _gameWaitMs {
+        0.0
+    }; // waits of the game thread in our present and acquire (the gate, the drain)
+    bool _dynamicActive = false;
+    bool _dynamicDrain = true;
+    bool _dynamicUnfocused = false;
+    bool _dmfgHold = false; // chose 1X
+    int _dynamicKept = 0;
+    int _shownCount = -1;
+    int _refreshRate = 0;
+    double _refreshCheckedMs = 0.0;
+    double _dynamicLogMs = 0.0;
+    HWND _hwnd = nullptr;
+    int _hudlessMode = -1;
+    uint32_t _hudlessLogs = 0;
+    uint32_t _inlineGenerated = 0;
+    bool _warnedCapMode = false;
+
     // Device extensions this output enabled (or found enabled): present id + present wait bound how far the game runs
     // ahead, present metering lets the RTX 50 display hardware space the flips of a batch
     bool _presentWaitOn = false;
@@ -96,7 +122,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     bool _loggedGenerating = false; // the first generated frame of this swapchain was logged
 
     void SetReason(const std::string& reason);
-    void UpdateCount();
+    void UpdateCount(bool perFrame = false);
+    int DynamicCount(int maxCount);
+    float DisplayRefreshFps(double nowMs);
 
     bool Prepare(const Pending& pending, uint32_t count, bool& useHudless, uint32_t set);
     bool EnsureSlots();
@@ -163,6 +191,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     void EvaluateState(FG_Constants& fgConstants) override final;
 
     std::string StatusLine() const override final;
+    bool DynamicHold() const override final { return _dmfgHold && _dynamicActive; }
 
     F5Low_Vk();
     ~F5Low_Vk();
