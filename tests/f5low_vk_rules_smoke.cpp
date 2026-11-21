@@ -383,6 +383,25 @@ int main()
     CHECK(DoneStampWaitMs(0, 1, 2) == 0 && DoneStampWaitMs(30000, 1, 2) > 0 && DoneStampWaitMs(30000, 2, 2) > 0);
     CHECK(DoneStampWaitMs(30000, 3, 2) == 0 && DoneStampWaitMs(30000, 0, 2) == 0); // the game's own frame, a bad k
 
+    // V-Sync off: MAILBOX becomes IMMEDIATE when frame generation is on, the surface offers it, the setting and the game's list allow
+    {
+        const auto tear = ChoosePresentMode(1, true, true, true, true);
+        CHECK(tear.mode == 0 && tear.why == TearingWhy::Tearing);
+        CHECK(ChoosePresentMode(1, true, true, true, false).mode == 1 && ChoosePresentMode(1, true, true, true, false).why == TearingWhy::FgOff);
+        CHECK(ChoosePresentMode(1, true, true, false, true).mode == 1 && ChoosePresentMode(1, true, true, false, true).why == TearingWhy::SettingOff);
+        CHECK(ChoosePresentMode(1, false, true, true, true).mode == 1 && ChoosePresentMode(1, false, true, true, true).why == TearingWhy::NoImmediate);
+        CHECK(ChoosePresentMode(1, true, false, true, true).mode == 1 &&
+              ChoosePresentMode(1, true, false, true, true).why == TearingWhy::ListLacksImmediate);
+
+        for (int mode : { 0, 2, 3 }) // IMMEDIATE, FIFO, FIFO_RELAXED stay whatever else is true
+            CHECK(ChoosePresentMode(mode, true, true, true, true).mode == mode && ChoosePresentMode(mode, true, true, true, true).why == TearingWhy::NotMailbox);
+
+        CHECK(ChainedPresentMode(true, 1) == 0 && ChainedPresentMode(true, 2) == 2 && ChainedPresentMode(false, 1) == 1);
+        // the swapchain's real mode is IMMEDIATE: timed on the CPU, not display paced, the gate bound for a timed batch (3)
+        CHECK(!VsyncPaces(tear.mode) && !DisplaySpaces(true, tear.mode, 0) && LatencyBound(3, 4, VsyncPaces(tear.mode)) == 3);
+        CHECK(TearingText(TearingWhy::Tearing) != nullptr && TearingText(TearingWhy::NoImmediate) != nullptr);
+    }
+
     // the pacer's own interval from the batch it planned (step = interval / (generated + 1))
     CHECK(std::fabs(PacerIntervalMs(55556, 2, 10000000) - 16.6668) < 0.01 && PacerIntervalMs(0, 2, 10000000) == 0.0);
 

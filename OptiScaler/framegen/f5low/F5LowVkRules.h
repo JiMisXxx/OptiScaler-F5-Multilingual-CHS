@@ -342,6 +342,74 @@ inline int FlipMeteringForced(const char* setting)
 // VK_PRESENT_MODE_FIFO_KHR = 2, FIFO_RELAXED_KHR = 3: V-Sync paces the presents, metering has nothing to add
 inline bool VsyncPaces(int presentMode) { return presentMode == 2 || presentMode == 3; }
 
+// V-Sync off on Vulkan: a game that asks for MAILBOX on a screen with a fixed refresh has the driver replace the frames
+// above the refresh (a 125 fps picture on 120 Hz loses about 5 frames a second, unevenly), where D3D12 lets f5low pass
+// the game's tearing flag through and every frame reaches the screen. So with frame generation on our swapchain is made
+// with IMMEDIATE instead (VK_PRESENT_MODE_ IMMEDIATE_KHR = 0, MAILBOX = 1), when the surface offers it, the setting
+// allows it and the game's own list of present modes (a VkSwapchainPresentModesCreateInfoEXT, when it chains one) has
+// IMMEDIATE in it. FIFO / FIFO_RELAXED and every other mode stay.
+enum class TearingWhy : int
+{
+    NotMailbox,         // the game did not ask for MAILBOX: its mode stays
+    FgOff,              // frame generation is off: the game's mode stays
+    SettingOff,         // [F5Low] VulkanTearing=false
+    NoImmediate,        // the surface does not offer IMMEDIATE
+    ListLacksImmediate, // the game lists the present modes its swapchain may switch between, IMMEDIATE not among them
+    Tearing             // MAILBOX -> IMMEDIATE
+};
+
+struct OurPresentMode
+{
+    int mode;
+    TearingWhy why;
+};
+
+inline OurPresentMode ChoosePresentMode(int gameMode, bool immediateSupported, bool listAllowsImmediate,
+                                        bool tearingSetting, bool fgOn)
+{
+    if (gameMode != 1)
+        return { gameMode, TearingWhy::NotMailbox };
+
+    if (!fgOn)
+        return { gameMode, TearingWhy::FgOff };
+
+    if (!tearingSetting)
+        return { gameMode, TearingWhy::SettingOff };
+
+    if (!immediateSupported)
+        return { gameMode, TearingWhy::NoImmediate };
+
+    if (!listAllowsImmediate)
+        return { gameMode, TearingWhy::ListLacksImmediate };
+
+    return { 0, TearingWhy::Tearing };
+}
+
+inline const char* TearingText(TearingWhy why)
+{
+    switch (why)
+    {
+    case TearingWhy::NotMailbox:
+        return "the game's mode stays";
+    case TearingWhy::FgOff:
+        return "frame generation is off, the game's mode stays";
+    case TearingWhy::SettingOff:
+        return "[F5Low] VulkanTearing=false, MAILBOX stays (the driver replaces frames above the refresh rate)";
+    case TearingWhy::NoImmediate:
+        return "the surface has no IMMEDIATE mode, MAILBOX stays (the driver replaces frames above the refresh rate)";
+    case TearingWhy::ListLacksImmediate:
+        return "the game's own list of present modes has no IMMEDIATE, MAILBOX stays (the driver replaces frames above "
+               "the "
+               "refresh rate)";
+    default:
+        return "tearing like D3D12: every generated frame reaches the screen";
+    }
+}
+
+// The mode of a present the game chained (a VkSwapchainPresentModeInfoEXT): a swapchain made with IMMEDIATE for MAILBOX
+// takes IMMEDIATE for the game's MAILBOX presents too
+inline int ChainedPresentMode(bool tearing, int chainedMode) { return tearing && chainedMode == 1 ? 0 : chainedMode; }
+
 // Who spaces the frames of a batch, as D3D12 does (f5low pace_sched.h FixedTimer): true = the display (the batch goes
 // to the driver back to back), false = our timer. Only a V-Sync / FIFO present can be display paced; MAILBOX /
 // IMMEDIATE batches are always timed. With the latency gate on the gate paces by itself: display, whatever the player

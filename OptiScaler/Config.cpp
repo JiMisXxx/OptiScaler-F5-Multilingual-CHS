@@ -169,6 +169,7 @@ bool Config::Reload(std::filesystem::path iniPath)
                 F5LowVulkanLatencyGate.set_from_config(readBool("F5Low", "VulkanLatencyGate"));
                 F5LowVulkanFlipMetering.set_from_config(readBool("F5Low", "VulkanFlipMetering"));
                 F5LowVulkanPacer.set_from_config(readBool("F5Low", "VulkanPacer"));
+                F5LowVulkanTearing.set_from_config(readBool("F5Low", "VulkanTearing"));
             }
 
             FGStreamlineIgnoreOTA.set_from_config(readBool("FrameGen", "StreamlineIgnoreOTA"));
@@ -2209,6 +2210,7 @@ bool Config::SaveIni()
         ini.SetValue("F5Low", "VulkanPacer", GetBoolValue(Instance()->F5LowVulkanPacer.value_for_config()).c_str());
         ini.SetValue("F5Low", "VulkanLatencyGate",
                      GetBoolValue(Instance()->F5LowVulkanLatencyGate.value_for_config()).c_str());
+        ini.SetValue("F5Low", "VulkanTearing", GetBoolValue(Instance()->F5LowVulkanTearing.value_for_config()).c_str());
 
         ini.SetValue("FrameGen", "StreamlineIgnoreOTA",
                      GetBoolValue(Instance()->FGStreamlineIgnoreOTA.value_for_config()).c_str());

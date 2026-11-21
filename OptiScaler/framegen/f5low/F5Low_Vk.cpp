@@ -1369,7 +1369,8 @@ bool F5Low_Vk::CarryPresentStructs(const VkPresentInfoKHR* present, Job& job)
             if (mode->swapchainCount >= 1 && mode->pPresentModes != nullptr)
             {
                 job.hasMode = true;
-                job.presentMode = mode->pPresentModes[0];
+                job.presentMode = static_cast<VkPresentModeKHR>(
+                    ChainedPresentMode(_tearing, static_cast<int>(mode->pPresentModes[0])));
             }
             break;
         }
@@ -1465,6 +1466,55 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
                             GateUsable(F5LowVk::LatencyBound(pCreateInfo->minImageCount, 1, false));
 
     VkSwapchainCreateInfoKHR info = *pCreateInfo;
+
+    // V-Sync off (MAILBOX): IMMEDIATE instead, so every generated frame reaches the screen as on D3D12
+    {
+        bool immediateSupported = false;
+        uint32_t modeCount = 0;
+
+        if (vkGetPhysicalDeviceSurfacePresentModesKHR(_physicalDevice, pCreateInfo->surface, &modeCount, nullptr) ==
+                VK_SUCCESS &&
+            modeCount > 0)
+        {
+            std::vector<VkPresentModeKHR> modes(modeCount);
+
+            if (vkGetPhysicalDeviceSurfacePresentModesKHR(_physicalDevice, pCreateInfo->surface, &modeCount,
+                                                          modes.data()) == VK_SUCCESS)
+            {
+                for (uint32_t i = 0; i < modeCount; ++i)
+                    immediateSupported = immediateSupported || modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR;
+            }
+        }
+
+        // A list of the modes the swapchain may switch between (VK_EXT_swapchain_maintenance1) the game chained: ours
+        // is made with the game's list, so IMMEDIATE has to be in it
+        bool listAllows = true;
+
+        for (auto* node = static_cast<const VkBaseInStructure*>(pCreateInfo->pNext); node != nullptr;
+             node = node->pNext)
+        {
+            if (node->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT)
+                continue;
+
+            const auto* list = reinterpret_cast<const VkSwapchainPresentModesCreateInfoEXT*>(node);
+            listAllows = false;
+
+            for (uint32_t i = 0; i < list->presentModeCount; ++i)
+                listAllows = listAllows || list->pPresentModes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+
+        const auto chosen = ChoosePresentMode(static_cast<int>(pCreateInfo->presentMode), immediateSupported,
+                                              listAllows, Config::Instance()->F5LowVulkanTearing.value_or_default(),
+                                              Config::Instance()->IsFGEnabled());
+        info.presentMode = static_cast<VkPresentModeKHR>(chosen.mode);
+        _gamePresentMode = static_cast<int>(pCreateInfo->presentMode);
+        _tearing = chosen.why == TearingWhy::Tearing;
+
+        if (pCreateInfo->presentMode == VK_PRESENT_MODE_MAILBOX_KHR)
+            LOG_INFO("F5Low (Vulkan): the game asked for present mode {} (MAILBOX): {} ({})", _gamePresentMode,
+                     chosen.mode, TearingText(chosen.why));
+    }
+
     info.minImageCount = RequestedMinImageCount(
         pCreateInfo->minImageCount, SpareImagesToAsk(gateWanted, _maxInterpolationCount, _wanted), caps.maxImageCount);
     _gameMinImages = pCreateInfo->minImageCount;
@@ -1486,6 +1536,16 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
                      info.minImageCount, magic_enum::enum_name(result));
             info.minImageCount = pCreateInfo->minImageCount;
             info.oldSwapchain = VK_NULL_HANDLE;
+            result = createFn(device, &info, pAllocator, pSwapchain);
+        }
+
+        if (result != VK_SUCCESS && _tearing)
+        {
+            LOG_WARN("F5Low (Vulkan): IMMEDIATE was refused ({}), trying the game's MAILBOX",
+                     magic_enum::enum_name(result));
+            info.presentMode = pCreateInfo->presentMode;
+            info.oldSwapchain = VK_NULL_HANDLE;
+            _tearing = false;
             result = createFn(device, &info, pAllocator, pSwapchain);
         }
     }
@@ -1522,7 +1582,7 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
 
     // The latency bound: present wait with present ids when the device has them (a fence per present through
     // VK_EXT_swapchain_maintenance1 would clash with fences the game chains itself)
-    _presentMode = static_cast<int>(pCreateInfo->presentMode);
+    _presentMode = static_cast<int>(info.presentMode); // the mode our swapchain really has
     _gameMinImages = pCreateInfo->minImageCount;
     _gateCount = 1;
     _gateMode = _presentMode;
@@ -1537,8 +1597,10 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
 
     _meterWasOn = false;
     _gateEnabled = gateWanted && SwapchainFunction<PFN_vkWaitForPresentKHR>("vkWaitForPresentKHR", nullptr) != nullptr;
-    LOG_INFO("F5Low (Vulkan): game asked for {} images, present mode {}, latency bound {} ({})",
-             pCreateInfo->minImageCount, _presentMode, _gateBound,
+    LOG_INFO("F5Low (Vulkan): game asked for {} images, present mode {}{}, latency bound {} ({})",
+             pCreateInfo->minImageCount, _presentMode,
+             _tearing ? std::format(" (game asked {}: tearing like D3D12)", _gamePresentMode) : std::string(),
+             _gateBound,
              _gateEnabled ? "on, present wait"
                           : (!_presentWaitOn ? "off: the device has no present id / present wait, the spare images add "
                                                "queue depth while not generating"
@@ -2500,7 +2562,7 @@ void F5Low_Vk::LogStats()
         "F5Low (Vulkan) stats ({} game frames, {} not generated): game {:.1f} fps, shown {:.1f} fps, generated "
         "{:.2f}/frame, our waits {:.2f} ms/frame (gate {:.2f}, other {:.2f}), interval {:.2f} ms, pacing {} (mode {}, "
         "active {}), metering {} (feedback 0x{:X}, refused {}), present spacing mean {:.2f} sd {:.2f} max {:.2f} ms, "
-        "late {}, gate waits {}; overlay meter {} ({:.1f} fps counted, FG active {}, paused {})",
+        "late {}, gate waits {}; overlay meter {} ({:.1f} fps counted, FG active {}, paused {}); present mode {}{}",
         entries, offFrames, gameFps, shownFps,
         batches > 0 ? static_cast<double>(generated) / static_cast<double>(batches) : 0.0,
         entries > 0 ? waitMs / entries : 0.0, entries > 0 ? gateMs / entries : 0.0,
@@ -2508,7 +2570,8 @@ void F5Low_Vk::LogStats()
         haveInfo ? info.pacingMode : -1, haveInfo ? info.pacingActive : 0,
         _meteringOn.load() || _meterWasOn.load() ? "on" : "off", _lastFeedback.load(),
         haveInfo ? info.meteringRefused : 0, spacing.mean, spacing.Sd(), spacing.max, spacing.late, gateWaits,
-        _statMeterOn ? "on" : "off", overlayFps, IsActive() ? "yes" : "no", IsPaused() ? "yes" : "no");
+        _statMeterOn ? "on" : "off", overlayFps, IsActive() ? "yes" : "no", IsPaused() ? "yes" : "no", _presentMode,
+        _tearing ? std::format(" (game asked {}: tearing like D3D12)", _gamePresentMode) : std::string());
 }
 
 uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)

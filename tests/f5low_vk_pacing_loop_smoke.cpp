@@ -778,8 +778,44 @@ static void FullLoop()
 }
 #endif
 
+// A game that asks for MAILBOX (V-Sync off) with a cap above the refresh rate (RDR2: 25 fps at 5X = 125 images a second on a 120 Hz
+// screen): MAILBOX shows the latest image at each refresh and replaces the others, IMMEDIATE shows every image (it may tear)
+static void TearingLoop()
+{
+    const double hz = 120.0, vblankMs = 1000.0 / hz, spacingMs = 8.0; // 125 presents a second, evenly spaced (timer paced)
+    const int presents = 1250;                                       // 10 s
+    int shownMailbox = 0;
+    long lastRefresh = -1;
+
+    for (int i = 0; i < presents; ++i)
+    {
+        const long refresh = static_cast<long>(std::floor(i * spacingMs / vblankMs));
+
+        if (refresh != lastRefresh)
+            ++shownMailbox; // the first image since the last refresh; the next ones before the following refresh replace it
+
+        lastRefresh = refresh;
+    }
+
+    int shownImmediate = 0;
+
+    for (int i = 0; i < presents; ++i)
+        ++shownImmediate; // every present is a flip
+
+    const double droppedPerSecond = (presents - shownMailbox) / 10.0;
+    std::printf("\nV-SYNC OFF, MAILBOX vs IMMEDIATE (125 images/s on 120 Hz): MAILBOX shows %d of %d images (%.1f replaced a second), IMMEDIATE "
+                "shows %d (none replaced)\n", shownMailbox, presents, droppedPerSecond, shownImmediate);
+    CHECK(droppedPerSecond > 3.0 && droppedPerSecond < 7.0); // about 5 a second
+    CHECK(shownImmediate == presents);
+
+    // the rule that picks IMMEDIATE for exactly this case
+    CHECK(ChoosePresentMode(1, true, true, true, true).mode == 0);
+}
+
 int main()
 {
+    TearingLoop();
+
     const double works[] = { 8.3, 16.7, 25.0, 33.0 };
     const double rates[] = { 60.0, 120.0, 144.0 };
 

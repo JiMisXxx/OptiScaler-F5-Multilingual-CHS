@@ -134,7 +134,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     {
         return F5LowVk::LatencyBound(_gameMinImages, _gateCount.load(), F5LowVk::VsyncPaces(_gateMode.load()));
     }
-    int _presentMode = 0;
+    int _presentMode = 0;     // the mode our swapchain was made with
+    int _gamePresentMode = 0; // the mode the game asked for
+    bool _tearing = false;    // MAILBOX asked, IMMEDIATE made (VulkanTearing)
     std::mutex _gateMutex; // _gate, the ids, _meterHealth
     F5LowVk::GateState _gate;
     F5LowVk::MeterHealth _meterHealth;
