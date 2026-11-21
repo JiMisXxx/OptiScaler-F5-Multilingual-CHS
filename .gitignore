@@ -459,3 +459,17 @@ dlssg_for_sm86/
 # F5Low kit folder: only its README is tracked (see external/f5low/README.md)
 /external/f5low/*
 !/external/f5low/README.md
+
+# FFX SDK 只入库编译必需的头文件子集，其余内容（示例、预编译 DLL）不入库
+/external/FidelityFX-SDK/*
+!/external/FidelityFX-SDK/ffx-api/
+external/FidelityFX-SDK/ffx-api/*
+!/external/FidelityFX-SDK/ffx-api/include/
+/external/FidelityFX-SDK-v2/*
+!/external/FidelityFX-SDK-v2/Kits/
+external/FidelityFX-SDK-v2/Kits/*
+!/external/FidelityFX-SDK-v2/Kits/FidelityFX/
+external/FidelityFX-SDK-v2/Kits/FidelityFX/*
+!/external/FidelityFX-SDK-v2/Kits/FidelityFX/api/
+external/FidelityFX-SDK-v2/Kits/FidelityFX/api/*
+!/external/FidelityFX-SDK-v2/Kits/FidelityFX/api/include/
