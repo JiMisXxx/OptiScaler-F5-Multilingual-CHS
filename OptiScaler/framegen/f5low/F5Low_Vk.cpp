@@ -370,7 +370,14 @@ struct F5Low_Vk::Impl
     {
         ComPtr<ID3D12Fence> fence;
         uint64_t value = 0;
+        uint64_t key = 0; // the StampBook key of the frame (StampKey)
         uint32_t slot = 0;
+    };
+    struct GraveEvent
+    {
+        HANDLE event = nullptr;
+        ComPtr<ID3D12Fence> fence;
+        uint64_t value = 0;
     };
     std::mutex watchMutex; // the queues, the stamps, the graveyard
     std::condition_variable watchCv;
@@ -379,18 +386,53 @@ struct F5Low_Vk::Impl
     HANDLE watchStopEvent = nullptr; // manual reset: set = the watchers leave their waits
     bool watchStop = false;
     StampBook stamps;
-    std::vector<HANDLE>
-        watchGraveyard;     // events a fence may still signal (a wait that timed out or was stopped): never closed
+    // events a fence may still signal (a wait that timed out or was stopped): closed once the fence has passed the
+    // value
+    std::vector<GraveEvent> watchGraveyard;
     bool pacerGate = false; // the latency gate state the pacer was made for
 
-    ~Impl() = default;
+    // Closes the events whose fence has passed the value they were set for (the signal has fired: nothing can hand it
+    // to a reused handle); watchMutex held by the caller
+    void SweepGraveyard()
+    {
+        std::erase_if(watchGraveyard,
+                      [](GraveEvent& grave)
+                      {
+                          if (grave.fence == nullptr || grave.fence->GetCompletedValue() < grave.value)
+                              return false;
+
+                          CloseHandle(grave.event);
+                          return true;
+                      });
+    }
+
+    // The stop event and the swept graveyard, once the watchers are joined (a release, the destructor)
+    void CloseWatchHandles()
+    {
+        {
+            std::lock_guard lock(watchMutex);
+            SweepGraveyard();
+        }
+
+        if (watchStopEvent != nullptr)
+        {
+            CloseHandle(watchStopEvent);
+            watchStopEvent = nullptr;
+        }
+    }
+
+    ~Impl()
+    {
+        if (!watcher[0].joinable() && !watcher[1].joinable())
+            CloseWatchHandles();
+    }
 };
 
 namespace
 {
 bool WatchersRunning(F5Low_Vk::Impl& s) { return s.watcher[0].joinable() && s.watcher[1].joinable(); }
 
-void WatchPush(F5Low_Vk::Impl& s, StampBook::Kind kind, ID3D12Fence* fence, uint64_t value, uint32_t slot)
+void WatchPush(F5Low_Vk::Impl& s, StampBook::Kind kind, ID3D12Fence* fence, uint64_t value, uint64_t key, uint32_t slot)
 {
     if (!WatchersRunning(s) || fence == nullptr)
         return;
@@ -398,6 +440,7 @@ void WatchPush(F5Low_Vk::Impl& s, StampBook::Kind kind, ID3D12Fence* fence, uint
     F5Low_Vk::Impl::WatchReq req;
     req.fence = fence;
     req.value = value;
+    req.key = key;
     req.slot = slot;
 
     {
@@ -434,11 +477,16 @@ int WaitFenceOrStop(F5Low_Vk::Impl& s, ID3D12Fence* fence, uint64_t value, DWORD
         return 0;
     }
 
-    // The fence may still signal this event later: it is kept (closing it would hand the signal to whatever reuses the
-    // handle)
+    // The fence may still signal this event later: it is kept until the fence has passed the value (closing it before
+    // would hand the signal to whatever reuses the handle)
     {
         std::lock_guard lock(s.watchMutex);
-        s.watchGraveyard.push_back(event);
+        s.SweepGraveyard();
+        F5Low_Vk::Impl::GraveEvent grave;
+        grave.event = event;
+        grave.fence = fence;
+        grave.value = value;
+        s.watchGraveyard.push_back(std::move(grave));
     }
 
     return waited == WAIT_OBJECT_0 + 1 ? 2 : 1;
@@ -476,7 +524,7 @@ void WatchLoop(F5Low_Vk::Impl* sp, StampBook::Kind kind)
 
         {
             std::lock_guard lock(s.watchMutex);
-            s.stamps.Put(kind, req.slot, req.value, ticks);
+            s.stamps.Put(kind, req.slot, req.key, ticks);
         }
 
         s.watchCv.notify_all();
@@ -848,8 +896,7 @@ void F5Low_Vk::StartWorker()
         return;
 
     // The GPU stamp watchers go with the worker, once there is a pacer to give the stamps to
-    if (!WatchersRunning(s) && s.pacer != nullptr && s.pacerNowTicks != nullptr && !s.watcher[0].joinable() &&
-        !s.watcher[1].joinable())
+    if (s.pacer != nullptr && s.pacerNowTicks != nullptr && !s.watcher[0].joinable() && !s.watcher[1].joinable())
     {
         if (s.watchStopEvent == nullptr)
             s.watchStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -2303,8 +2350,11 @@ void F5Low_Vk::PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dro
     F5LowPacerPresented what {};
     what.structSize = sizeof(what);
     what.presentTicks = now;
-    // f5low's work for the frame is done by the time a frame of the batch is shown: take the stamp that is there
-    what.gpuDoneTicks = WatchTake(s, StampBook::Done, job.slot, job.doneValue, 0);
+    // f5low's work for the frame is done by the time a generated frame is shown, but the watcher may not have noted it
+    // yet: a batch with a lead waits a moment for it (the lateness of exactly the late frames is what lengthens the
+    // lead); the others take what is there
+    what.gpuDoneTicks =
+        WatchTake(s, StampBook::Done, job.slot, job.doneValue, DoneStampWaitMs(pc.batch.leadTicks, k, job.generated));
     what.flags = dropped ? F5LOW_PACER_PRESENT_DROPPED : 0;
     s.pacerPresented(s.pacer, &pc.batch, k, &what);
 
@@ -2837,7 +2887,7 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
 
     // When the game's frame is finished on the GPU, for the pacer
     if (count > 0)
-        WatchPush(s, StampBook::Ready, readyFence, readyValue, slotIndex);
+        WatchPush(s, StampBook::Ready, readyFence, readyValue, StampKey(readyValue, s.depthViaBuffer), slotIndex);
 
     // The job two frames back (the last one to write this set of output images) is done with them before f5low writes
     // them again
@@ -2915,7 +2965,7 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
 
     // f5low signals the done fence for every answer, so the stamp always comes
     if (count > 0)
-        WatchPush(s, StampBook::Done, output.doneFence, output.doneValue, slotIndex);
+        WatchPush(s, StampBook::Done, output.doneFence, output.doneValue, output.doneValue, slotIndex);
 
     const auto result = s.generate(s.context, &input, &output);
 
@@ -2972,7 +3022,7 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     job.set = set;
     job.generated = generated;
     job.doneValue = output.doneValue;
-    job.readyValue = readyValue;
+    job.readyValue = StampKey(readyValue, s.depthViaBuffer);
     job.realIndex = imageIndex;
     job.realWait = slot.inDone;
     job.intervalMs = _intervalMs;
@@ -3346,6 +3396,10 @@ void F5Low_Vk::ReleaseAll(const char* why)
         StopWorker(false);
         return;
     }
+
+    // The watchers are joined: their stop event and the events of waits that ended early are not needed any more
+    if (!s.watcher[0].joinable() && !s.watcher[1].joinable())
+        s.CloseWatchHandles();
 
     if (s.pacer != nullptr)
     {

@@ -625,6 +625,66 @@ static void RecreateLoop()
     }
 }
 
+// A timed batch (MAILBOX / IMMEDIATE, or FIFO without the gate) whose generated frames finish after their target: the frame reports how
+// late its own GPU work held it and the pacer lengthens the lead. The report needs f5low's done stamp; the production rule
+// (DoneStampWaitMs) waits for it when the batch has a lead, the first version took what was there (0 for exactly these frames).
+static void LeadLoop()
+{
+    constexpr double kFreqHz = 1e7;
+    const auto ticks = [&](double ms) { return static_cast<int64_t>(ms * kFreqHz / 1000.0); };
+
+    double leadWith = 0.0, leadWithout = 0.0;
+
+    for (const bool production : { true, false })
+    {
+        pacecore::Config pc;
+        pc.ticksPerSecond = kFreqHz;
+        pacecore::Pacer pacer(pc);
+        const uint32_t n = 2;
+        double t = 100.0;
+
+        for (int f = 0; f < 400; ++f)
+        {
+            t += 16.7;
+            F5LowPacerFrame fr {};
+            fr.structSize = sizeof(fr);
+            fr.arriveTicks = fr.readyTicks = ticks(t);
+            fr.generated = n;
+            fr.displayPaced = 0;
+            F5LowPacerBatch b {};
+            b.structSize = sizeof(b);
+            pacer.FrameArrived(fr, b);
+
+            for (uint32_t k = 1; k <= n + 1; ++k)
+            {
+                F5LowPacerTarget tgt {};
+                tgt.structSize = sizeof(tgt);
+                pacer.Target(b, k, tgt);
+
+                // f5low's work for a generated frame ends 4 ms after the frame's time; the frame goes out when it does
+                const int64_t finished = tgt.targetTicks + ticks(4.0);
+                F5LowPacerPresented w {};
+                w.structSize = sizeof(w);
+                w.presentTicks = k <= n ? finished : tgt.targetTicks;
+                const bool stamped = production && DoneStampWaitMs(b.leadTicks, k, n) > 0;
+                w.gpuDoneTicks = k <= n && stamped ? finished : 0;
+                pacer.Presented(b, k, w);
+            }
+
+            pacer.BatchDone(b);
+        }
+
+        F5LowPacerInfo info {};
+        pacer.Info(info);
+        (production ? leadWith : leadWithout) = info.leadMs;
+    }
+
+    std::printf("\nLEAD ON A TIMED BATCH (generated frames 4 ms late, n=2, 60 fps): lead %.2f ms with the done stamp waited for, "
+                "%.2f ms taking what is there (the first version)\n", leadWith, leadWithout);
+    CHECK(leadWith > 4.0);       // the lead followed the late frames (3 ms start, up to the step)
+    CHECK(leadWithout < 3.5);    // without the stamp it never moved: the check is able to fail
+}
+
 static void FullLoop()
 {
     using loop::Model;
@@ -807,6 +867,7 @@ int main()
 #ifdef HAVE_PACER
     FullLoop();
     RecreateLoop();
+    LeadLoop();
 #else
     std::printf("full loop skipped (no f5low-fg include path)\n");
 #endif

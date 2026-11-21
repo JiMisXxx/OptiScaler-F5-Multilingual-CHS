@@ -371,6 +371,18 @@ int main()
         CHECK(book.Take(StampBook::Ready, 2, 0) == 0); // no value, no stamp
     }
 
+    // a stamp's key carries the path the value came from: the same value on the other path is another frame
+    {
+        CHECK(StampKey(7, false) == 7 && StampKey(7, true) != StampKey(7, false));
+        StampBook book;
+        book.Put(StampBook::Ready, 0, StampKey(7, false), 100);
+        CHECK(book.Take(StampBook::Ready, 0, StampKey(7, false)) == 100 && book.Take(StampBook::Ready, 0, StampKey(7, true)) == 0);
+    }
+
+    // the done stamp: only a generated frame of a batch with a lead waits for it
+    CHECK(DoneStampWaitMs(0, 1, 2) == 0 && DoneStampWaitMs(30000, 1, 2) > 0 && DoneStampWaitMs(30000, 2, 2) > 0);
+    CHECK(DoneStampWaitMs(30000, 3, 2) == 0 && DoneStampWaitMs(30000, 0, 2) == 0); // the game's own frame, a bad k
+
     // the pacer's own interval from the batch it planned (step = interval / (generated + 1))
     CHECK(std::fabs(PacerIntervalMs(55556, 2, 10000000) - 16.6668) < 0.01 && PacerIntervalMs(0, 2, 10000000) == 0.0);
 

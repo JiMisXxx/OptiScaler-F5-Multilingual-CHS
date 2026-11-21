@@ -387,6 +387,22 @@ struct StampBook
     }
 };
 
+// A stamp key: the fence value, with a bit for the path the value came from (the copy-in fence of the shared images or
+// the depth stage's own fence count separately and may repeat a value after a path switch)
+inline uint64_t StampKey(uint64_t value, bool fromDepthStage)
+{
+    return fromDepthStage ? (value | (1ull << 63)) : value;
+}
+
+// How long a present of the batch waits for f5low's done stamp before telling the pacer: a generated frame of a batch
+// with a lead (timed: MAILBOX / IMMEDIATE, or FIFO without the gate) reports how late its own GPU work held it, and the
+// pacer lengthens the lead by that. The frame's present waited for the same fence, so the watcher notes it within a
+// moment; a batch without a lead takes what is there.
+inline uint32_t DoneStampWaitMs(int64_t leadTicks, uint32_t k, uint32_t generated)
+{
+    return leadTicks > 0 && k >= 1 && k <= generated ? 2u : 0u;
+}
+
 // The pacer's own frame interval, from the batch it planned (step = interval / (generated + 1)); the CPU-only game time
 // is not it
 inline double PacerIntervalMs(int64_t stepTicks, uint32_t generated, int64_t ticksPerSecond)
