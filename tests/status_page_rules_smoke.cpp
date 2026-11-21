@@ -105,6 +105,14 @@ int main()
     CHECK(Is(NrDetailReuseText(true, 3), "Model every 3rd frame"));
     CHECK(Is(NrDetailReuseText(true, 4), "Model every 4th frame"));
 
+    using DlssNrVulkanRoute::RunsOn;
+    CHECK(Is(VulkanRouteText(true, false, false, true, "", RunsOn::D3D12Bridge),
+             "Bridge, game's upscaler (Neural Rendering on D3D12)"));
+    CHECK(Is(VulkanRouteText(false, false, true, false, "dlss_12", RunsOn::D3D12GameCopy),
+             "Native swapchain, but the upscaler is still dlss_12 (Neural Rendering on D3D12)"));
+    CHECK(Is(VulkanRouteText(false, false, false, false, "", RunsOn::Vulkan),
+             "Native swapchain (Neural Rendering on Vulkan)"));
+
     if (failures == 0)
         printf("status_page_rules_smoke: PASS\n");
 

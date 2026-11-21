@@ -102,6 +102,7 @@ struct StatusSummary
     DlssNrNativeMode::Shown mode = DlssNrNativeMode::Shown::Off; // Optical F5Low's mode
     bool gameCallsUpscaler = false;                              // so Optical F5Low stands aside
     std::string backend;                                         // BackendName(): empty until the model is loaded
+    std::string vulkanRoute; // the Vulkan route's row; empty where the route is not offered (not a Vulkan game, dxvk)
 };
 StatusSummary CurrentStatusSummary(::Config* config);
 
@@ -115,6 +116,18 @@ void RenderF5LowFrameGenHint(::Config* config, bool noUpscalerFeature);
 // swapchain or the bridge with the game's upscaler ([DlssNr] NativeFrameGenerationOnly). Optical F5Low's NR + frame
 // generation is the third route and is chosen on its own page.
 void RenderVulkanRoute(::Config* config);
+
+// The Neural Rendering pages' "Runs on" line for a Vulkan game (native swapchain or D3D12 through the bridge), with the
+// fix for a D3D12 upscaler left behind. Nothing for other games.
+void RenderVulkanRunsOn(::Config* config);
+
+// The route is the native swapchain of a Vulkan game (the Frame Generation page labels the outputs that need the
+// bridge).
+bool VulkanNativeRoute(::Config* config);
+
+// Under the Frame Generation page's output combo: where `fgOutput` (framegen/FGOutput.h) needs the bridge and the route
+// is the native swapchain, a line saying so and the one click to the bridge. Never changes the route by itself.
+void RenderBridgeNeeded(::Config* config, uint32_t fgOutput);
 
 // Once per frame: after about ten seconds with no upscaler call (and the header making its Optical F5Low offer), one
 // toast per session points to the Optical F5Low page. [Menu] F5LowHint=false silences it.

@@ -12,6 +12,7 @@
 #include <cfloat>
 
 #include <dlssnr/DlssNr.h>
+#include <dlssnr/DlssNr_VulkanRoute.h>
 #include <native/VirtualUpscalerDriver.h>
 #include <native/NativeLowLatency.h>
 #include <native/NativeDriverDx11.h>
@@ -4046,9 +4047,21 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
-    outputOptions[xefgOutputIndex].set_disabled(vulkanNoFg, state.swapchainApi == API::Vulkan
-                                                                ? "Needs the bridge: Vulkan route or Optical F5Low"
-                                                                : "Unsupported API");
+    // On a Vulkan game's native swapchain the two that need the bridge stay selectable, labelled, and choosing one gets
+    // the line and button below the combo (DlssNr::RenderBridgeNeeded): a greyed entry gave no way forward
+    const bool vulkanNativeRoute = DlssNr::VulkanNativeRoute(config);
+    outputOptions[xefgOutputIndex].set_disabled(
+        vulkanNoFg && !vulkanNativeRoute,
+        state.swapchainApi == API::Vulkan ? "Needs the bridge: Vulkan route or Optical F5Low" : "Unsupported API");
+
+    static_assert((uint32_t) DlssNrVulkanRoute::Output::NoFG == (uint32_t) FGOutput::NoFG &&
+                  (uint32_t) DlssNrVulkanRoute::Output::FSRFG == (uint32_t) FGOutput::FSRFG &&
+                  (uint32_t) DlssNrVulkanRoute::Output::DLSSG == (uint32_t) FGOutput::DLSSG &&
+                  (uint32_t) DlssNrVulkanRoute::Output::XeFG == (uint32_t) FGOutput::XeFG &&
+                  (uint32_t) DlssNrVulkanRoute::Output::F5Low == (uint32_t) FGOutput::F5Low);
+    for (const auto output : { FGOutput::XeFG, FGOutput::F5Low })
+        outputOptions[(uint32_t) output].label =
+            DlssNrVulkanRoute::OutputLabel((DlssNrVulkanRoute::Output) output, vulkanNativeRoute);
 
     // F5Low output requirements: the XeFG ones, plus an NVIDIA GPU and f5low.dll in the plugins folder
     auto constexpr f5lowOutputIndex = (uint32_t) FGOutput::F5Low;
@@ -4264,6 +4277,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         if (!setupCard.IsOpen())
             return;
 
+        DlssNr::RenderBridgeNeeded(config, (uint32_t) config->FGOutput.value_or_default());
         RenderFgStatusLine(ctx);
 
         if (state.fgSettingsChanged)
