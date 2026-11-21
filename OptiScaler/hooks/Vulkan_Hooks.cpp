@@ -14,6 +14,7 @@
 
 #include <framegen/ffx/FSRFG_Vk.h>
 #include <framegen/dlssg/DLSSG_Vk.h>
+#include <framegen/f5low/F5Low_Vk.h>
 #include <fsr4/FSR4DriverProviderVk.h>
 #include <proxies/FfxApi_Proxy.h>
 #include <misc/FrameLimit.h>
@@ -380,6 +381,9 @@ PFN_vkVoidFunction VulkanHooks::OriginalSwapchainFunction(const char* pName)
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0)
         return o_QueuePresentKHR != nullptr ? (PFN_vkVoidFunction) FGOutputQueuePresent : nullptr;
 
+    if (std::strcmp(pName, "vkWaitForPresentKHR") == 0)
+        return (PFN_vkVoidFunction) o_WaitForPresentKHR;
+
     return nullptr;
 }
 
@@ -595,6 +599,12 @@ static IFGFeature_Vk* CreateFGFeature()
         else
             LOG_ERROR("Can't init Streamline, DLSSG won't be available");
     }
+    else if (state.activeFgOutput == FGOutput::F5Low)
+    {
+        // XeFG Tensor on the game's own swapchain through f5low.dll's frames-only API (framegen/f5low/F5Low_Vk.h); it
+        // says by itself why it cannot run (an older f5low.dll, another generator)
+        state.currentVkFG = new F5Low_Vk();
+    }
 
     return state.currentVkFG;
 }
@@ -661,8 +671,11 @@ static VkResult hkvkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, cons
     VkApplicationInfo appInfo { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     const auto fgOutput = State::Instance().activeFgOutput;
 
-    if ((fgOutput == FGOutput::FSRFG || fgOutput == FGOutput::DLSSG) && !ScopedSkipVulkanHooks::Active() &&
-        !VkPresentBridge::DxvkGame())
+    // F5Low only on the native swapchain: with the bridge its frames come from the XeFG API on D3D12 as before
+    const bool nativeOutput = fgOutput == FGOutput::FSRFG || fgOutput == FGOutput::DLSSG ||
+                              (fgOutput == FGOutput::F5Low && !VkPresentBridge::ModeWantsBridge());
+
+    if (nativeOutput && !ScopedSkipVulkanHooks::Active() && !VkPresentBridge::DxvkGame())
     {
         if (localCreateInfo.pApplicationInfo != nullptr)
             appInfo = *localCreateInfo.pApplicationInfo;
@@ -1624,7 +1637,9 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     VkSwapchainLatencyCreateInfoNV latencyInfo {};
     bool latencyMode = false;
 
-    if (pCreateInfo != nullptr && !ScopedSkipVulkanHooks::Active() && !nativeFgSwapchain)
+    // An output that makes the driver's own swapchain (F5Low) takes the mode too, in the create info it is handed.
+    if (pCreateInfo != nullptr && !ScopedSkipVulkanHooks::Active() &&
+        (!nativeFgSwapchain || nativeFg->WantsLatencyMode()))
         latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);
 
     // On the hidden surface the swapchain never takes the screen; the game's own value is put back after the call.
@@ -1650,9 +1665,15 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
             fgSwapchain = nativeFg->CreateSwapchain(device, &localCreateInfo, pAllocator, pSwapchain);
             result = VK_SUCCESS;
 
-            // FFX could not make it: the game's own swapchain, as without the output
+            // FFX could not make it: the game's own swapchain, as without the output (a failed create of the output's
+            // retired the old swapchain, it is not passed again)
             if (!fgSwapchain)
+            {
+                if (nativeFg->RetiredOldSwapchain())
+                    localCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+
                 latencyMode = ChainLatencyMode(device, localCreateInfo, latencyInfo);
+            }
         }
 
         if (!fgSwapchain)
@@ -1857,6 +1878,14 @@ static VkResult hkvkWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain,
     if (auto fg = State::Instance().currentVkFG;
         fg != nullptr && fg->OwnsSwapchain(swapchain) && !FromFGOutput(_ReturnAddress()))
     {
+        // An output with the driver's own swapchain (F5Low) keeps the game's present ids meaningful: its worker
+        // presents to the swapchain, so the wait goes through the output's locking
+        if (fg->HasDriverSwapchain())
+        {
+            ScopedFGCall fgCall {};
+            return fg->WaitForPresent(device, swapchain, presentId, timeout);
+        }
+
         return VK_SUCCESS;
     }
 
@@ -1904,6 +1933,11 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
     if (device != VK_NULL_HANDLE)
     {
         VkPresentBridge::OnDeviceDestroying(device);
+
+        // The native FG output's work on it (F5Low's shared images and fences) goes while the device still lives
+        if (auto fg = State::Instance().currentVkFG; fg != nullptr)
+            fg->OnDeviceDestroying(device);
+
         NativeMotionVk::OnDeviceDestroyed(device);
         GenericDepthVk::OnDeviceDestroyed(device);
         DlssNr::ExposureScanVk::OnDeviceDestroyed(device);

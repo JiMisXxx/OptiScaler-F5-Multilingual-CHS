@@ -5449,6 +5449,7 @@ static VulkanRouteState ReadVulkanRouteNow(Config* config)
     in.upscalerOnD3D12 = FeatureProvider_Vk::IsOn12(state.backend);
     in.motionModeOn = shown == Shown::NrOnly || shown == Shown::NrAndFrameGeneration;
     in.finishedPicture = config->DlssNrFinishedPicture.value_or_default();
+    in.finishedPictureRan = NativeMotionVk::FinishedPictureRan();
     in.runningVk = DlssNr::IsRunningVk();
     in.runningD3D12 = DlssNr::IsRunning();
     state.runsOn = DlssNrVulkanRoute::NrRunsOn(in);
@@ -5684,16 +5685,28 @@ void RenderVulkanRoute(Config* config)
     if (ImGui::RadioButton("Bridge, game's upscaler##vkroute", routeOn) && !routeOn)
         UseBridgeRoute(config);
 
-    HelpMarker(
-        "Native swapchain: the game's own device and swapchain. FSR FG and DLSS-G run there; Neural Rendering "
-        "runs on Vulkan.\n"
-        "Bridge: the game's swapchain moves to a hidden window and a D3D12 swapchain is shown. XeFG and F5Low are "
-        "D3D12 libraries and need it. The game's upscaler runs on a D3D12 copy, so Neural Rendering runs on "
-        "D3D12.\n"
-        "Choose before the game starts; leaving the bridge needs a restart.");
+    HelpMarker("Native swapchain: the game's own device and swapchain. FSR FG, DLSS-G and F5Low (XeFG Tensor) run "
+               "there; Neural Rendering "
+               "runs on Vulkan.\n"
+               "Bridge: the game's swapchain moves to a hidden window and a D3D12 swapchain is shown. XeFG is a "
+               "D3D12 library and needs it. The game's upscaler runs on a D3D12 copy, so Neural Rendering runs on "
+               "D3D12.\n"
+               "Choose before the game starts; leaving the bridge needs a restart.");
 
-    ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
-    ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
+    // The chosen route's row is read, the other one is the quiet one
+    const bool nativeSelected = !routeOn && !f5lowFg;
+
+    if (nativeSelected)
+        ImGui::Text("%s", DlssNrVulkanRoute::NativeSummary());
+    else
+        ImGui::TextDisabled("%s", DlssNrVulkanRoute::NativeSummary());
+
+    if (nativeSelected)
+        ImGui::TextDisabled("%s", DlssNrVulkanRoute::BridgeSummary());
+    else
+        ImGui::Text("%s", DlssNrVulkanRoute::BridgeSummary());
+
+    ImGui::Spacing();
     ImGui::TextDisabled("%s", DlssNrVulkanRoute::CardRunsOnLine(route.runsOn).c_str());
     DrawLeftoverFix(config, route, "route");
 

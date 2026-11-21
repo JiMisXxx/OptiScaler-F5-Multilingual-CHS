@@ -367,6 +367,7 @@ struct GameCapInputs
     uint32_t xefgShownPerRendered = 1; // native::lowlatency::XefgShownPerRendered
     bool xellCountsShown = true;       // XeFG's XeLL counts shown frames (XeFGProxy::XellCountsShownFrames)
     bool driverMultipliesCap = false;  // DLSS-G behind XeFG's API (XeFGProxy::DriverMultipliesReflexCap)
+    bool vkF5Low = false; // F5Low on a native Vulkan swapchain: its shown frames are not known to the driver
     uint8_t dlssgFramesToGenerate = 0; // the game's DLSS FG, seen from its async markers
     bool outputIsXell = false;         // the output runs XeLL (fakenvapi's choice)
     bool outputIsFrameCap = false;     // the output only waits for the cap (Frame cap only)
@@ -434,6 +435,10 @@ constexpr GameCap CapForGame(const GameCapInputs& in)
 
     if (in.fgActive && in.fsrFgOutput)
         fps /= 2;
+    else if (in.vkF5Low)
+        // The driver never hears F5Low's multiplier on Vulkan, so its minimum interval counts the game's own frames:
+        // the shown cap is divided here, per rendered frame
+        fps = native::lowlatency::CapPerRenderedFrame(fps, in.xefgShownPerRendered);
     else if (split)
     {
         // Per rendered frame, except DLSS-G behind XeFG's API: the driver multiplies the interval itself (as for a

@@ -20,10 +20,10 @@ enum class Output : uint32_t
     F5Low
 };
 
-// XeFG and Optical F5Low's generator are D3D12 libraries (Intel ships no Vulkan frame generation; F5Low has the same
-// interface and paces through DXGI): on a Vulkan game they need the bridge. FSR FG and DLSS-G have a Vulkan
-// swapchain of their own.
-inline bool OutputNeedsBridge(Output output) { return output == Output::XeFG || output == Output::F5Low; }
+// XeFG is a D3D12 library (Intel ships no Vulkan frame generation): on a Vulkan game it needs the bridge. FSR FG and
+// DLSS-G have a Vulkan swapchain of their own, and F5Low (XeFG Tensor) presents on the game's own Vulkan swapchain
+// (framegen/f5low/F5Low_Vk: it generates on a private D3D12 device with shared images, no bridge).
+inline bool OutputNeedsBridge(Output output) { return output == Output::XeFG; }
 
 inline const char* OutputName(Output output)
 {
@@ -110,6 +110,8 @@ struct NrInputs
     bool motionModeOn = false;    // Optical F5Low NR only or NR + frame generation
     bool finishedPicture = false; // the setting (the route turns it off)
     bool finishedPictureRunsOnVulkan = kFinishedPictureRunsOnVulkan;
+    bool finishedPictureRan = false; // it ran on the last present (NativeMotionVk::FinishedPictureRan): Neural
+                                     // Rendering is its, not Optical F5Low's, whatever the Optical F5Low setting says
     bool runningVk = false;    // DlssNr::IsRunningVk(): the native Vulkan seam is running Neural Rendering
     bool runningD3D12 = false; // DlssNr::IsRunning(): the D3D12 side is
 };
@@ -127,6 +129,9 @@ inline RunsOn NrRunsOn(const NrInputs& in)
 
     if (in.routeOn)
         byDesign = in.bridgeUp ? RunsOn::D3D12Bridge : RunsOn::D3D12GameCopy;
+    else if (in.finishedPicture && in.finishedPictureRunsOnVulkan && in.finishedPictureRan && in.runningD3D12)
+        byDesign = RunsOn::D3D12FinishedPicture; // also with Optical F5Low's motion on: it makes the picture, Finished
+                                                 // Picture runs NR
     else if (in.motionModeOn)
         byDesign = RunsOn::D3D12F5Low;
     else if (in.finishedPicture)
@@ -167,9 +172,28 @@ inline std::string RunsOnText(RunsOn runsOn)
     }
 }
 
+// The route card's "Now:" line, in full words (the short forms above are for the Status page and the pages' lines)
 inline std::string CardRunsOnLine(RunsOn runsOn)
 {
-    return runsOn == RunsOn::NrOff ? "Neural Rendering is off." : "Neural Rendering runs on: " + RunsOnText(runsOn);
+    switch (runsOn)
+    {
+    case RunsOn::NrOff:
+        return "Now: Neural Rendering is off.";
+    case RunsOn::Vulkan:
+        return "Now: Neural Rendering runs on Vulkan, in the game's own device.";
+    case RunsOn::D3D12Bridge:
+        return "Now: Neural Rendering runs on D3D12, through the bridge.";
+    case RunsOn::D3D12F5Low:
+        return "Now: Neural Rendering runs on D3D12, because Optical F5Low copies the picture there.";
+    case RunsOn::D3D12FinishedPicture:
+        return "Now: Neural Rendering runs on D3D12, because Finished Picture copies the picture there.";
+    case RunsOn::D3D12GameCopy:
+        return "Now: Neural Rendering runs on D3D12, because the game's upscaler still runs on its D3D12 copy.";
+    case RunsOn::FinishedPictureNotRunning:
+        return "Now: Neural Rendering is not running (Finished Picture is waiting, see its status).";
+    default:
+        return "Now: Neural Rendering runs on D3D12.";
+    }
 }
 
 // The page line is not drawn while Neural Rendering is off
@@ -189,8 +213,11 @@ inline std::string LeftoverLine(const std::string& backendCode)
 }
 
 // The route card's two rows, always shown.
-inline const char* NativeSummary() { return "Native swapchain: FSR FG, DLSS-G. One device, no copies."; }
-inline const char* BridgeSummary() { return "Bridge: also F5Low, XeFG. Adds a D3D12 device and copies."; }
+inline const char* NativeSummary()
+{
+    return "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. Lighter than the bridge.";
+}
+inline const char* BridgeSummary() { return "Bridge: adds XeFG. Costs a second (D3D12) device and picture copies."; }
 
 // The Status page's "Vulkan route" row: the route, then where Neural Rendering runs.
 inline std::string StatusText(bool routeOn, bool f5lowFrameGeneration, bool leftover, bool bridgeUp,

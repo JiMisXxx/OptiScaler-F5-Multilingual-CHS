@@ -374,6 +374,43 @@ class GuideRing
     bool _carriedReset = false;
 };
 
+// What frame generation does to Finished Picture on a native Vulkan game. FSR FG and DLSS-G own the swapchain and
+// replace or follow the game's present with frames of their own: not supported yet. F5Low (framegen/f5low/F5Low_Vk)
+// keeps the game's own swapchain and takes the real picture from the present after Finished Picture has written its
+// result into it (the present's wait list is the Finished Picture copy-back's semaphore, so the copy-in waits for it on
+// the GPU); the generated frames are made from the finished pictures, as on D3D12. The game's own DLSS-G still blocks
+// it.
+enum class FgBlock
+{
+    None,
+    OptiFg,   // FSR FG or DLSS-G output, active
+    GameDlssg // the game's own DLSS-G is generating
+};
+
+inline FgBlock BlockedByFrameGeneration(bool optiFgActive, bool f5lowOutput, bool gameDlssgGenerates)
+{
+    if (gameDlssgGenerates)
+        return FgBlock::GameDlssg;
+
+    return optiFgActive && !f5lowOutput ? FgBlock::OptiFg : FgBlock::None;
+}
+
+inline const char* FgBlockText(FgBlock block)
+{
+    switch (block)
+    {
+    case FgBlock::OptiFg:
+        return "Finished Picture does not run with FSR FG or DLSS-G output on a Vulkan game yet (F5Low works). Switch "
+               "the FG "
+               "output to F5Low or off, or pick After Super Resolution.";
+    case FgBlock::GameDlssg:
+        return "Finished Picture does not run while the game's own DLSS frame generation is on. Turn the game's frame "
+               "generation off, or pick After Super Resolution.";
+    default:
+        return "";
+    }
+}
+
 // The idle release of the private D3D12 pass (native/NativeDriverVk.cpp) shares that pass with Optical F5Low's NR (the
 // same model, scratch pair and history). It may start only when Finished Picture has been idle for `limitMs` AND
 // nothing else uses the pass: the motion estimate's NR (NativeInput with NR and Finished Picture on), the virtual

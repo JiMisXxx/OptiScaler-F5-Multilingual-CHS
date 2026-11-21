@@ -24,11 +24,11 @@ int main()
     CHECK(!OutputNeedsBridge(Output::FSRFG));
     CHECK(!OutputNeedsBridge(Output::DLSSG));
     CHECK(OutputNeedsBridge(Output::XeFG));
-    CHECK(OutputNeedsBridge(Output::F5Low));
+    CHECK(!OutputNeedsBridge(Output::F5Low));
 
     // The combo's label carries the note only on the native route, only on those two
     CHECK(OutputLabel(Output::XeFG, true) == "XeFG (bridge)");
-    CHECK(OutputLabel(Output::F5Low, true) == "F5Low (bridge)");
+    CHECK(OutputLabel(Output::F5Low, true) == "F5Low");
     CHECK(OutputLabel(Output::XeFG, false) == "XeFG");
     CHECK(OutputLabel(Output::F5Low, false) == "F5Low");
     CHECK(OutputLabel(Output::FSRFG, true) == "FSR FG");
@@ -41,7 +41,7 @@ int main()
     CHECK(!NativeRoute(true, false, true));
     CHECK(!NativeRoute(false, false, false)); // a D3D game or dxvk: no route at all
 
-    // The offer: only for those two outputs on the native route; the route needs an upscaler call, else F5Low
+    // The offer: only for XeFG on the native route (F5Low presents there itself); the route needs an upscaler call, else F5Low
     for (bool calls : { false, true })
     {
         CHECK(BridgeOffer(Output::FSRFG, true, calls) == Offer::None);
@@ -51,10 +51,9 @@ int main()
         CHECK(BridgeOffer(Output::F5Low, false, calls) == Offer::None);
     }
     CHECK(BridgeOffer(Output::XeFG, true, true) == Offer::UseBridge);
-    CHECK(BridgeOffer(Output::F5Low, true, true) == Offer::UseBridge);
+    CHECK(BridgeOffer(Output::F5Low, true, true) == Offer::None);
     CHECK(BridgeOffer(Output::XeFG, true, false) == Offer::UseF5Low);
-    CHECK(BridgeOffer(Output::F5Low, true, false) == Offer::UseF5Low);
-    CHECK(BridgeNeededLine(Output::F5Low) == "F5Low runs on D3D12: it needs the Vulkan bridge.");
+    CHECK(BridgeOffer(Output::F5Low, true, false) == Offer::None);
     CHECK(BridgeNeededLine(Output::XeFG) == "XeFG runs on D3D12: it needs the Vulkan bridge.");
 
     // Where Neural Rendering runs
@@ -90,16 +89,48 @@ int main()
     CHECK(runs(true, false, false, false, false, false, false, false, true) == RunsOn::D3D12);
     CHECK(runs(true, false, false, false, false, true, true, false, true) == RunsOn::D3D12FinishedPicture);
 
+    // Finished Picture with an F5Low output (the Optical F5Low motion setting on beside it): when Finished Picture ran, it is the
+    // one running Neural Rendering; before that, or when it was refused, the setting says what was meant
+    {
+        NrInputs in;
+        in.nrEnabled = true;
+        in.motionModeOn = true;
+        in.finishedPicture = true;
+        in.runningD3D12 = true;
+        in.finishedPictureRan = true;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12FinishedPicture);
+        in.finishedPictureRan = false;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12F5Low);
+        in.finishedPictureRan = true;
+        in.finishedPictureRunsOnVulkan = false;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12F5Low);
+        in.finishedPictureRunsOnVulkan = true;
+        in.finishedPicture = false;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12F5Low);
+        in.finishedPicture = true;
+        in.routeOn = true; // the route turns Finished Picture off: the route's line stays
+        in.bridgeUp = true;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12Bridge);
+    }
+
     CHECK(RunsOnText(RunsOn::Vulkan) == "Vulkan (native swapchain)");
     CHECK(RunsOnText(RunsOn::D3D12Bridge) == "D3D12 (Vulkan bridge)");
     CHECK(RunsOnText(RunsOn::D3D12GameCopy) == "D3D12 (game's upscaler copy)");
     CHECK(RunsOnText(RunsOn::D3D12F5Low) == "D3D12 (Optical F5Low, copies)");
     CHECK(RunsOnText(RunsOn::D3D12FinishedPicture) == "D3D12 (Finished Picture, copies)");
     CHECK(RunsOnText(RunsOn::D3D12) == "D3D12");
-    CHECK(CardRunsOnLine(RunsOn::NrOff) == "Neural Rendering is off.");
-    CHECK(CardRunsOnLine(RunsOn::Vulkan) == "Neural Rendering runs on: Vulkan (native swapchain)");
+    CHECK(CardRunsOnLine(RunsOn::NrOff) == "Now: Neural Rendering is off.");
+    CHECK(CardRunsOnLine(RunsOn::Vulkan) == "Now: Neural Rendering runs on Vulkan, in the game's own device.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12Bridge) == "Now: Neural Rendering runs on D3D12, through the bridge.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12F5Low) ==
+          "Now: Neural Rendering runs on D3D12, because Optical F5Low copies the picture there.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12FinishedPicture) ==
+          "Now: Neural Rendering runs on D3D12, because Finished Picture copies the picture there.");
+    CHECK(CardRunsOnLine(RunsOn::D3D12GameCopy) ==
+          "Now: Neural Rendering runs on D3D12, because the game's upscaler still runs on its D3D12 copy.");
     CHECK(CardRunsOnLine(RunsOn::FinishedPictureNotRunning) ==
-          "Neural Rendering runs on: none (Finished Picture is not running, see its status)");
+          "Now: Neural Rendering is not running (Finished Picture is waiting, see its status).");
+    CHECK(CardRunsOnLine(RunsOn::D3D12) == "Now: Neural Rendering runs on D3D12.");
     CHECK(PageRunsOnLine(RunsOn::D3D12F5Low) == "Runs on: D3D12 (Optical F5Low, copies)");
 
     // The leftover: only dlss_12 (the route's own), route off, no F5Low mode, a Vulkan game only
@@ -111,8 +142,10 @@ int main()
     CHECK(LeftoverLine("dlss_12") ==
           "The game's upscaler runs on its D3D12 copy (dlss_12), so Neural Rendering runs on D3D12.");
 
-    CHECK(std::string(NativeSummary()).find("FSR FG, DLSS-G") != std::string::npos);
-    CHECK(std::string(BridgeSummary()).find("F5Low, XeFG") != std::string::npos);
+    CHECK(std::string(NativeSummary()) == "Native swapchain: frame generation with FSR FG, DLSS-G or F5Low. Lighter than the bridge.");
+    CHECK(std::string(NativeSummary()).find("FSR FG, DLSS-G or F5Low") != std::string::npos);
+    CHECK(std::string(BridgeSummary()) == "Bridge: adds XeFG. Costs a second (D3D12) device and picture copies.");
+    CHECK(std::string(BridgeSummary()).find("adds XeFG") != std::string::npos);
 
     // The Status page's row
     CHECK(StatusText(true, false, false, true, "", RunsOn::D3D12Bridge) ==

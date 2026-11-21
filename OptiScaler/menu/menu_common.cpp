@@ -1819,6 +1819,8 @@ void MenuCommon::FGOutputPresent() { fgOutputPresentRate.Present(Util::Milliseco
 
 void MenuCommon::FGOutputPresents(bool presents) { fgOutputPresentRate.SetEnabled(presents); }
 
+uint64_t MenuCommon::FGOutputPresentTotal(bool* enabled) { return fgOutputPresentRate.Total(enabled); }
+
 struct MenuCommon::RenderMenuContext
 {
     State& state;
@@ -2297,9 +2299,9 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
         frameTimesCalculated = true;
 
-        // Vulkan FG output timing is already averaged across the last 125 ms.
-        // Use it directly for the current FPS readout; preserve the shared
-        // history for the separately labelled average and frame-time graph.
+        // Vulkan FG output timing is already averaged over the last 100 output presents (as the 100 frames above
+        // on D3D12, where the menu is drawn once per shown frame). Use it directly for the current FPS readout;
+        // preserve the shared history for the separately labelled average and frame-time graph.
         if (ctx.fgOutputFrameTimeMs > 0.0)
         {
             frameTime = ctx.fgOutputFrameTimeMs;
@@ -4066,8 +4068,26 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     // F5Low output requirements: the XeFG ones, plus an NVIDIA GPU and f5low.dll in the plugins folder
     auto constexpr f5lowOutputIndex = (uint32_t) FGOutput::F5Low;
     static const auto f5lowAvailability = F5Low::Available();
-    if (outputOptions[xefgOutputIndex].disabled)
+    // A native Vulkan game's own swapchain (no bridge) offers F5Low's XeFG Tensor, not XeFG (framegen/f5low/F5Low_Vk.h)
+    const bool f5lowOnNativeVulkan = vulkanNoFg && vulkanNativeFg && state.swapchainApi == API::Vulkan;
+
+    if (f5lowOnNativeVulkan)
+    {
+        outputOptions[f5lowOutputIndex].set_disabled(!f5lowAvailability.available, f5lowAvailability.reason);
+
+        if (!outputOptions[f5lowOutputIndex].disabled)
+            outputOptions[f5lowOutputIndex].tooltip += "\n\nXeFG Tensor only on the native swapchain";
+    }
+    else if (outputOptions[xefgOutputIndex].disabled)
         outputOptions[f5lowOutputIndex].set_disabled(true, outputOptions[xefgOutputIndex].tooltip);
+    else if (state.swapchainApi == API::Vulkan && vulkanNoFg)
+        // Vulkan, but not the game's own native swapchain (a game on dxvk, or the bridge): F5Low runs through the
+        // bridge there
+        outputOptions[f5lowOutputIndex].set_disabled(
+            !f5lowAvailability.available,
+            f5lowAvailability.available
+                ? "Needs the bridge here: this game does not present on its own Vulkan swapchain (for example dxvk)"
+                : f5lowAvailability.reason);
     else
         outputOptions[f5lowOutputIndex].set_disabled(!f5lowAvailability.available, f5lowAvailability.reason);
     // Unsupported FG input selected
@@ -4573,6 +4593,17 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
         in.paused = fg->IsPaused();
         in.generationOff = fg->GenerationOff();
         in.generating = fg->IsGenerating();
+
+        // F5Low on a native Vulkan swapchain has no Dynamic MFG: the reason it passes frames through is its own
+        static std::string vkOffReason;
+        if (state.activeFgOutput == FGOutput::F5Low && state.currentVkFG != nullptr)
+        {
+            vkOffReason = state.currentVkFG->StatusLine();
+            // "Dynamic MFG holds back" is for when it really does
+            if (!state.currentVkFG->DynamicHold())
+                in.offReason =
+                    vkOffReason.empty() ? "passing frames through (nothing generated yet)" : vkOffReason.c_str();
+        }
         in.interpolated = static_cast<int>(fg->GetInterpolatedFrameCount());
 
         if (UsesXeFGApi(state.activeFgOutput))
@@ -4593,6 +4624,13 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
     default:
         ImGui::TextDisabled("%s", status.text.c_str());
         break;
+    }
+
+    // F5Low on a native Vulkan swapchain says why it is not generating
+    if (auto* vkFg = state.currentVkFG; vkFg != nullptr && state.activeFgOutput == FGOutput::F5Low)
+    {
+        if (const auto line = vkFg->StatusLine(); !line.empty() && !vkFg->GenerationOff())
+            ImGui::TextColored(toneMapColor({ 1.0f, 0.75f, 0.25f, 1.0f }), "%s", line.c_str());
     }
 }
 
@@ -5674,6 +5712,57 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", joined(xefgLine, xellLine, "\n").c_str());
             }
+        }
+    }
+
+    // F5Low on a native Vulkan swapchain has no XeFG card (that one needs a D3D12 swapchain): its switch and multiplier
+    if (state.activeFgOutput == FGOutput::F5Low && state.activeFgInput != FGInput::NoFG &&
+        state.currentVkFG != nullptr && state.currentVkFG->HasSwapchain())
+    {
+        ImGui::SeparatorText("Frame Generation (F5Low)");
+
+        const bool followsGame = config->FGFollowsGame();
+        const int maxCount = state.currentVkFG->GetMaxInterpolationCount();
+
+        ImGui::BeginDisabled(followsGame);
+        bool fgActive = config->IsFGEnabled();
+        if (ImGui::Checkbox("Active##f5lowvk", &fgActive))
+        {
+            config->FGEnabled = fgActive;
+
+            if (config->IsFGEnabled())
+                state.fgChanged = true;
+        }
+        ImGui::EndDisabled();
+        ShowHelpMarker(followsGame ? "Follows the game's DLSS FG setting" : "Turns frame generation on or off");
+
+        if (maxCount > 1)
+        {
+            ImGui::SameLine(0.0f, 16.0f);
+            ImGui::BeginDisabled(followsGame);
+
+            const int chosen =
+                std::clamp(config->FGInterpolationCount(config->FGXeFGInterpolationCount.value_or_default(), maxCount),
+                           1, maxCount);
+
+            ImGui::PushItemWidth(95.0f * menuResScale);
+            if (ImGui::BeginCombo("Multiplier##f5lowvk", (std::to_string(chosen + 1) + "X").c_str()))
+            {
+                for (int i = 1; i <= maxCount; i++)
+                {
+                    if (ImGui::Selectable((std::to_string(i + 1) + "X").c_str(), chosen == i))
+                        config->FGXeFGInterpolationCount = i;
+                }
+
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+
+            ShowHelpMarker(
+                "Frames shown per game frame (ini: [XeFG] InterpolationCount).\n"
+                "A lower value applies at once. A higher one needs more spare swapchain images, so the game\n"
+                "is asked to make a new swapchain (the picture may blink once).");
         }
     }
 
