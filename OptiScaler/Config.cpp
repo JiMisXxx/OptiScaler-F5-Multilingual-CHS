@@ -9,6 +9,7 @@
 #include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
 #include <dlssnr/DlssNr_LutSpaces.h>
+#include <dlssnr/DlssNr_WeightsRules.h>
 #include <shaders/dlssnr/DlssNr_ProxyCurve.h>
 
 #include <SimpleIni.h>
@@ -1098,6 +1099,40 @@ std::string GetFloatValue(std::optional<float> value)
     return std::to_string(value.value());
 }
 
+// The old [DlssNr] WeightsSet (one folder for both models) becomes WeightsSetA and WeightsSetB when the file has
+// neither new key (both models take it, no folder is looked at: see WeightsRules::Migrate); the next Save writes the
+// new keys and no old one. Logged once per source: the ini, and a profile.
+static bool MigrateWeightsSet(const std::string& oldSet, bool fromProfile, DlssNr::WeightsRules::Pair& out)
+{
+    if (!DlssNr::WeightsRules::Migrate(oldSet, false, out))
+        return false;
+
+    static bool logged[2] = {};
+    if (!logged[fromProfile])
+    {
+        logged[fromProfile] = true;
+        LOG_INFO("NR model weights: old WeightsSet '{}' in the {} taken for Model A and Model B", oldSet,
+                 fromProfile ? "profile" : "ini");
+    }
+    return true;
+}
+
+// The old single WeightsSet fills both new settings when the source has neither new key (the two plain reads in
+// ReadDlssNr then find nothing to add)
+void Config::ReadDlssNrWeightsSets()
+{
+    if (readString("DlssNr", "WeightsSetA").has_value() || readString("DlssNr", "WeightsSetB").has_value())
+        return;
+
+    DlssNr::WeightsRules::Pair migrated;
+    if (const auto old = readString("DlssNr", "WeightsSet");
+        old.has_value() && MigrateWeightsSet(*old, false, migrated))
+    {
+        DlssNrWeightsSetA.set_from_config(std::optional<std::string>(migrated.a));
+        DlssNrWeightsSetB.set_from_config(std::optional<std::string>(migrated.b));
+    }
+}
+
 // [DlssNr], read through readSource: the ini at a load, a profile or the saved ini from the menu (Config::LoadDlssNrProfile).
 // Each key is read with set_from_config, which fills only an empty setting.
 void Config::ReadDlssNr()
@@ -1354,7 +1389,9 @@ void Config::ReadDlssNr()
     DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
     DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
     DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
-    DlssNrWeightsSet.set_from_config(readString("DlssNr", "WeightsSet"));
+    ReadDlssNrWeightsSets();
+    DlssNrWeightsSetA.set_from_config(readString("DlssNr", "WeightsSetA"));
+    DlssNrWeightsSetB.set_from_config(readString("DlssNr", "WeightsSetB"));
     DlssNrIntensity.set_from_config(readFloat("DlssNr", "Intensity"));
     DlssNrStyle.set_from_config(readUInt("DlssNr", "Style"));
     DlssNrPass2Preset.set_from_config(readUInt("DlssNr", "Pass2Preset"));
@@ -1633,7 +1670,8 @@ static void WriteDlssNr(Config& c, CSimpleIniA& out)
     out.SetValue("DlssNr", "WhitePointScale",
                  GetFloatValue(c.DlssNrWhitePointScale.value_for_config()).c_str());
     out.SetValue("DlssNr", "Preset", GetIntValue(c.DlssNrPreset.value_for_config()).c_str());
-    out.SetValue("DlssNr", "WeightsSet", c.DlssNrWeightsSet.value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "WeightsSetA", c.DlssNrWeightsSetA.value_for_config_or("").c_str());
+    out.SetValue("DlssNr", "WeightsSetB", c.DlssNrWeightsSetB.value_for_config_or("").c_str());
     out.SetValue("DlssNr", "Intensity", GetFloatValue(c.DlssNrIntensity.value_for_config()).c_str());
     out.SetValue("DlssNr", "Style", GetIntValue(c.DlssNrStyle.value_for_config()).c_str());
     out.SetValue("DlssNr", "Pass2Preset",
@@ -1734,6 +1772,18 @@ static DlssNrProfiles::Section KeptSection(const CSimpleIniA& from)
     {
         if (DlssNrProfiles::IsKept(key.pItem))
             section[key.pItem] = from.GetValue("DlssNr", key.pItem, "auto");
+    }
+
+    // A profile saved with the old single WeightsSet: the same migration as the ini's
+    if (const char* old = from.GetValue("DlssNr", "WeightsSet", nullptr);
+        old != nullptr && !section.contains("WeightsSetA") && !section.contains("WeightsSetB"))
+    {
+        DlssNr::WeightsRules::Pair migrated;
+        if (MigrateWeightsSet(old, true, migrated))
+        {
+            section["WeightsSetA"] = migrated.a;
+            section["WeightsSetB"] = migrated.b;
+        }
     }
 
     return section;
@@ -1907,7 +1957,8 @@ size_t Config::ApplyDlssNrSection(const DlssNrProfiles::Section& section)
         NR_PROFILE_FIELD("FinishedPicture", DlssNrFinishedPicture),
         NR_PROFILE_FIELD("Precision", DlssNrPrecision),
         NR_PROFILE_FIELD("Preset", DlssNrPreset),
-        NR_PROFILE_FIELD("WeightsSet", DlssNrWeightsSet),
+        NR_PROFILE_FIELD("WeightsSetA", DlssNrWeightsSetA),
+        NR_PROFILE_FIELD("WeightsSetB", DlssNrWeightsSetB),
         NR_PROFILE_FIELD("WorkingScale", DlssNrWorkingScale),
         NR_PROFILE_FIELD("ModelResolutionAuto", DlssNrModelResolutionAuto),
         NR_PROFILE_FIELD("ReducedUpscaleMethod", DlssNrReducedUpscaleMethod),
@@ -2499,6 +2550,7 @@ bool Config::SaveIni()
         ini.SetValue("DLSS", "Enabled", GetBoolValue(Instance()->DLSSEnabled.value_for_config()).c_str());
 
         WriteDlssNr(*this, ini);
+        ini.Delete("DlssNr", "WeightsSet"); // replaced by WeightsSetA / WeightsSetB
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",

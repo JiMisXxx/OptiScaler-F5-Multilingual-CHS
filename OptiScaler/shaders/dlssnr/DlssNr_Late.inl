@@ -974,15 +974,17 @@ static bool ApplyFinishedPictureInput(ID3D12CommandQueue* queue, ID3D12GraphicsC
             Late::Say("The game's upscaler output and the picture differ in size.");
             return false;
         }
-        // Which weights this pass builds its model from: the selector (DlssNr::Weights, [DlssNr] WeightsSet) reaches the model at
+        // Which weights this pass builds its model from: the selector (DlssNr::Weights, [DlssNr] WeightsSetA / WeightsSetB) reaches the model at
         // its creation on this device, as for any D3D12 game
         static std::string saidWeights = "\x01";
-        const std::string weightsSet = Config::Instance()->DlssNrWeightsSet.value_or_default();
+        const std::string weightsSet =
+            DlssNr::WeightsRules::BuiltKey(Config::Instance()->DlssNrWeightsSetA.value_or_default(),
+                                           Config::Instance()->DlssNrWeightsSetB.value_or_default());
         if (saidWeights != weightsSet)
         {
             saidWeights = weightsSet;
             LOG_INFO("DLSS-NR finished picture (Vulkan game): model weights {}",
-                     weightsSet.empty() ? std::string("stock") : "set \"" + weightsSet + "\"");
+                     weightsSet == "|" ? std::string("stock") : "sets \"" + weightsSet + "\" (A|B)");
         }
         frame.DepthInverted = game->depthInverted;
         frame.MvScaleX = game->mvScaleX;

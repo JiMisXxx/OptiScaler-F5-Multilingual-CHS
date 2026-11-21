@@ -360,9 +360,11 @@ class Config
     // The model's render preset hint: 1 Preset A (the main model), 2 Preset B (the small model, 310.9 DLLs only); 0 and
     // any other value: the DLL's choice, the small model on 310.9 DLLs. 310.8 DLLs have only the main model.
     CustomOptional<uint32_t> DlssNrPreset { 0 };
-    // Model weights: a folder under OptiScaler/nr_weights the model reads its weights from (files named
-    // <resource>.<CRC32 of the stock resource>.bin, exported for that DLL); empty = the DLL's own weights.
-    CustomOptional<std::string> DlssNrWeightsSet { std::string() };
+    // Model weights, one folder per model under OptiScaler/nr_weights (files named <resource>.<CRC32 of the stock
+    // resource>.bin, exported for that DLL); empty = the DLL's own weights. A = Preset A (main model), B = Preset B
+    // or Default (small model). The old single [DlssNr] WeightsSet is migrated when the file has neither new key.
+    CustomOptional<std::string> DlssNrWeightsSetA { std::string() };
+    CustomOptional<std::string> DlssNrWeightsSetB { std::string() };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
     CustomOptional<uint32_t> DlssNrStyle { 0 };
@@ -1507,6 +1509,7 @@ class Config
 
     bool Reload(std::filesystem::path iniPath);
     void ReadDlssNr();
+    void ReadDlssNrWeightsSets();
     size_t ApplyDlssNrSection(const DlssNrProfiles::Section& section);
     DlssNrProfiles::Section savedDlssNr; // the kept [DlssNr] settings at the last load or Save Settings
 

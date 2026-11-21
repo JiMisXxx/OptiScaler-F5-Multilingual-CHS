@@ -89,10 +89,10 @@ int main()
     CHECK(Is(OpticalF5LowText(NativeMode::MotionOnly, false, false), "Motion only"));
 
     // Neural Rendering settings
-    CHECK(Is(NrModelText(0, ""), "DLL's choice"));
-    CHECK(Is(NrModelText(1, ""), "Preset A (main)"));
-    CHECK(Is(NrModelText(2, "StrongB-NBA1"), "Preset B (small), weights StrongB-NBA1"));
-    CHECK(Is(NrModelText(9, ""), "DLL's choice"));
+    CHECK(Is(NrModelText(0, "", ""), "DLL's choice"));
+    CHECK(Is(NrModelText(1, "", ""), "Preset A (main)"));
+    CHECK(Is(NrModelText(2, "", "StrongB-NBA1"), "Preset B (small), weights A: stock, B: StrongB-NBA1"));
+    CHECK(Is(NrModelText(9, "", ""), "DLL's choice"));
     CHECK(Is(NrPassesText(1, 1.0f), "1 pass, working scale 1.00"));
     CHECK(Is(NrPassesText(3, 0.85f), "3 passes, working scale 0.85"));
     CHECK(Is(NrPlacementText(false, false, false), "After Super Resolution"));
