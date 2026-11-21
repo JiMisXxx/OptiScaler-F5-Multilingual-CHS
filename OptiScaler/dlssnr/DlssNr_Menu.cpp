@@ -5449,6 +5449,7 @@ static VulkanRouteState ReadVulkanRouteNow(Config* config)
     in.upscalerOnD3D12 = FeatureProvider_Vk::IsOn12(state.backend);
     in.motionModeOn = shown == Shown::NrOnly || shown == Shown::NrAndFrameGeneration;
     in.finishedPicture = config->DlssNrFinishedPicture.value_or_default();
+    in.finishedPictureRan = NativeMotionVk::FinishedPictureRan();
     in.runningVk = DlssNr::IsRunningVk();
     in.runningD3D12 = DlssNr::IsRunning();
     state.runsOn = DlssNrVulkanRoute::NrRunsOn(in);

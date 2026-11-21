@@ -3,6 +3,7 @@
 //
 //   cl /std:c++20 /EHsc /W4 /Iexternal\vulkan\include tests\nr_finished_vk_rules_smoke.cpp
 #include "../OptiScaler/dlssnr/DlssNr_FinishedVkRules.h"
+#include <string>
 
 #include <cstdio>
 
@@ -413,6 +414,18 @@ int main()
     CHECK(HistoryGap(100, 103));       // more than two game frames
     CHECK(!HistoryGap(100, 100));
     CHECK(!HistoryGap(100, 90));       // an earlier capture is no gap
+
+    // ---- frame generation: F5Low keeps the game's swapchain and takes the finished picture, FSR FG / DLSS-G do not ----
+    CHECK(BlockedByFrameGeneration(false, false, false) == FgBlock::None);
+    CHECK(BlockedByFrameGeneration(true, true, false) == FgBlock::None);   // F5Low output, generating
+    CHECK(BlockedByFrameGeneration(false, true, false) == FgBlock::None);  // F5Low output, paused / 1X hold / not active
+    CHECK(BlockedByFrameGeneration(true, false, false) == FgBlock::OptiFg); // FSR FG or DLSS-G output
+    CHECK(BlockedByFrameGeneration(false, false, false) == FgBlock::None);
+    CHECK(BlockedByFrameGeneration(false, false, true) == FgBlock::GameDlssg);  // the game's own DLSS-G
+    CHECK(BlockedByFrameGeneration(true, true, true) == FgBlock::GameDlssg);    // even beside F5Low
+    CHECK(std::string(FgBlockText(FgBlock::None)).empty());
+    CHECK(std::string(FgBlockText(FgBlock::OptiFg)).find("FSR FG or DLSS-G") != std::string::npos);
+    CHECK(std::string(FgBlockText(FgBlock::GameDlssg)).find("game's own DLSS") != std::string::npos);
 
     if (fails == 0)
         printf("nr_finished_vk_rules_smoke: PASS\n");

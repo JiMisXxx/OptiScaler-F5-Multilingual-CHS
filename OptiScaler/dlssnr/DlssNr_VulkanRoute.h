@@ -110,6 +110,8 @@ struct NrInputs
     bool motionModeOn = false;    // Optical F5Low NR only or NR + frame generation
     bool finishedPicture = false; // the setting (the route turns it off)
     bool finishedPictureRunsOnVulkan = kFinishedPictureRunsOnVulkan;
+    bool finishedPictureRan = false; // it ran on the last present (NativeMotionVk::FinishedPictureRan): Neural
+                                     // Rendering is its, not Optical F5Low's, whatever the Optical F5Low setting says
     bool runningVk = false;    // DlssNr::IsRunningVk(): the native Vulkan seam is running Neural Rendering
     bool runningD3D12 = false; // DlssNr::IsRunning(): the D3D12 side is
 };
@@ -127,6 +129,9 @@ inline RunsOn NrRunsOn(const NrInputs& in)
 
     if (in.routeOn)
         byDesign = in.bridgeUp ? RunsOn::D3D12Bridge : RunsOn::D3D12GameCopy;
+    else if (in.finishedPicture && in.finishedPictureRunsOnVulkan && in.finishedPictureRan && in.runningD3D12)
+        byDesign = RunsOn::D3D12FinishedPicture; // also with Optical F5Low's motion on: it makes the picture, Finished
+                                                 // Picture runs NR
     else if (in.motionModeOn)
         byDesign = RunsOn::D3D12F5Low;
     else if (in.finishedPicture)
@@ -189,7 +194,10 @@ inline std::string LeftoverLine(const std::string& backendCode)
 }
 
 // The route card's two rows, always shown.
-inline const char* NativeSummary() { return "Native swapchain: FSR FG, DLSS-G, F5Low (XeFG Tensor). The game's own swapchain."; }
+inline const char* NativeSummary()
+{
+    return "Native swapchain: FSR FG, DLSS-G, F5Low (XeFG Tensor). The game's own swapchain.";
+}
 inline const char* BridgeSummary() { return "Bridge: also XeFG. Adds a D3D12 swapchain, device and copies."; }
 
 // The Status page's "Vulkan route" row: the route, then where Neural Rendering runs.

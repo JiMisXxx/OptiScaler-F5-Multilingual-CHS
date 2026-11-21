@@ -89,6 +89,30 @@ int main()
     CHECK(runs(true, false, false, false, false, false, false, false, true) == RunsOn::D3D12);
     CHECK(runs(true, false, false, false, false, true, true, false, true) == RunsOn::D3D12FinishedPicture);
 
+    // Finished Picture with an F5Low output (the Optical F5Low motion setting on beside it): when Finished Picture ran, it is the
+    // one running Neural Rendering; before that, or when it was refused, the setting says what was meant
+    {
+        NrInputs in;
+        in.nrEnabled = true;
+        in.motionModeOn = true;
+        in.finishedPicture = true;
+        in.runningD3D12 = true;
+        in.finishedPictureRan = true;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12FinishedPicture);
+        in.finishedPictureRan = false;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12F5Low);
+        in.finishedPictureRan = true;
+        in.finishedPictureRunsOnVulkan = false;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12F5Low);
+        in.finishedPictureRunsOnVulkan = true;
+        in.finishedPicture = false;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12F5Low);
+        in.finishedPicture = true;
+        in.routeOn = true; // the route turns Finished Picture off: the route's line stays
+        in.bridgeUp = true;
+        CHECK(NrRunsOn(in) == RunsOn::D3D12Bridge);
+    }
+
     CHECK(RunsOnText(RunsOn::Vulkan) == "Vulkan (native swapchain)");
     CHECK(RunsOnText(RunsOn::D3D12Bridge) == "D3D12 (Vulkan bridge)");
     CHECK(RunsOnText(RunsOn::D3D12GameCopy) == "D3D12 (game's upscaler copy)");

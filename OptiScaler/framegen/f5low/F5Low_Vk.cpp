@@ -244,7 +244,8 @@ struct F5Low_Vk::Job
     uint32_t groupMode = 0;
 };
 
-// The present mode a frame goes out with: the game's VkSwapchainPresentModeInfoEXT when it chained one, else the swapchain's
+// The present mode a frame goes out with: the game's VkSwapchainPresentModeInfoEXT when it chained one, else the
+// swapchain's
 int F5Low_Vk::EffectiveMode(const Job& job) const
 {
     return job.hasMode ? static_cast<int>(job.presentMode) : _presentMode;
@@ -2790,9 +2791,12 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     {
         std::unique_lock lock(s.jobMutex);
 
-        if (!timed([&] {
-                return s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()), [&] { return !s.slotBusy[slotIndex]; });
-            }))
+        if (!timed(
+                [&]
+                {
+                    return s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()),
+                                            [&] { return !s.slotBusy[slotIndex]; });
+                }))
         {
             LatchOff("The present worker did not finish a frame in time, frame generation is off");
             return Outcome::Direct;
@@ -2811,10 +2815,12 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
 
         if (waitCount > 0)
         {
-            if (timed([&] {
-                    return vkWaitForFences(_device, waitCount, waits, VK_TRUE,
-                                           static_cast<uint64_t>(leftMs()) * 1'000'000ull);
-                }) != VK_SUCCESS)
+            if (timed(
+                    [&]
+                    {
+                        return vkWaitForFences(_device, waitCount, waits, VK_TRUE,
+                                               static_cast<uint64_t>(leftMs()) * 1'000'000ull);
+                    }) != VK_SUCCESS)
             {
                 LatchOff("The GPU did not finish a frame's copies in time, frame generation is off");
                 return Outcome::Direct;
@@ -2960,10 +2966,12 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
         {
             std::unique_lock lock(s.jobMutex);
 
-            if (!timed([&] {
-                    return s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()),
-                                            [&] { return !s.slotBusy[previous]; });
-                }))
+            if (!timed(
+                    [&]
+                    {
+                        return s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()),
+                                                [&] { return !s.slotBusy[previous]; });
+                    }))
             {
                 LatchOff("The present worker did not finish a frame in time, frame generation is off");
                 return Outcome::Direct;
@@ -2979,10 +2987,12 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
                 waits[waitCount++] = s.slots[previous].fences[1 + i];
         }
 
-        if (waitCount > 0 && timed([&] {
-                return vkWaitForFences(_device, waitCount, waits, VK_TRUE,
-                                       static_cast<uint64_t>(leftMs()) * 1'000'000ull);
-            }) != VK_SUCCESS)
+        if (waitCount > 0 && timed(
+                                 [&]
+                                 {
+                                     return vkWaitForFences(_device, waitCount, waits, VK_TRUE,
+                                                            static_cast<uint64_t>(leftMs()) * 1'000'000ull);
+                                 }) != VK_SUCCESS)
         {
             LatchOff("The GPU did not finish the last generated frames in time, frame generation is off");
             return Outcome::Direct;

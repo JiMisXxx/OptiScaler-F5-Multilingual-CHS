@@ -83,13 +83,15 @@ constexpr double kFpIdleMs = 10000.0; // as the other NR paths: ten seconds off,
 // Frame generation on this swapchain: OptiScaler's own (FSR FG, DLSS-G output, ...) or the game's DLSS-G. Finished
 // Picture takes its pictures from the game's present, which these replace or follow with frames of their own: a later
 // story.
-bool FrameGenerationOn(uint64_t present)
+bool OptiFrameGenerationOn()
+{
+    auto* fg = State::Instance().CurrentFG();
+    return fg != nullptr && fg->IsActive() && !fg->IsPaused();
+}
+
+bool GameDlssgGenerates(uint64_t present)
 {
     auto& state = State::Instance();
-
-    if (auto* fg = state.CurrentFG(); fg != nullptr && fg->IsActive() && !fg->IsPaused())
-        return true;
-
     return state.dlssgLastEvaluateGeneratesVk.load() &&
            DlssNr::PresentsSince(present, state.dlssgLastEvaluateFrameVk.load()) <= 30;
 }
@@ -282,9 +284,11 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
             blocked =
                 "Finished Picture does not run on the Vulkan frame generation bridge yet. Turn the bridge route off, "
                 "or pick After Super Resolution.";
-        else if (FrameGenerationOn(presentCount))
-            blocked = "Finished Picture does not run with frame generation on a Vulkan game yet. Turn frame generation "
-                      "off, or pick After Super Resolution.";
+        else if (const auto fgBlock = DlssNr::FinishedVkRules::BlockedByFrameGeneration(
+                     OptiFrameGenerationOn(), State::Instance().activeFgOutput == FGOutput::F5Low,
+                     GameDlssgGenerates(presentCount));
+                 fgBlock != DlssNr::FinishedVkRules::FgBlock::None)
+            blocked = DlssNr::FinishedVkRules::FgBlockText(fgBlock);
         else if (native::VkFrameSource::SwapchainFormat(present->pSwapchains[0], &format, &space))
         {
             if (!native::VkSharedPictureFormat(format, &dxgiFormat, &sharedFormat))
@@ -517,6 +521,8 @@ void DrawStatus()
     if (!refusal.empty() && g_driver.Enabled())
         ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f), "%s", refusal.c_str());
 }
+
+bool FinishedPictureRan() { return g_fpRan.load(std::memory_order_relaxed); }
 
 bool NrOnlyRunning() { return g_driver.NrOnlyRunning() || g_fpRan.load(std::memory_order_relaxed); }
 

@@ -106,7 +106,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     uint32_t _statFrames = 0;
     uint64_t _gateWaits = 0;
     double _gateWaitTotalMs = 0.0;
-    int64_t _arriveTicks = 0; // the real QPC of the game's present call (as on D3D12)
+    int64_t _arriveTicks = 0;               // the real QPC of the game's present call (as on D3D12)
     std::atomic<double> _ourWaitMs { 0.0 }; // our blocking waits on the game thread since the last arrival
     // Stats window (reset every line)
     std::atomic<uint64_t> _statShown { 0 }; // every image we presented (worker, direct, inline), counted in PresentOn
@@ -115,9 +115,9 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     bool _statMeterOn = false;
     double _statFirstEntryMs = 0.0;
     double _statLastEntryMs = 0.0;
-    uint32_t _statEntries = 0;  // game presents seen in the window
+    uint32_t _statEntries = 0;   // game presents seen in the window
     uint32_t _statOffFrames = 0; // of them, frames that went out without generating
-    double _statWaitMs = 0.0;   // our waits on the game thread in the window
+    double _statWaitMs = 0.0;    // our waits on the game thread in the window
     void AddOurWait(double ms) { AddAtomic(_ourWaitMs, ms); }
 
     // Device extensions this output enabled (or found enabled): present id + present wait bound how far the game runs
@@ -137,7 +137,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     int _presentMode = 0;     // the mode our swapchain was made with
     int _gamePresentMode = 0; // the mode the game asked for
     bool _tearing = false;    // MAILBOX asked, IMMEDIATE made (VulkanTearing)
-    std::mutex _gateMutex; // _gate, the ids, _meterHealth
+    std::mutex _gateMutex;    // _gate, the ids, _meterHealth
     F5LowVk::GateState _gate;
     F5LowVk::MeterHealth _meterHealth;
     uint64_t _ownPresentId = 0;
