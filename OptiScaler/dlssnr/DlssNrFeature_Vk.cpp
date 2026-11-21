@@ -1051,10 +1051,14 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         ReleaseWhileOffVk();
         return;
     }
-    NoteOnVk();
 
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {
+        // The native Vulkan model, and Superior Vulkan, may have been built before Finished Picture was switched on:
+        // they are not used any more, so they go after the usual off delay (not NoteOnVk: this is the "not running"
+        // clock)
+        ReleaseWhileOffVk();
+
         // Finished Picture on a native Vulkan game: NR runs on the finished picture at present, on the private D3D12
         // device the picture is shared with (native/NativeDriverVk.cpp), through the same pass as the D3D12 Finished
         // Picture and with its post-NR stack. So the Vulkan model is not built here (one NR model only): this call
@@ -1064,6 +1068,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             DlssNr::FinishedVk::Capture(cmdBuffer, params, physicalDevice, device, rayReconstruction);
         return;
     }
+    NoteOnVk();
 
     if (cmdBuffer == VK_NULL_HANDLE || params == nullptr || device == VK_NULL_HANDLE ||
         physicalDevice == VK_NULL_HANDLE)

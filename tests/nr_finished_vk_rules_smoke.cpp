@@ -30,6 +30,26 @@ static FinishedGameFrame Frame(uint64_t epoch, bool reset = false, uint32_t w = 
     return f;
 }
 
+static uint64_t g_clock = 0;
+
+// Begin that must find a slot
+static size_t Beg(GuideRing& ring, uint64_t cmd, uint64_t now, const FinishedGameFrame& frame)
+{
+    size_t index = 0;
+    CHECK(ring.Begin(cmd, now, frame, index));
+    return index;
+}
+
+// A successful submit of `cmd` on queue 1
+static bool Sub(GuideRing& ring, uint64_t cmd) { return ring.Submitted(cmd, 1, ++g_clock, 0); }
+
+// A present with every submit so far visible and every capture ready
+static bool P(GuideRing& ring, uint64_t epoch, uint32_t w, uint32_t h, size_t& index, bool& reset)
+{
+    return ring.Pick(epoch, UINT64_MAX, w, h, index, reset, [](const GuideRing::Slot&) { return true; }) ==
+           PickResult::Ready;
+}
+
 int main()
 {
     // ---- formats ----
@@ -58,15 +78,15 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        const size_t slot = ring.Begin(0x10, 100, Frame(100));
+        const size_t slot = Beg(ring, 0x10, 100, Frame(100));
         CHECK(ring.Armed() == 1);
-        CHECK(!ring.Pick(101, 1920, 1080, index, reset)); // recorded, never submitted: nothing to use
-        CHECK(ring.Submitted(0x10));
+        CHECK(!P(ring, 101, 1920, 1080, index, reset)); // recorded, never submitted: nothing to use
+        CHECK(Sub(ring, 0x10));
         CHECK(ring.Armed() == 0);
-        CHECK(!ring.Submitted(0x10)); // a second submit of the same buffer is not a second capture
-        CHECK(ring.Pick(101, 1920, 1080, index, reset));
+        CHECK(!Sub(ring, 0x10)); // a second submit of the same buffer is not a second capture
+        CHECK(P(ring, 101, 1920, 1080, index, reset));
         CHECK(index == slot);
-        CHECK(!ring.Pick(101, 1920, 1080, index, reset)); // used once: the same capture does not serve two presents
+        CHECK(!P(ring, 101, 1920, 1080, index, reset)); // used once: the same capture does not serve two presents
     }
 
     // ---- the window: one present after the capture, like the D3D12 slots ----
@@ -74,19 +94,19 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 100, Frame(100));
-        ring.Submitted(1);
-        CHECK(ring.Pick(100, 1920, 1080, index, reset)); // a present at the capture's own count
-        ring.Begin(2, 101, Frame(101));
-        ring.Submitted(2);
-        CHECK(ring.Pick(102, 1920, 1080, index, reset)); // one later
-        ring.Begin(3, 110, Frame(110));
-        ring.Submitted(3);
-        CHECK(!ring.Pick(112, 1920, 1080, index, reset)); // two later: stale, dropped
-        CHECK(!ring.Pick(111, 1920, 1080, index, reset)); // and gone
-        ring.Begin(4, 120, Frame(120));
-        ring.Submitted(4);
-        CHECK(!ring.Pick(119, 1920, 1080, index, reset)); // a present before the capture's count (race): not this one
+        Beg(ring, 1, 100, Frame(100));
+        Sub(ring, 1);
+        CHECK(P(ring, 100, 1920, 1080, index, reset)); // a present at the capture's own count
+        Beg(ring, 2, 101, Frame(101));
+        Sub(ring, 2);
+        CHECK(P(ring, 102, 1920, 1080, index, reset)); // one later
+        Beg(ring, 3, 110, Frame(110));
+        Sub(ring, 3);
+        CHECK(!P(ring, 112, 1920, 1080, index, reset)); // two later: stale, dropped
+        CHECK(!P(ring, 111, 1920, 1080, index, reset)); // and gone
+        Beg(ring, 4, 120, Frame(120));
+        Sub(ring, 4);
+        CHECK(!P(ring, 119, 1920, 1080, index, reset)); // a present before the capture's count (race): not this one
     }
 
     // ---- the newest capture wins, older ones go with it ----
@@ -94,14 +114,14 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        const size_t a = ring.Begin(1, 200, Frame(200));
-        const size_t b = ring.Begin(2, 200, Frame(200)); // the game records a frame ahead
-        ring.Submitted(1);
-        ring.Submitted(2);
+        const size_t a = Beg(ring, 1, 200, Frame(200));
+        const size_t b = Beg(ring, 2, 200, Frame(200)); // the game records a frame ahead
+        Sub(ring, 1);
+        Sub(ring, 2);
         CHECK(a != b);
-        CHECK(ring.Pick(201, 1920, 1080, index, reset));
+        CHECK(P(ring, 201, 1920, 1080, index, reset));
         CHECK(index == b);
-        CHECK(!ring.Pick(201, 1920, 1080, index, reset)); // the older one was used up with it
+        CHECK(!P(ring, 201, 1920, 1080, index, reset)); // the older one was used up with it
     }
 
     // ---- size: a capture for another output size is not this picture's ----
@@ -109,10 +129,10 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 300, Frame(300, false, 960, 540));
-        ring.Submitted(1);
-        CHECK(!ring.Pick(301, 1920, 1080, index, reset));
-        CHECK(ring.Pick(301, 960, 540, index, reset)); // still there for the swapchain it fits
+        Beg(ring, 1, 300, Frame(300, false, 960, 540));
+        Sub(ring, 1);
+        CHECK(!P(ring, 301, 1920, 1080, index, reset));
+        CHECK(P(ring, 301, 960, 540, index, reset)); // still there for the swapchain it fits
     }
 
     // ---- a command buffer recorded over: the earlier recording of it is gone (the begin hook says so) ----
@@ -120,12 +140,12 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(7, 400, Frame(400));
+        Beg(ring, 7, 400, Frame(400));
         CHECK(ring.Forget(7)); // the game began buffer 7 again before it was ever submitted
-        ring.Begin(7, 401, Frame(401));
+        Beg(ring, 7, 401, Frame(401));
         CHECK(ring.Armed() == 1);
-        ring.Submitted(7);
-        CHECK(ring.Pick(402, 1920, 1080, index, reset));
+        Sub(ring, 7);
+        CHECK(P(ring, 402, 1920, 1080, index, reset));
         CHECK(ring.At(index).frame.captureEpoch == 401);
     }
 
@@ -134,13 +154,13 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(8, 410, Frame(410, false, 1920, 1080));
-        ring.Begin(8, 410, Frame(410, false, 640, 360));
+        Beg(ring, 8, 410, Frame(410, false, 1920, 1080));
+        Beg(ring, 8, 410, Frame(410, false, 640, 360));
         CHECK(ring.Armed() == 2);
-        ring.Submitted(8);
+        Sub(ring, 8);
         CHECK(ring.Armed() == 0);
-        CHECK(ring.Pick(411, 1920, 1080, index, reset)); // each picture finds the capture of its own size
-        CHECK(ring.Pick(411, 640, 360, index, reset));
+        CHECK(P(ring, 411, 1920, 1080, index, reset)); // each picture finds the capture of its own size
+        CHECK(P(ring, 411, 640, 360, index, reset));
         CHECK(ring.At(index).frame.outputWidth == 640);
     }
 
@@ -149,13 +169,13 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 500, Frame(500));
-        ring.Begin(2, 500, Frame(500));
-        ring.Submitted(2);
+        Beg(ring, 1, 500, Frame(500));
+        Beg(ring, 2, 500, Frame(500));
+        Sub(ring, 2);
         CHECK(ring.Forget(1));
         CHECK(ring.Armed() == 0);
         CHECK(!ring.Forget(2)); // already submitted: what it recorded runs
-        CHECK(ring.Pick(501, 1920, 1080, index, reset));
+        CHECK(P(ring, 501, 1920, 1080, index, reset));
     }
 
     // ---- a secondary command buffer: the submit carries its primary ----
@@ -163,11 +183,11 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(0x20, 600, Frame(600)); // recorded into a secondary buffer
+        Beg(ring, 0x20, 600, Frame(600)); // recorded into a secondary buffer
         ring.Rearm(0x20, 0x30);            // executed from primary 0x30
-        CHECK(!ring.Submitted(0x20));
-        CHECK(ring.Submitted(0x30));
-        CHECK(ring.Pick(601, 1920, 1080, index, reset));
+        CHECK(!Sub(ring, 0x20));
+        CHECK(Sub(ring, 0x30));
+        CHECK(P(ring, 601, 1920, 1080, index, reset));
     }
 
     // ---- unsent for too long: dropped ----
@@ -175,58 +195,142 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 700, Frame(700));
+        Beg(ring, 1, 700, Frame(700));
         ring.Expire(700 + kArmedWindow);
         CHECK(ring.Armed() == 1);
         ring.Expire(700 + kArmedWindow + 1);
         CHECK(ring.Armed() == 0);
-        CHECK(!ring.Submitted(1));
-        CHECK(!ring.Pick(701, 1920, 1080, index, reset));
+        CHECK(!Sub(ring, 1));
+        CHECK(!P(ring, 701, 1920, 1080, index, reset));
     }
 
-    // ---- ring wrap: the fifth capture takes the first slot, whatever it held ----
+    // ---- slot reuse: a slot is written again only once its capture is kReuseAge presents old ----
     {
         GuideRing ring;
-        size_t first = 0, fifth = 0;
+        size_t index = 0;
 
-        for (uint64_t i = 0; i < kSlots + 1; ++i)
-        {
-            const size_t s = ring.Begin(10 + i, 800 + i, Frame(800 + i));
+        for (uint64_t i = 0; i < kSlots; ++i)
+            Beg(ring, 10 + i, 800, Frame(800));
 
-            if (i == 0)
-                first = s;
-
-            if (i == kSlots)
-                fifth = s;
-        }
-
-        CHECK(first == fifth);
-        CHECK(ring.Armed() == kSlots); // the first recording was dropped by the wrap
-        CHECK(!ring.Submitted(10));
+        CHECK(!ring.Begin(99, 800, Frame(800), index));                 // all busy at the same present: skipped
+        CHECK(!ring.Begin(99, 800 + kReuseAge - 1, Frame(800), index)); // still too young
+        Sub(ring, 10);
+        CHECK(!ring.Begin(99, 802, Frame(802), index));                 // armed slots are never reused (unsent recordings)
+        for (uint64_t i = 1; i < kSlots; ++i)
+            Sub(ring, 10 + i);
+        CHECK(ring.Begin(99, 800 + kReuseAge, Frame(804), index));      // old enough and sent: the oldest is taken
+        CHECK(index == 0);
+        CHECK(!Sub(ring, 10)); // the first recording was already sent; nothing waits for it any more
     }
+
+    // ---- an unsent recording of a slot is never reused, even when old ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+
+        for (uint64_t i = 0; i < kSlots; ++i)
+            Beg(ring, 10 + i, 800, Frame(800));
+
+        CHECK(!ring.Begin(99, 800 + kReuseAge + 1, Frame(805), index)); // all armed
+        ring.Expire(800 + kArmedWindow + 1);
+        CHECK(ring.Begin(99, 800 + kArmedWindow + 1, Frame(807), index)); // dropped as never sent, free again
+    }
+
+    // ---- the present's own queue orders its captures; another queue's must have finished ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+        bool reset = false;
+        Beg(ring, 1, 900, Frame(900));
+        CHECK(ring.Submitted(1, /*queue*/ 5, ++g_clock, /*value*/ 7));
+        uint64_t done = 6;
+        const auto readyFor = [&](uint64_t presentQueue)
+        { return [&done, presentQueue](const GuideRing::Slot& slot) { return slot.queue == presentQueue || done >= slot.value; }; };
+        CHECK(ring.Pick(901, UINT64_MAX, 1920, 1080, index, reset, readyFor(9)) == PickResult::NotReady);
+        CHECK(ring.Pick(901, UINT64_MAX, 1920, 1080, index, reset, readyFor(5)) == PickResult::Ready); // same queue
+        Beg(ring, 2, 905, Frame(905));
+        CHECK(ring.Submitted(2, 5, ++g_clock, 8));
+        done = 8;
+        CHECK(ring.Pick(906, UINT64_MAX, 1920, 1080, index, reset, readyFor(9)) == PickResult::Ready);
+        CHECK(ring.At(index).frame.captureEpoch == 905);
+    }
+
+    // ---- a not-ready capture is kept for the next present, until it is stale ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+        bool reset = false;
+        Beg(ring, 1, 910, Frame(910));
+        ring.Submitted(1, 5, ++g_clock, 3);
+        const auto never = [](const GuideRing::Slot&) { return false; };
+        CHECK(ring.Pick(911, UINT64_MAX, 1920, 1080, index, reset, never) == PickResult::NotReady);
+        CHECK(ring.Pick(911, UINT64_MAX, 1920, 1080, index, reset, never) == PickResult::NotReady);
+        CHECK(ring.Pick(913, UINT64_MAX, 1920, 1080, index, reset, never) == PickResult::None); // too old: dropped
+    }
+
+    // ---- a submit made after the present began is for the next frame ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+        bool reset = false;
+        Beg(ring, 1, 920, Frame(920));
+        ring.Submitted(1, 1, 100, 0); // frame N, submitted before the present
+        Beg(ring, 2, 920, Frame(920));
+        ring.Submitted(2, 1, 105, 0); // frame N+1, submitted by another thread while present N runs
+        const auto ok = [](const GuideRing::Slot&) { return true; };
+        CHECK(ring.Pick(921, /*snapshot*/ 101, 1920, 1080, index, reset, ok) == PickResult::Ready);
+        CHECK(ring.At(index).submitSerial == 100);                   // N's guides, not N+1's
+        CHECK(ring.Armed() == 0);
+        CHECK(ring.Pick(921, 110, 1920, 1080, index, reset, ok) == PickResult::Ready); // the next present gets N+1
+        CHECK(ring.At(index).submitSerial == 105);
+    }
+
+    // ---- a size mismatch is named ----
+    {
+        GuideRing ring;
+        size_t index = 0;
+        bool reset = false;
+        Beg(ring, 1, 930, Frame(930, false, 1280, 720));
+        ring.Submitted(1, 1, ++g_clock, 0);
+        const auto ok = [](const GuideRing::Slot&) { return true; };
+        CHECK(ring.Pick(931, UINT64_MAX, 1920, 1080, index, reset, ok) == PickResult::SizeMismatch);
+        CHECK(ring.mismatchWidth == 1280 && ring.mismatchHeight == 720);
+        CHECK(ring.Pick(931, UINT64_MAX, 1280, 720, index, reset, ok) == PickResult::Ready);
+        CHECK(ring.Pick(931, UINT64_MAX, 1920, 1080, index, reset, ok) == PickResult::None);
+    }
+
+    // ---- colour spaces ----
+    CHECK(ColourSpaceTaken(VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
+    CHECK(ColourSpaceTaken(VK_COLOR_SPACE_HDR10_ST2084_EXT));
+    CHECK(ColourSpaceTaken(VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT));
+    CHECK(!ColourSpaceTaken(VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT));
+    CHECK(!ColourSpaceTaken(VK_COLOR_SPACE_HDR10_HLG_EXT));
+    CHECK(!ColourSpaceTaken(VK_COLOR_SPACE_DOLBYVISION_EXT));
+    CHECK(!ColourSpaceTaken(VK_COLOR_SPACE_BT2020_LINEAR_EXT));
+    CHECK(!ColourSpaceTaken(VK_COLOR_SPACE_EXTENDED_SRGB_NONLINEAR_EXT));
 
     // ---- the game's reset request outlives a capture that was dropped unapplied ----
     {
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 900, Frame(900, true)); // the game reset its upscaler here
-        ring.Submitted(1);
-        ring.Begin(2, 900, Frame(900, false));
-        ring.Submitted(2);
-        CHECK(ring.Pick(901, 1920, 1080, index, reset)); // takes the newer; the older one's reset rides on it
+        Beg(ring, 1, 900, Frame(900, true)); // the game reset its upscaler here
+        Sub(ring, 1);
+        Beg(ring, 2, 900, Frame(900, false));
+        Sub(ring, 2);
+        CHECK(P(ring, 901, 1920, 1080, index, reset)); // takes the newer; the older one's reset rides on it
         CHECK(reset);
 
-        ring.Begin(3, 910, Frame(910, true)); // reset capture goes stale unapplied
-        ring.Submitted(3);
-        CHECK(!ring.Pick(913, 1920, 1080, index, reset));
-        ring.Begin(4, 914, Frame(914, false));
-        ring.Submitted(4);
-        CHECK(ring.Pick(915, 1920, 1080, index, reset));
+        Beg(ring, 3, 910, Frame(910, true)); // reset capture goes stale unapplied
+        Sub(ring, 3);
+        CHECK(!P(ring, 913, 1920, 1080, index, reset));
+        Beg(ring, 4, 914, Frame(914, false));
+        Sub(ring, 4);
+        CHECK(P(ring, 915, 1920, 1080, index, reset));
         CHECK(reset); // not lost
-        ring.Begin(5, 916, Frame(916, false));
-        ring.Submitted(5);
-        CHECK(ring.Pick(917, 1920, 1080, index, reset));
+        Beg(ring, 5, 916, Frame(916, false));
+        Sub(ring, 5);
+        CHECK(P(ring, 917, 1920, 1080, index, reset));
         CHECK(!reset); // and used once
     }
 
@@ -235,11 +339,11 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 1000, Frame(1000, true));
+        Beg(ring, 1, 1000, Frame(1000, true));
         ring.Expire(1000 + kArmedWindow + 1);
-        ring.Begin(2, 1010, Frame(1010, false));
-        ring.Submitted(2);
-        CHECK(ring.Pick(1011, 1920, 1080, index, reset));
+        Beg(ring, 2, 1010, Frame(1010, false));
+        Sub(ring, 2);
+        CHECK(P(ring, 1011, 1920, 1080, index, reset));
         CHECK(reset);
     }
 
@@ -248,13 +352,13 @@ int main()
         GuideRing ring;
         size_t index = 0;
         bool reset = false;
-        ring.Begin(1, 1100, Frame(1100));
-        ring.Submitted(1);
+        Beg(ring, 1, 1100, Frame(1100));
+        Sub(ring, 1);
         ring.Clear();
-        CHECK(!ring.Pick(1101, 1920, 1080, index, reset));
-        ring.Begin(2, 1102, Frame(1102));
-        ring.Submitted(2);
-        CHECK(ring.Pick(1103, 1920, 1080, index, reset));
+        CHECK(!P(ring, 1101, 1920, 1080, index, reset));
+        Beg(ring, 2, 1102, Frame(1102));
+        Sub(ring, 2);
+        CHECK(P(ring, 1103, 1920, 1080, index, reset));
         CHECK(reset);
     }
 

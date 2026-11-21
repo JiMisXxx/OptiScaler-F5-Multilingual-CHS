@@ -8300,6 +8300,31 @@ void Shutdown()
     Late::nativeHdr = {};
     g_compose.reset();
 }
+
+bool ReleaseFinishedIdle(ID3D12GraphicsCommandList* cmd, unsigned long long epoch)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+
+    // The same release as NR switched off for kOffRelease, started now
+    const auto saved = g_offSince;
+    g_offSince = std::chrono::steady_clock::now() - kOffRelease - std::chrono::seconds(1);
+    ReleaseWhileOff(cmd, epoch);
+    g_offSince = saved;
+
+    bool holds = g_nrRetired.Size() != 0;
+    for (int slot = -1; slot < (int) kAllSlots && !holds; ++slot)
+        holds = SlotHolds(slot);
+
+    if (!holds)
+    {
+        Late::nativeHdr = {};
+        Late::nativeReset = true;
+        Late::gameGuidesApplied = 0;
+        g_compose.reset();
+    }
+
+    return holds;
+}
 } // namespace DlssNr
 
 std::string DlssNr::SuperiorScaling::Status()

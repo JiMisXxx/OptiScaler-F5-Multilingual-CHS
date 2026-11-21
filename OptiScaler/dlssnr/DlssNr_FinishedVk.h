@@ -37,12 +37,28 @@ namespace DlssNr::FinishedVk
 void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice physical, VkDevice device,
              bool rayReconstruction);
 
-// At present `presentEpoch` (State::vulkanPresentCount, already counted), on a picture `width` x `height` made on
-// `device`: the newest submitted capture that fits. Uses it up. False when there is none.
-bool Take(VkDevice device, uint64_t presentEpoch, uint32_t width, uint32_t height, Guides& out);
+enum class TakeResult
+{
+    Taken,   // `out` is the capture; it is used up
+    None,    // nothing submitted that fits (Refusal() says when it is the output size)
+    NotReady // the newest capture was made on another queue than the present's and has not finished: skip this present
+};
 
-// The game called its DLSS within the last few presents: the game's own upscaler is running, so Finished Picture takes
-// its guides from it rather than from Optical F5Low's motion estimate.
+// At present `presentEpoch` (State::vulkanPresentCount, already counted) on `presentQueue`, for a picture `width` x
+// `height` made on `device`: the newest capture that fits and was submitted before BeginPresent.
+TakeResult Take(VkDevice device, VkQueue presentQueue, uint64_t presentEpoch, uint32_t width, uint32_t height,
+                Guides& out);
+
+// First thing in the present hook: the game's submits from now on belong to a later frame than this present.
+void BeginPresent();
+
+// Whether the last present could use a capture (not the bridge, frame generation, a colour format or space NR cannot
+// take): when not, Capture records nothing and the ring is freed after the idle time. True until said otherwise.
+void SetUsable(bool usable);
+
+// The game called its DLSS within the last few presents (a capture was attempted, whether or not it worked): the game's
+// own upscaler is running, so Finished Picture takes its guides from it rather than from Optical F5Low's motion
+// estimate, and says what is wrong when it cannot.
 bool Recent(uint64_t presentCount);
 
 // Why the last capture could not be made (the format of the game's motion vectors, ...), empty when it could. For the
@@ -53,10 +69,10 @@ std::string Refusal();
 // and lets go of everything after the game has stopped calling its DLSS for a while.
 void OnPresent(uint64_t presentCount);
 
-// From the vkQueueSubmit / vkQueueSubmit2 hooks: the game submits these command buffers. A relaxed load when no capture
-// waits for its submit.
-void NoteSubmit(const VkCommandBuffer* buffers, uint32_t count);
-void NoteSubmit2(const VkCommandBufferSubmitInfo* buffers, uint32_t count);
+// From the vkQueueSubmit / vkQueueSubmit2 hooks, after the original call returned VK_SUCCESS: the game submitted these
+// command buffers on `queue`. A relaxed load when no capture waits for its submit.
+void AfterSubmit(VkQueue queue, const VkCommandBuffer* buffers, uint32_t count);
+void AfterSubmit2(VkQueue queue, const VkCommandBufferSubmitInfo* buffers, uint32_t count);
 
 // From vkBeginCommandBuffer / vkResetCommandBuffer / vkFreeCommandBuffers: what was recorded into these before is gone.
 void ForgetCommandBuffers(uint32_t count, const VkCommandBuffer* buffers);
@@ -69,4 +85,6 @@ void OnDeviceDestroyed(VkDevice device);
 
 // The Vulkan name of a swapchain format for status lines ("B8G8R8A8_UNORM"), or "format N".
 std::string FormatName(VkFormat format);
+// The same for a swapchain colour space ("HDR10_HLG").
+std::string SpaceName(VkColorSpaceKHR space);
 } // namespace DlssNr::FinishedVk

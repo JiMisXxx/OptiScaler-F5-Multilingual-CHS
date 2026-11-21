@@ -173,6 +173,12 @@ bool ApplyFinishedGameGuides(ID3D12CommandQueue* queue, ID3D12GraphicsCommandLis
                              ID3D12Resource* depth, ID3D12Resource* motion, const FinishedGameFrame& game,
                              DXGI_COLOR_SPACE_TYPE colorSpace, D3D12_RESOURCE_STATES pictureState,
                              unsigned long long epoch);
+// Finished Picture on a Vulkan game has been idle for a while (or NR is off): lets go of the pass the way a
+// switched-off NR does (the models and surfaces are parked, freed once the GPU is done with `cmd` and a few epochs went
+// by), and of the HDR10 scratch pair and the composition pass once nothing is parked any more. Call it every present
+// while it returns true, on a list that is then executed, with the caller's present count as `epoch`; the caller has
+// waited for its own last list.
+bool ReleaseFinishedIdle(ID3D12GraphicsCommandList* cmd, unsigned long long epoch);
 // A native-input frame went by without NR (NR off, a mode without NR, the virtual upscaler's own pass): the next NR frame
 // starts its history over instead of blending with the picture from before the gap. The two entries above do this
 // themselves for a frame they did not run on.

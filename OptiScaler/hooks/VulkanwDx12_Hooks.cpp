@@ -6329,7 +6329,53 @@ static const VkTimelineSemaphoreSubmitInfo* FindTimelineSubmitInfo(const void* p
     return nullptr;
 }
 
+// The three submit hooks tell Finished Picture's capture ring what the game sent, but only once the real call succeeded
+// (a failed submit runs nothing, so its captures must not be used), through the inner functions that hold the interop.
 VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits,
+                                        VkFence fence)
+{
+    const VkResult result = QueueSubmitInner(queue, submitCount, pSubmits, fence);
+
+    if (result == VK_SUCCESS && pSubmits != nullptr)
+    {
+        for (uint32_t i = 0; i < submitCount; i++)
+            DlssNr::FinishedVk::AfterSubmit(queue, pSubmits[i].pCommandBuffers, pSubmits[i].commandBufferCount);
+    }
+
+    return result;
+}
+
+VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
+                                         VkFence fence)
+{
+    const VkResult result = QueueSubmit2Inner(queue, submitCount, pSubmits, fence);
+
+    if (result == VK_SUCCESS && pSubmits != nullptr)
+    {
+        for (uint32_t i = 0; i < submitCount; i++)
+            DlssNr::FinishedVk::AfterSubmit2(queue, pSubmits[i].pCommandBufferInfos,
+                                             pSubmits[i].commandBufferInfoCount);
+    }
+
+    return result;
+}
+
+VkResult Vulkan_wDx12::hk_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
+                                            VkFence fence)
+{
+    const VkResult result = QueueSubmit2KHRInner(queue, submitCount, pSubmits, fence);
+
+    if (result == VK_SUCCESS && pSubmits != nullptr)
+    {
+        for (uint32_t i = 0; i < submitCount; i++)
+            DlssNr::FinishedVk::AfterSubmit2(queue, pSubmits[i].pCommandBufferInfos,
+                                             pSubmits[i].commandBufferInfoCount);
+    }
+
+    return result;
+}
+
+VkResult Vulkan_wDx12::QueueSubmitInner(VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits,
                                         VkFence fence)
 {
     if (o_vkQueueSubmit == nullptr)
@@ -6342,10 +6388,6 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     // "extra signal fence". Refusing it left that fence unsignalled and the game waiting on it.
     if (submitCount == 0 || pSubmits == nullptr)
         return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
-
-    // Finished Picture's captures wait for the submit of the command buffer they were recorded into
-    for (uint32_t i = 0; i < submitCount; i++)
-        DlssNr::FinishedVk::NoteSubmit(pSubmits[i].pCommandBuffers, pSubmits[i].commandBufferCount);
 
 #ifdef LOG_ALL_RECORDS
     LOG_DEBUG("queue: {:X}, submitCount: {}, fence: {:X}", (size_t) queue, submitCount, (size_t) fence);
@@ -6628,7 +6670,7 @@ static VkResult Submit2WithDx12Interop(SubmitFn originalSubmit, VkQueue queue, u
     return originalSubmit(queue, static_cast<uint32_t>(finalSubmits.size()), finalSubmits.data(), fence);
 }
 
-VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
+VkResult Vulkan_wDx12::QueueSubmit2Inner(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                          VkFence fence)
 {
     if (o_vkQueueSubmit2 == nullptr)
@@ -6640,9 +6682,6 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, co
     // A fence-only submit (no batches) is valid; see hk_vkQueueSubmit
     if (submitCount == 0 || pSubmits == nullptr)
         return o_vkQueueSubmit2(queue, submitCount, pSubmits, fence);
-
-    for (uint32_t i = 0; i < submitCount; i++)
-        DlssNr::FinishedVk::NoteSubmit2(pSubmits[i].pCommandBufferInfos, pSubmits[i].commandBufferInfoCount);
 
     PendingSubmission pending {};
     uint32_t submitIndex = UINT32_MAX;
@@ -6676,7 +6715,7 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, co
     return result;
 }
 
-VkResult Vulkan_wDx12::hk_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
+VkResult Vulkan_wDx12::QueueSubmit2KHRInner(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                             VkFence fence)
 {
     if (o_vkQueueSubmit2KHR == nullptr)
@@ -6688,9 +6727,6 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount,
     // A fence-only submit (no batches) is valid; see hk_vkQueueSubmit
     if (submitCount == 0 || pSubmits == nullptr)
         return o_vkQueueSubmit2KHR(queue, submitCount, pSubmits, fence);
-
-    for (uint32_t i = 0; i < submitCount; i++)
-        DlssNr::FinishedVk::NoteSubmit2(pSubmits[i].pCommandBufferInfos, pSubmits[i].commandBufferInfoCount);
 
     PendingSubmission pending {};
     uint32_t submitIndex = UINT32_MAX;

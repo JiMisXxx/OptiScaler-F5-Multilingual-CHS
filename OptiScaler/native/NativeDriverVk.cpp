@@ -12,6 +12,7 @@
 #include <Config.h>
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <dlssnr/DlssNr_FinishedVk.h>
+#include <dlssnr/DlssNr_FinishedVkRules.h>
 #include <framegen/IFGFeature.h>
 #include <misc/IdentifyGpu.h>
 #include <resource_tracking/GenericDepth_Vk.h>
@@ -74,6 +75,11 @@ std::atomic<bool> g_fpWanted { false };
 // NR ran on the last present from the game's guides
 std::atomic<bool> g_fpRan { false };
 
+// When the last present that ran NR from the game's guides was, or Finished Picture last wanted one (steady
+// milliseconds)
+double g_fpActiveMs = 0.0;
+constexpr double kFpIdleMs = 10000.0; // as the other NR paths: ten seconds off, and the pass goes
+
 // Frame generation on this swapchain: OptiScaler's own (FSR FG, DLSS-G output, ...) or the game's DLSS-G. Finished
 // Picture takes its pictures from the game's present, which these replace or follow with frames of their own: a later
 // story.
@@ -97,6 +103,38 @@ DXGI_COLOR_SPACE_TYPE ToDxgiSpace(native::ColorSpace space)
 
 // One present from the game's guides: the copy in (with the game's depth and motion beside the picture), NR on the
 // D3D12 side, the copy back. The frame source is set to this present already. True when the picture went through NR.
+// Finished Picture has not run for kFpIdleMs (NR off, another placement, the game stopped calling its DLSS): its D3D12
+// list object, the model and surfaces on the private device, the HDR10 scratch pair and the composition pass go, the
+// way a switched-off NR lets go. Not while the virtual upscaler (NR + frame generation) shares the composition pass.
+void LetGoWhenIdle(uint64_t presentCount)
+{
+    if (g_guideRunner == nullptr || Util::MillisecondsNow() - g_fpActiveMs < kFpIdleMs ||
+        Config::Instance()->DlssNrNativeUpscaler.value_or_default())
+        return;
+
+    ID3D12CommandQueue* queue = g_source.Queue12();
+
+    if (queue == nullptr || g_guideRunner->Device() != g_source.Device12())
+    {
+        g_guideRunner.reset();
+        return;
+    }
+
+    // Idle for seconds: its last list is long finished, so this does not wait
+    g_guideRunner->WaitIdle();
+    bool holds = true;
+    g_guideRunner->RunEmpty(queue, [&](ID3D12GraphicsCommandList* cmd)
+                            { holds = DlssNr::ReleaseFinishedIdle(cmd, presentCount); });
+
+    if (!holds)
+    {
+        LOG_INFO("Native motion (Vulkan): Finished Picture was idle for {} s, its pass is released",
+                 (int) (kFpIdleMs / 1000.0));
+        g_guideRunner->WaitIdle();
+        g_guideRunner.reset();
+    }
+}
+
 bool RunGameGuides(const DlssNr::FinishedVk::Guides& taken, uint64_t presentCount)
 {
     g_source.SetGameGuides(&taken);
@@ -211,34 +249,72 @@ void OnPresent(VkQueue queue, VkPresentInfoKHR* present, VkDevice device, VkPhys
     const uint64_t presentCount = State::Instance().vulkanPresentCount.load(std::memory_order_relaxed);
     g_source.TrimGuides(presentCount);
     const auto& cfg = *Config::Instance();
-    const bool fpWanted = cfg.DlssNrFinishedPicture.value_or_default() && cfg.DlssNrEnabled.value_or_default() &&
-                          DlssNr::FinishedVk::Recent(presentCount) && !VkPresentBridge::DxvkGame();
+    const bool fpOn = cfg.DlssNrFinishedPicture.value_or_default() && cfg.DlssNrEnabled.value_or_default() &&
+                      !VkPresentBridge::DxvkGame();
+    const bool fpWanted = fpOn && DlssNr::FinishedVk::Recent(presentCount);
     g_fpWanted.store(fpWanted, std::memory_order_relaxed);
+
+    LetGoWhenIdle(presentCount);
+
+    // Whether this present can take a capture at all: not under the bridge or frame generation, and only a picture NR
+    // can read (the shared formats, and the colour spaces VkFrameSource maps: sRGB, HDR10 and scRGB; HLG, Display P3
+    // and the rest would be decoded as SDR). Said in the status line, and the capture records nothing meanwhile.
+    std::string blocked;
+
+    if (fpOn)
+    {
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        VkColorSpaceKHR space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        VkFormat sharedFormat = VK_FORMAT_UNDEFINED;
+        DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
+
+        if (bridged)
+            blocked =
+                "Finished Picture does not run on the Vulkan frame generation bridge yet. Turn the bridge route off, "
+                "or pick After Super Resolution.";
+        else if (FrameGenerationOn(presentCount))
+            blocked = "Finished Picture does not run with frame generation on a Vulkan game yet. Turn frame generation "
+                      "off, or pick After Super Resolution.";
+        else if (native::VkFrameSource::SwapchainFormat(present->pSwapchains[0], &format, &space))
+        {
+            if (!native::VkSharedPictureFormat(format, &dxgiFormat, &sharedFormat))
+                blocked = "This screen colour format is not supported (Vulkan " +
+                          DlssNr::FinishedVk::FormatName(format) + ").";
+            else if (!DlssNr::FinishedVkRules::ColourSpaceTaken(space))
+                blocked =
+                    "This screen colour space is not supported (Vulkan " + DlssNr::FinishedVk::SpaceName(space) + ").";
+        }
+    }
+
+    DlssNr::FinishedVk::SetUsable(blocked.empty());
     DlssNr::FinishedVk::Guides taken;
     bool guides = false;
 
     if (fpWanted)
     {
-        if (bridged)
-            DlssNr::FinishedPictureNote(
-                "Finished Picture does not run on the Vulkan frame generation bridge yet. Turn the "
-                "bridge route off, or pick After Super Resolution.");
-        else if (FrameGenerationOn(presentCount))
-            DlssNr::FinishedPictureNote(
-                "Finished Picture does not run with frame generation on a Vulkan game yet. Turn "
-                "frame generation off, or pick After Super Resolution.");
-        else if (width == 0 || !DlssNr::FinishedVk::Take(device, presentCount, width, height, taken))
-        {
-            // Nothing of the game's to use at this present (not submitted yet, another picture size, an unreadable
-            // guide)
-            const std::string why = DlssNr::FinishedVk::Refusal();
-            DlssNr::FinishedPictureNote(why.empty() ? "Waiting for the game's depth and motion." : why.c_str());
-            g_fpRan.store(false, std::memory_order_relaxed);
-            DlssNr::NativeInputSkipped();
-            return;
-        }
+        if (!blocked.empty())
+            DlssNr::FinishedPictureNote(blocked.c_str());
         else
-            guides = true;
+        {
+            const auto took = width == 0 ? DlssNr::FinishedVk::TakeResult::None
+                                         : DlssNr::FinishedVk::Take(device, queue, presentCount, width, height, taken);
+
+            if (took == DlssNr::FinishedVk::TakeResult::Taken)
+            {
+                guides = true;
+                g_fpActiveMs = Util::MillisecondsNow();
+            }
+            else
+            {
+                // Nothing of the game's to use at this present (not submitted yet, still rendering on another queue,
+                // another output size, an unreadable guide): the picture goes as it is, with the reason as the status
+                const std::string why = DlssNr::FinishedVk::Refusal();
+                DlssNr::FinishedPictureNote(why.empty() ? "Waiting for the game's depth and motion." : why.c_str());
+                g_fpRan.store(false, std::memory_order_relaxed);
+                DlssNr::NativeInputSkipped();
+                return;
+            }
+        }
     }
 
     if (!guides)

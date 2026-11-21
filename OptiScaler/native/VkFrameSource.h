@@ -118,6 +118,8 @@ class VkFrameSource : public IFrameSource
     static void NoteSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info);
     // The picture size of a swapchain seen at creation.
     static bool SwapchainExtent(VkSwapchainKHR swapchain, uint32_t* width, uint32_t* height);
+    // The format and colour space a swapchain was made with.
+    static bool SwapchainFormat(VkSwapchainKHR swapchain, VkFormat* format, VkColorSpaceKHR* space);
 
   private:
     static constexpr uint32_t kRing = 3;

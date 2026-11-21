@@ -192,6 +192,19 @@ bool VkFrameSource::SwapchainExtent(VkSwapchainKHR swapchain, uint32_t* width, u
     return true;
 }
 
+bool VkFrameSource::SwapchainFormat(VkSwapchainKHR swapchain, VkFormat* format, VkColorSpaceKHR* space)
+{
+    std::lock_guard lock(g_registryMutex);
+    const auto it = g_swapchains.find(swapchain);
+
+    if (it == g_swapchains.end())
+        return false;
+
+    *format = it->second.format;
+    *space = it->second.space;
+    return true;
+}
+
 void VkFrameSource::NoteSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info)
 {
     SwapchainRecord record;

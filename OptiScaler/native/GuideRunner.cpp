@@ -93,6 +93,57 @@ bool GuideRunner::Init(ID3D12Device* device)
     return true;
 }
 
+bool GuideRunner::RunEmpty(ID3D12CommandQueue* queue, const std::function<void(ID3D12GraphicsCommandList*)>& record)
+{
+    if (!Ready() || queue == nullptr || !record)
+        return false;
+
+    if (_lastQueue != nullptr && queue != _lastQueue)
+    {
+        const UINT64 completed = _fence->GetCompletedValue();
+
+        if (completed == UINT64_MAX || completed < _signalled)
+            return false;
+    }
+
+    const UINT slot = (UINT) (_frame % kRing);
+
+    if (!WaitFor(_values[slot]) || FAILED(_allocators[slot]->Reset()) ||
+        FAILED(_list->Reset(_allocators[slot], nullptr)))
+        return false;
+
+    record(_list);
+
+    if (FAILED(_list->Close()))
+    {
+        _list->Release();
+        _list = nullptr;
+
+        if (SUCCEEDED(_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _allocators[slot], nullptr,
+                                                 IID_PPV_ARGS(&_list))))
+            _list->Close();
+
+        return false;
+    }
+
+    if (queue != _lastQueue)
+    {
+        queue->AddRef();
+
+        if (_lastQueue != nullptr)
+            _lastQueue->Release();
+
+        _lastQueue = queue;
+    }
+
+    ID3D12CommandList* lists[] = { _list };
+    queue->ExecuteCommandLists(1, lists);
+    queue->Signal(_fence, ++_signalled);
+    _values[slot] = _signalled;
+    ++_frame;
+    return true;
+}
+
 GuideRunner::Result GuideRunner::Run(ID3D12CommandQueue* queue, const FrameInput& input, const ApplyFn& apply,
                                      FrameOutput& output)
 {

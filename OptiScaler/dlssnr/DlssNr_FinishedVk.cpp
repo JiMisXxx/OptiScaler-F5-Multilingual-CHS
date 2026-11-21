@@ -26,8 +26,8 @@ using namespace FinishedVkRules;
 constexpr VkFormat kDepthFormat = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat kMotionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
-// Captures after which a replaced ring image is destroyed: the frames in flight that read it are long done.
-constexpr uint64_t kRetireCaptures = 8;
+// Presents after which a replaced ring image is destroyed: the frames in flight that read it are long done.
+constexpr uint64_t kRetirePresents = 8;
 // The game has stopped calling its DLSS: everything goes after this many presents and this much time (the usual NR
 // off delay on Vulkan is ten seconds, DlssNrFeature_Vk.cpp kOffReleaseVk).
 constexpr uint64_t kIdlePresents = 120;
@@ -45,7 +45,7 @@ struct Image
 struct Retired
 {
     Image image;
-    uint64_t after = 0; // the capture count after which it is destroyed
+    uint64_t after = 0; // the present count from which it is destroyed
 };
 
 struct SlotImages
@@ -76,6 +76,11 @@ struct Objects
     std::vector<Retired> retired;
     uint64_t captures = 0;
 
+    // Signalled on a submit queue right after the game's submit that carries a capture, so a present on ANOTHER queue
+    // can tell the capture has finished (null when the device has no timeline semaphores: such captures are not used)
+    VkSemaphore timeline = VK_NULL_HANDLE;
+    uint64_t timelineValue = 0;
+
     bool Built() const { return pipelineLayout != VK_NULL_HANDLE && motionPipeline != VK_NULL_HANDLE; }
 };
 
@@ -83,7 +88,11 @@ std::mutex g_mutex;
 GuideRing g_ring;
 Objects g_obj;
 std::atomic<uint32_t> g_armed { 0 };                // g_ring.Armed(), for the submit hooks' fast path
-std::atomic<uint64_t> g_lastCapture { UINT64_MAX }; // the present count at the last capture
+std::atomic<uint64_t> g_lastCapture { UINT64_MAX }; // the present count at the last successful capture
+std::atomic<uint64_t> g_lastAttempt { UINT64_MAX }; // the present count at the last Capture call, success or refusal
+std::atomic<bool> g_usable { true };                // the last present could use a capture (SetUsable)
+std::atomic<uint64_t> g_submitClock { 0 };          // numbers the game's submits that carried a capture
+std::atomic<uint64_t> g_snapshot { UINT64_MAX };    // g_submitClock when the present hook was entered
 std::chrono::steady_clock::time_point g_lastCaptureTime {};
 std::string g_refusal; // under g_mutex
 
@@ -180,12 +189,12 @@ bool MakeImage(Objects& o, Image& out, uint32_t width, uint32_t height, VkFormat
     return true;
 }
 
-void DestroyRetired(Objects& o, bool all)
+void DestroyRetired(Objects& o, bool all, uint64_t presentNow = 0)
 {
     std::erase_if(o.retired,
                   [&](Retired& old)
                   {
-                      if (!all && o.captures < old.after)
+                      if (!all && presentNow < old.after)
                           return false;
 
                       DestroyImage(o.device, old.image);
@@ -221,6 +230,9 @@ void Destroy(Objects& o)
 
     if (o.motionPipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(o.device, o.motionPipeline, nullptr);
+
+    if (o.timeline != VK_NULL_HANDLE)
+        vkDestroySemaphore(o.device, o.timeline, nullptr);
 
     if (o.pool != VK_NULL_HANDLE)
         vkDestroyDescriptorPool(o.device, o.pool, nullptr);
@@ -293,6 +305,12 @@ bool EnsureObjects(VkPhysicalDevice physical, VkDevice device)
         return false;
     };
 
+    // The images are shared across the device's queue families (the game's DLSS and its present can be on different
+    // queues). Not knowing the families is refused rather than guessed: an exclusive image used from two families is a
+    // validation error and garbage on some drivers.
+    if (g_obj.families.empty())
+        return fail("queue families (the device was made before OptiScaler could see it)");
+
     // The format the motion goes to must be writable as a storage image and readable by a transfer; R32_SFLOAT is
     // mandatory for both.
     VkFormatProperties properties {};
@@ -362,6 +380,23 @@ bool EnsureObjects(VkPhysicalDevice physical, VkDevice device)
                        g_obj.motionPipeline))
         return fail("compute pipelines");
 
+    // A timeline semaphore for captures submitted on another queue than the present's; the device may not have enabled
+    // the feature, in which case those captures are simply not used (same-queue ones are ordered by the queue)
+    VkSemaphoreTypeCreateInfo timelineType {};
+    timelineType.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo timelineInfo {};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    timelineInfo.pNext = &timelineType;
+
+    if (vkCreateSemaphore(device, &timelineInfo, nullptr, &g_obj.timeline) != VK_SUCCESS)
+    {
+        g_obj.timeline = VK_NULL_HANDLE;
+        LOG_WARN(
+            "DLSS-NR Vulkan finished picture: no timeline semaphore on the game's device; captures made on another "
+            "queue than the present's are not used");
+    }
+
     LOG_INFO("DLSS-NR Vulkan finished picture: capture pass ready on the game's device ({} queue families)",
              g_obj.families.size());
     return true;
@@ -382,7 +417,7 @@ bool EnsureRing(Objects& o, bool depth, uint32_t width, uint32_t height)
         Image& image = depth ? slot.depth : slot.motion;
 
         if (image.image != VK_NULL_HANDLE)
-            o.retired.push_back({ image, o.captures + kRetireCaptures });
+            o.retired.push_back({ image, PresentNow() + kRetirePresents });
 
         image = Image {};
     }
@@ -500,16 +535,58 @@ std::string FormatName(VkFormat format)
     }
 }
 
+std::string SpaceName(VkColorSpaceKHR space)
+{
+    switch (space)
+    {
+    case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
+        return "SRGB_NONLINEAR";
+    case VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT:
+        return "DISPLAY_P3_NONLINEAR";
+    case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT:
+        return "EXTENDED_SRGB_LINEAR";
+    case VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT:
+        return "DISPLAY_P3_LINEAR";
+    case VK_COLOR_SPACE_DCI_P3_NONLINEAR_EXT:
+        return "DCI_P3_NONLINEAR";
+    case VK_COLOR_SPACE_BT709_LINEAR_EXT:
+        return "BT709_LINEAR";
+    case VK_COLOR_SPACE_BT709_NONLINEAR_EXT:
+        return "BT709_NONLINEAR";
+    case VK_COLOR_SPACE_BT2020_LINEAR_EXT:
+        return "BT2020_LINEAR";
+    case VK_COLOR_SPACE_HDR10_ST2084_EXT:
+        return "HDR10_ST2084";
+    case VK_COLOR_SPACE_DOLBYVISION_EXT:
+        return "DOLBYVISION";
+    case VK_COLOR_SPACE_HDR10_HLG_EXT:
+        return "HDR10_HLG";
+    case VK_COLOR_SPACE_ADOBERGB_LINEAR_EXT:
+        return "ADOBERGB_LINEAR";
+    case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT:
+        return "ADOBERGB_NONLINEAR";
+    case VK_COLOR_SPACE_PASS_THROUGH_EXT:
+        return "PASS_THROUGH";
+    case VK_COLOR_SPACE_EXTENDED_SRGB_NONLINEAR_EXT:
+        return "EXTENDED_SRGB_NONLINEAR";
+    default:
+        return "colour space " + std::to_string((int) space);
+    }
+}
+
 void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice physical, VkDevice device,
              bool rayReconstruction)
 {
     if (cmd == VK_NULL_HANDLE || params == nullptr || physical == VK_NULL_HANDLE || device == VK_NULL_HANDLE)
         return;
 
+    // Every call counts, refused or not: the present side shows what is wrong only while the game is seen to call its
+    // DLSS
+    g_lastAttempt.store(PresentNow(), std::memory_order_relaxed);
     const auto& cfg = *Config::Instance();
 
     // The model before Super Resolution, and "generate before SR, apply after" are the D3D12 residual placements (mode
-    // 2 of DlssNr_Dx12.cpp): not built on Vulkan.
+    // 2 of DlssNr_Dx12.cpp), which are not built on Vulkan; the D3D12 path refuses Ray Reconstruction with them too.
     if (cfg.DlssNrRunBeforeSr.value_or_default() || cfg.DlssNrDeferredDlss.value_or_default())
     {
         std::lock_guard lock(g_mutex);
@@ -517,6 +594,11 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
                     "before Super Resolution\" and \"Generate before SR\".";
         return;
     }
+
+    // The last present could not use a capture (the bridge, frame generation, a colour format or space NR cannot take):
+    // nothing is recorded into the game's command buffer, and the ring is freed after the idle time
+    if (!g_usable.load(std::memory_order_relaxed))
+        return;
 
     NVSDK_NGX_Resource_VK* depth = nullptr;
     NVSDK_NGX_Resource_VK* motion = nullptr;
@@ -559,15 +641,6 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     if (ImageViewOk(depth))
     {
         depthRead = ReadDepth(depth->Resource.ImageViewInfo.Format, depthAspect);
-
-        static VkFormat saidDepth = VK_FORMAT_UNDEFINED;
-
-        if (depthRead == GuideRead::Refused && saidDepth != depth->Resource.ImageViewInfo.Format)
-        {
-            saidDepth = depth->Resource.ImageViewInfo.Format;
-            LOG_WARN("DLSS-NR Vulkan finished picture: the game's depth ({}) cannot be read; NR runs without depth",
-                     FormatName(depth->Resource.ImageViewInfo.Format));
-        }
     }
 
     // What the game's call said about this frame: the same values the D3D12 capture keeps (Late::Capture)
@@ -661,6 +734,16 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
 
     std::lock_guard lock(g_mutex);
 
+    // Said once per format, under the lock: the game's render threads can call this at the same time
+    static VkFormat saidDepth = VK_FORMAT_UNDEFINED;
+
+    if (depthRead == GuideRead::Refused && ImageViewOk(depth) && saidDepth != depth->Resource.ImageViewInfo.Format)
+    {
+        saidDepth = depth->Resource.ImageViewInfo.Format;
+        LOG_WARN("DLSS-NR Vulkan finished picture: the game's depth ({}) cannot be read; NR runs without depth",
+                 FormatName(depth->Resource.ImageViewInfo.Format));
+    }
+
     if (!EnsureObjects(physical, device))
     {
         if (depthOnlyView != VK_NULL_HANDLE)
@@ -670,7 +753,7 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     }
 
     ++g_obj.captures;
-    DestroyRetired(g_obj, false);
+    DestroyRetired(g_obj, false, frame.captureEpoch);
 
     if (!EnsureRing(g_obj, false, motionInfo.Width, motionInfo.Height) ||
         (frame.hasDepth && !EnsureRing(g_obj, true, depthAllocWidth, depthAllocHeight)))
@@ -682,7 +765,19 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
         return;
     }
 
-    const size_t index = g_ring.Begin(Handle(cmd), frame.captureEpoch, frame);
+    size_t index = 0;
+
+    // No slot free (a game that captures several times per frame, or frames stuck in flight): this frame has no guides,
+    // and the present side says it is waiting
+    if (!g_ring.Begin(Handle(cmd), frame.captureEpoch, frame, index))
+    {
+        if (depthOnlyView != VK_NULL_HANDLE)
+            vkDestroyImageView(device, depthOnlyView, nullptr);
+
+        PublishArmed();
+        return;
+    }
+
     SlotImages& slot = g_obj.slots[index];
 
     if (slot.depthOnly != VK_NULL_HANDLE)
@@ -715,18 +810,43 @@ void Capture(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkPhysicalDevice 
     }
 }
 
-bool Take(VkDevice device, uint64_t presentEpoch, uint32_t width, uint32_t height, Guides& out)
+TakeResult Take(VkDevice device, VkQueue presentQueue, uint64_t presentEpoch, uint32_t width, uint32_t height,
+                Guides& out)
 {
     std::lock_guard lock(g_mutex);
 
     if (g_obj.device == VK_NULL_HANDLE || g_obj.device != device)
-        return false;
+        return TakeResult::None;
 
     size_t index = 0;
     bool reset = false;
 
-    if (!g_ring.Pick(presentEpoch, width, height, index, reset))
-        return false;
+    // Captures on the present's own queue are ordered before the copy in by the queue itself; one from another queue is
+    // used only when its timeline value was reached (never a GPU wait across queues: the work behind it can depend on
+    // this very present, as in DlssNr_FinishedReady.h)
+    const auto ready = [&](const GuideRing::Slot& slot)
+    {
+        if (slot.queue == (uint64_t) (uintptr_t) presentQueue)
+            return true;
+
+        uint64_t completed = 0;
+        return g_obj.timeline != VK_NULL_HANDLE && slot.value != 0 &&
+               vkGetSemaphoreCounterValue(device, g_obj.timeline, &completed) == VK_SUCCESS && completed >= slot.value;
+    };
+
+    const auto picked =
+        g_ring.Pick(presentEpoch, g_snapshot.load(std::memory_order_relaxed), width, height, index, reset, ready);
+
+    if (picked == PickResult::SizeMismatch)
+    {
+        g_refusal = "The upscaler output (" + std::to_string(g_ring.mismatchWidth) + "x" +
+                    std::to_string(g_ring.mismatchHeight) + ") differs from the screen (" + std::to_string(width) +
+                    "x" + std::to_string(height) + ").";
+        return TakeResult::None;
+    }
+
+    if (picked != PickResult::Ready)
+        return picked == PickResult::NotReady ? TakeResult::NotReady : TakeResult::None;
 
     const FinishedGameFrame frame = g_ring.At(index).frame;
     const SlotImages& slot = g_obj.slots[index];
@@ -746,12 +866,16 @@ bool Take(VkDevice device, uint64_t presentEpoch, uint32_t width, uint32_t heigh
     else
         out.frame.hasDepth = false;
 
-    return out.motion != VK_NULL_HANDLE;
+    return out.motion != VK_NULL_HANDLE ? TakeResult::Taken : TakeResult::None;
 }
+
+void BeginPresent() { g_snapshot.store(g_submitClock.load(std::memory_order_relaxed), std::memory_order_relaxed); }
+
+void SetUsable(bool usable) { g_usable.store(usable, std::memory_order_relaxed); }
 
 bool Recent(uint64_t presentCount)
 {
-    const uint64_t last = g_lastCapture.load(std::memory_order_relaxed);
+    const uint64_t last = g_lastAttempt.load(std::memory_order_relaxed);
     return last != UINT64_MAX && presentCount >= last && presentCount - last <= kRecentPresents;
 }
 
@@ -776,7 +900,7 @@ void OnPresent(uint64_t presentCount)
     if (g_obj.device == VK_NULL_HANDLE)
         return;
 
-    DestroyRetired(g_obj, false);
+    DestroyRetired(g_obj, false, presentCount);
 
     // The game stopped calling its DLSS (a menu, Finished Picture or NR switched off, another upscaler): after a while
     // the ring and the pass are freed. Their last use is that many frames behind, so no wait is needed.
@@ -789,33 +913,73 @@ void OnPresent(uint64_t presentCount)
         g_ring.Clear();
         PublishArmed();
         g_lastCapture.store(UINT64_MAX, std::memory_order_relaxed);
+        g_lastAttempt.store(UINT64_MAX, std::memory_order_relaxed);
     }
 }
 
-void NoteSubmit(const VkCommandBuffer* buffers, uint32_t count)
+namespace
 {
-    if (g_armed.load(std::memory_order_relaxed) == 0 || buffers == nullptr)
+// The game's submit of `buffers` on `queue` succeeded: the captures recorded into them will run. A capture's work is
+// ordered for a present on the same queue by the queue; for another queue an empty submit right behind it signals a
+// timeline value (submit order puts every earlier batch of the queue before the signal).
+void AfterSubmitBuffers(VkQueue queue, const VkCommandBuffer* buffers, uint32_t count)
+{
+    VkSemaphore timeline = VK_NULL_HANDLE;
+    uint64_t value = 0;
+    bool marked = false;
+
+    {
+        std::lock_guard lock(g_mutex);
+        const uint64_t serial = g_submitClock.fetch_add(1, std::memory_order_relaxed) + 1;
+        const bool signal = g_obj.timeline != VK_NULL_HANDLE;
+
+        if (signal)
+        {
+            timeline = g_obj.timeline;
+            value = ++g_obj.timelineValue;
+        }
+
+        for (uint32_t i = 0; i < count; ++i)
+            marked = g_ring.Submitted(Handle(buffers[i]), (uint64_t) (uintptr_t) queue, serial, value) || marked;
+
+        PublishArmed();
+    }
+
+    if (!marked || timeline == VK_NULL_HANDLE)
         return;
 
-    std::lock_guard lock(g_mutex);
+    VkTimelineSemaphoreSubmitInfo values {};
+    values.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    values.signalSemaphoreValueCount = 1;
+    values.pSignalSemaphoreValues = &value;
+    VkSubmitInfo submit {};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.pNext = &values;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &timeline;
+    vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+}
+} // namespace
 
-    for (uint32_t i = 0; i < count; ++i)
-        g_ring.Submitted(Handle(buffers[i]));
+void AfterSubmit(VkQueue queue, const VkCommandBuffer* buffers, uint32_t count)
+{
+    if (g_armed.load(std::memory_order_relaxed) == 0 || buffers == nullptr || count == 0)
+        return;
 
-    PublishArmed();
+    AfterSubmitBuffers(queue, buffers, count);
 }
 
-void NoteSubmit2(const VkCommandBufferSubmitInfo* buffers, uint32_t count)
+void AfterSubmit2(VkQueue queue, const VkCommandBufferSubmitInfo* buffers, uint32_t count)
 {
-    if (g_armed.load(std::memory_order_relaxed) == 0 || buffers == nullptr)
+    if (g_armed.load(std::memory_order_relaxed) == 0 || buffers == nullptr || count == 0)
         return;
 
-    std::lock_guard lock(g_mutex);
+    std::vector<VkCommandBuffer> handles(count);
 
     for (uint32_t i = 0; i < count; ++i)
-        g_ring.Submitted(Handle(buffers[i].commandBuffer));
+        handles[i] = buffers[i].commandBuffer;
 
-    PublishArmed();
+    AfterSubmitBuffers(queue, handles.data(), count);
 }
 
 void ForgetCommandBuffers(uint32_t count, const VkCommandBuffer* buffers)

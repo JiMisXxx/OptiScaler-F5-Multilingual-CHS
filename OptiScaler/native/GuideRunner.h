@@ -45,6 +45,11 @@ class GuideRunner
     // the adapter waits on in output.done.
     Result Run(ID3D12CommandQueue* queue, const FrameInput& input, const ApplyFn& apply, FrameOutput& output);
 
+    // A list of the runner's own with no picture, for work that must be ordered on the queue with its frames and
+    // watched by its lists (letting go of the model while Finished Picture is idle). `record` is called with the open
+    // list.
+    bool RunEmpty(ID3D12CommandQueue* queue, const std::function<void(ID3D12GraphicsCommandList*)>& record);
+
     // Waits (at most a few seconds) for the last frame the runner sent.
     void WaitIdle();
 

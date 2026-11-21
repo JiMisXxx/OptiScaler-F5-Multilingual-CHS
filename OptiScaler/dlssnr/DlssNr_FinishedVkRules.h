@@ -77,13 +77,34 @@ inline GuideRead ReadDepth(VkFormat format, VkImageAspectFlags viewAspect)
     }
 }
 
-// Slots of the capture ring, round robin. Four: the game has up to three frames in flight, so a slot is written again
-// only after the frame that used it is long finished.
-inline constexpr size_t kSlots = 4;
+// Slots of the capture ring. A slot's descriptor set and depth-only view are rewritten when it is captured into again,
+// and a command buffer the game recorded with it may still be waiting to run, so a slot is reused only once its capture
+// is kReuseAge presents old (the game has at most three frames in flight) and has no unsent recording; when no slot is
+// free the capture is skipped. (No push descriptors: they need VK_KHR_push_descriptor on the game's device, which the
+// game did not enable and the device hook does not add.)
+inline constexpr size_t kSlots = 8;
+inline constexpr uint64_t kReuseAge = 4;
 
 // Presents an unsent recording may wait before it counts as never submitted. A game submits well before its present, so
 // this only has to outlast a game that records a frame ahead.
 inline constexpr uint64_t kArmedWindow = 6;
+
+// The colour spaces of a Vulkan swapchain the finished picture can take: what VkFrameSource::ToColorSpace maps (sRGB
+// non-linear as SDR, HDR10 ST 2084 as PQ, extended sRGB linear as scRGB). Anything else (Display P3, HLG, Dolby Vision,
+// BT.709/BT.2020 linear, Adobe RGB, ...) would be decoded as sRGB, so it is refused by name.
+inline bool ColourSpaceTaken(VkColorSpaceKHR space)
+{
+    return space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR || space == VK_COLOR_SPACE_HDR10_ST2084_EXT ||
+           space == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+}
+
+enum class PickResult
+{
+    None,        // nothing submitted that fits
+    Ready,       // `index` may be composed now
+    NotReady,    // the newest fitting capture is on another queue and has not finished yet
+    SizeMismatch // captures are waiting, but for another output size (mismatchWidth/Height)
+};
 
 // The slots' bookkeeping. Callers lock; nothing in here is thread safe.
 class GuideRing
@@ -91,23 +112,46 @@ class GuideRing
   public:
     struct Slot
     {
-        uint64_t serial = 0;    // order of capture; 0: never used
-        uint64_t cmd = 0;       // the command buffer the capture was recorded into, while it is unsent
-        bool armed = false;     // recorded, not yet seen in a submit
-        bool submitted = false; // seen in a submit, not yet used or dropped
-        uint64_t armedAt = 0;   // the present count at the recording (for Expire)
+        uint64_t serial = 0;       // order of capture; 0: never used
+        uint64_t cmd = 0;          // the command buffer the capture was recorded into, while it is unsent
+        bool armed = false;        // recorded, not yet seen in a submit
+        bool submitted = false;    // seen in a successful submit, not yet used or dropped
+        uint64_t armedAt = 0;      // the present count at the recording (for Expire)
+        uint64_t queue = 0;        // the queue it was submitted on
+        uint64_t submitSerial = 0; // order of the submit, to tell it from submits made after a present began
+        uint64_t value = 0;        // the timeline value signalled on `queue` after the submit (0: none)
         FinishedGameFrame frame {};
     };
 
-    // A capture is recorded into `cmd` at present count `now`. Returns the slot to write. A game that calls its
-    // upscaler twice in one command buffer (two views, two features) gets two slots, both sent by the one submit; a
-    // command buffer recorded over is the begin/reset hook's to say (Forget), not told apart here.
-    size_t Begin(uint64_t cmd, uint64_t now, const FinishedGameFrame& frame)
+    uint32_t mismatchWidth = 0, mismatchHeight = 0; // set with PickResult::SizeMismatch
+
+    // A capture is recorded into `cmd` at present count `now`: picks the slot to write (the oldest reusable one) and
+    // returns false when none is free. A game that calls its upscaler twice in one command buffer (two views, two
+    // features) gets two slots, both sent by the one submit; a command buffer recorded over is the begin/reset hook's
+    // to say (Forget), not told apart here.
+    bool Begin(uint64_t cmd, uint64_t now, const FinishedGameFrame& frame, size_t& index)
     {
-        const size_t index = _next++ % kSlots;
+        const Slot* best = nullptr;
+
+        for (size_t i = 0; i < kSlots; ++i)
+        {
+            const Slot& slot = _slots[i];
+            const bool free = slot.serial == 0 || (!slot.armed && now >= slot.frame.captureEpoch &&
+                                                   now - slot.frame.captureEpoch >= kReuseAge);
+
+            if (free && (best == nullptr || slot.serial < best->serial))
+            {
+                best = &slot;
+                index = i;
+            }
+        }
+
+        if (best == nullptr)
+            return false;
+
         Slot& slot = _slots[index];
 
-        if (slot.armed || slot.submitted)
+        if (slot.submitted)
             Drop(slot);
 
         slot.serial = ++_serial;
@@ -115,12 +159,17 @@ class GuideRing
         slot.armed = true;
         slot.submitted = false;
         slot.armedAt = now;
+        slot.queue = 0;
+        slot.submitSerial = 0;
+        slot.value = 0;
         slot.frame = frame;
-        return index;
+        return true;
     }
 
-    // The game's submit carries `cmd`: what was recorded into it will run. True when a slot was waiting for it.
-    bool Submitted(uint64_t cmd)
+    // The game's submit carrying `cmd` on `queue` returned success: what was recorded into it will run. `serial` is the
+    // submit's number, `value` the timeline value the caller signals on `queue` right after (0: none). True when a slot
+    // was waiting for it.
+    bool Submitted(uint64_t cmd, uint64_t queue, uint64_t serial, uint64_t value)
     {
         bool any = false;
 
@@ -131,6 +180,9 @@ class GuideRing
                 slot.armed = false;
                 slot.submitted = true;
                 slot.cmd = 0;
+                slot.queue = queue;
+                slot.submitSerial = serial;
+                slot.value = value;
                 any = true;
             }
         }
@@ -185,19 +237,24 @@ class GuideRing
         return count;
     }
 
-    // The slot a present at epoch `epoch` composes on a picture of `width` x `height`: the newest submitted capture of
-    // that size inside the window of FinishedStale (one present; the same rule the D3D12 slots use). Everything older
-    // is used up with it, and a game reset flag of a capture that was dropped unapplied rides on the one that is used.
-    // False when there is none.
-    bool Pick(uint64_t epoch, uint32_t width, uint32_t height, size_t& index, bool& reset)
+    // The slot a present at epoch `epoch` composes on a picture of `width` x `height`: the newest capture of that size
+    // that was submitted before the present began (`snapshot`: the submit clock when the present hook was entered; a
+    // submit after it is for a later frame and stays), inside the window of FinishedStale (one present; the rule the
+    // D3D12 slots use). `ready(slot)` says whether the work that wrote it is done or ordered by the present's own
+    // queue: not ready, nothing is consumed and the present is skipped. Everything older than the one used goes with
+    // it, and a game reset flag of a capture that was dropped unapplied rides on the one that is used.
+    template <class ReadyFn>
+    PickResult Pick(uint64_t epoch, uint64_t snapshot, uint32_t width, uint32_t height, size_t& index, bool& reset,
+                    ReadyFn&& ready)
     {
         const Slot* best = nullptr;
+        bool otherSize = false;
 
         for (size_t i = 0; i < kSlots; ++i)
         {
             Slot& slot = _slots[i];
 
-            if (!slot.submitted)
+            if (!slot.submitted || slot.submitSerial > snapshot)
                 continue;
 
             if (DlssNr::FinishedStale(epoch, slot.frame.captureEpoch, 1))
@@ -207,7 +264,12 @@ class GuideRing
             }
 
             if (slot.frame.outputWidth != width || slot.frame.outputHeight != height)
+            {
+                otherSize = true;
+                mismatchWidth = slot.frame.outputWidth;
+                mismatchHeight = slot.frame.outputHeight;
                 continue;
+            }
 
             if (best == nullptr || slot.serial > best->serial)
             {
@@ -217,13 +279,16 @@ class GuideRing
         }
 
         if (best == nullptr)
-            return false;
+            return otherSize ? PickResult::SizeMismatch : PickResult::None;
+
+        if (!ready(*best))
+            return PickResult::NotReady;
 
         reset = best->frame.reset || _carriedReset;
 
         for (auto& slot : _slots)
         {
-            if (slot.submitted && slot.serial <= best->serial)
+            if (slot.submitted && slot.submitSerial <= snapshot && slot.serial <= best->serial)
             {
                 if (&slot != best && slot.frame.reset)
                     reset = true;
@@ -233,7 +298,7 @@ class GuideRing
         }
 
         _carriedReset = false;
-        return true;
+        return PickResult::Ready;
     }
 
     // Everything is forgotten (a resize, the device going): no capture of before is used again.
