@@ -12,6 +12,7 @@
 #include <framegen/xefg/XeFG_DynamicTarget.h>
 #include <Config.h>
 #include <hooks/Vulkan_Hooks.h>
+#include <menu/menu_common.h>
 #include <native/NativeDriverVk.h>
 #include <native/SharedFrameVk.h>
 #include <misc/IdentifyGpu.h>
@@ -224,6 +225,7 @@ struct F5Low_Vk::Job
     uint32_t slot = 0;
     uint32_t generated = 0;
     uint64_t doneValue = 0;
+    uint64_t readyValue = 0; // the value of the game-GPU-done fence this frame waits on (the watcher stamps it)
     uint32_t realIndex = 0;
     VkSemaphore realWait = VK_NULL_HANDLE;
     double intervalMs = 0.0;
@@ -242,11 +244,18 @@ struct F5Low_Vk::Job
     uint32_t groupMode = 0;
 };
 
+// The present mode a frame goes out with: the game's VkSwapchainPresentModeInfoEXT when it chained one, else the swapchain's
+int F5Low_Vk::EffectiveMode(const Job& job) const
+{
+    return job.hasMode ? static_cast<int>(job.presentMode) : _presentMode;
+}
+
 struct F5Low_Vk::PacerCtx
 {
     F5LowPacerBatch batch {};
     bool meterReported = false;
-    int64_t readyTicks = 0; // when the f5low done fence was seen complete (0: not seen)
+    int64_t readyTicks = 0; // when the game's frame was finished on the GPU, QPC (0: not seen)
+    int64_t doneTicks = 0;  // when f5low's work for the frame was done, QPC (0: not seen)
 };
 
 struct F5Low_Vk::Impl
@@ -353,8 +362,118 @@ struct F5Low_Vk::Impl
     std::thread worker;
     std::atomic<int> lastResult { VK_SUCCESS };
 
+    // The GPU stamps (D3D12's "ready stamp"): a watcher thread waits for the fences of each frame and notes the QPC when
+    // the game's frame was finished on the GPU (the ready fence) and when f5low's work was (the done fence), whatever the
+    // worker is busy with. The pacer gets these, never the time the worker got to the job.
+    struct WatchReq
+    {
+        ComPtr<ID3D12Fence> fence;
+        uint64_t value = 0;
+        uint32_t slot = 0;
+        bool done = false;
+    };
+    struct Stamp
+    {
+        std::atomic<uint64_t> readyValue { 0 };
+        std::atomic<int64_t> readyTicks { 0 };
+        std::atomic<uint64_t> doneValue { 0 };
+        std::atomic<int64_t> doneTicks { 0 };
+    };
+    std::mutex watchMutex;
+    std::condition_variable watchCv;
+    std::deque<WatchReq> watchQueue;
+    bool watchStop = false;
+    std::thread watcher;
+    Stamp stamps[kSlots];
+
     ~Impl() = default;
 };
+
+namespace
+{
+void WatchPush(F5Low_Vk::Impl& s, ID3D12Fence* fence, uint64_t value, uint32_t slot, bool done)
+{
+    if (!s.watcher.joinable() || fence == nullptr)
+        return;
+
+    F5Low_Vk::Impl::WatchReq req;
+    req.fence = fence;
+    req.value = value;
+    req.slot = slot;
+    req.done = done;
+
+    {
+        std::lock_guard lock(s.watchMutex);
+        s.watchQueue.push_back(std::move(req));
+    }
+
+    s.watchCv.notify_all();
+}
+
+void WatchLoop(F5Low_Vk::Impl* sp)
+{
+    auto& s = *sp;
+
+    for (;;)
+    {
+        F5Low_Vk::Impl::WatchReq req;
+
+        {
+            std::unique_lock lock(s.watchMutex);
+            s.watchCv.wait(lock, [&] { return s.watchStop || !s.watchQueue.empty(); });
+
+            if (s.watchStop)
+                return;
+
+            req = std::move(s.watchQueue.front());
+            s.watchQueue.pop_front();
+        }
+
+        // A bounded wait: a value that never comes (a removed device) must not hold the stamps of the frames behind it
+        if (!WaitFence12(req.fence.Get(), req.value, 250))
+            continue;
+
+        const int64_t ticks = s.pacerNowTicks != nullptr ? s.pacerNowTicks() : 0;
+        auto& stamp = s.stamps[req.slot % kSlots];
+
+        {
+            std::lock_guard lock(s.watchMutex);
+
+            if (req.done)
+            {
+                stamp.doneTicks.store(ticks);
+                stamp.doneValue.store(req.value);
+            }
+            else
+            {
+                stamp.readyTicks.store(ticks);
+                stamp.readyValue.store(req.value);
+            }
+        }
+
+        s.watchCv.notify_all();
+    }
+}
+
+// The stamp of a frame, waiting (bounded) for the GPU to reach it; 0 when it did not come (the pacer then uses the
+// arrival time of the frame alone, never a mix of the two clocks within one frame)
+int64_t WatchTake(F5Low_Vk::Impl& s, uint32_t slot, uint64_t value, bool done, DWORD timeoutMs)
+{
+    if (!s.watcher.joinable() || value == 0)
+        return 0;
+
+    auto& stamp = s.stamps[slot % kSlots];
+    auto& seen = done ? stamp.doneValue : stamp.readyValue;
+    auto& ticks = done ? stamp.doneTicks : stamp.readyTicks;
+
+    std::unique_lock lock(s.watchMutex);
+
+    if (!s.watchCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return seen.load() == value; }))
+        return 0;
+
+    return ticks.load();
+}
+} // namespace
 
 F5Low_Vk::F5Low_Vk() : IFGFeature_Vk(), IFGFeature(), _impl(std::make_unique<Impl>())
 {
@@ -700,7 +819,22 @@ void F5Low_Vk::StartWorker()
 {
     auto& s = *_impl;
 
-    if (!s.ownQueue || s.worker.joinable() || s.detached)
+    if (!s.ownQueue || s.detached)
+        return;
+
+    // The GPU stamp watcher goes with the worker, once there is a pacer to give the stamps to
+    if (!s.watcher.joinable() && s.pacer != nullptr && s.pacerNowTicks != nullptr)
+    {
+        {
+            std::lock_guard lock(s.watchMutex);
+            s.watchStop = false;
+            s.watchQueue.clear();
+        }
+
+        s.watcher = std::thread(WatchLoop, &s);
+    }
+
+    if (s.worker.joinable())
         return;
 
     {
@@ -716,6 +850,24 @@ void F5Low_Vk::StartWorker()
 void F5Low_Vk::StopWorker(bool join)
 {
     auto& s = *_impl;
+
+    if (s.watcher.joinable())
+    {
+        {
+            std::lock_guard lock(s.watchMutex);
+            s.watchStop = true;
+        }
+
+        s.watchCv.notify_all();
+
+        if (join)
+            s.watcher.join();
+        else
+            {
+                s.watcher.detach();
+                s.detached = true;
+            }
+    }
 
     if (!s.worker.joinable())
         return;
@@ -771,16 +923,17 @@ void F5Low_Vk::WorkerLoop()
 
         if (s.pacer != nullptr)
         {
-            // When f5low's work for this frame is done (bounded wait; 0 when not seen)
-            if (job.generated > 0 && WaitFence12(s.done.Fence12(), job.doneValue, 30))
-                pacerCtx.readyTicks = s.pacerNowTicks();
+            // When the game's frame was finished on the GPU, and when f5low's work was: the watcher's stamps (bounded
+            // wait, 0 when not seen). Never the time this thread got to the job.
+            pacerCtx.readyTicks = WatchTake(s, job.slot, job.readyValue, false, 30);
+            pacerCtx.doneTicks = WatchTake(s, job.slot, job.doneValue, true, 30);
 
             F5LowPacerFrame frame {};
             frame.structSize = sizeof(frame);
             frame.arriveTicks = job.arriveTicks != 0 ? job.arriveTicks : s.pacerNowTicks();
             frame.generated = job.generated;
             frame.readyTicks = pacerCtx.readyTicks;
-            frame.displayPaced = VsyncPaces(_presentMode) ? 1u : 0u;
+            frame.displayPaced = VsyncPaces(EffectiveMode(job)) ? 1u : 0u;
             pacerCtx.batch.structSize = sizeof(pacerCtx.batch);
 
             if (s.pacerFrameArrived(s.pacer, &frame, &pacerCtx.batch) == F5LOW_PACER_OK)
@@ -910,7 +1063,17 @@ VkResult F5Low_Vk::PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD 
         return VK_TIMEOUT;
     }
 
-    return presentFn(queue, &info);
+    const auto result = presentFn(queue, &info);
+
+    // Every image we put on the screen, for the stats line and for the overlay's output rate (the menu measures the
+    // cadence of the shown frames from these, as it does for the other native frame generation outputs)
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+    {
+        ++_statShown;
+        MenuCommon::FGOutputPresent();
+    }
+
+    return result;
 }
 
 // The real present on the game's thread: after the worker's jobs (a short wait), so the order of the images holds.
@@ -954,10 +1117,14 @@ VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, ui
     if (!DrainWorker(kBlockMs))
         LOG_DEBUG("F5Low (Vulkan): the worker was still busy, presenting the game's image anyway");
 
-    _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - startMs));
-    AddOurWait(Util::MillisecondsNow() - startMs);
+    const double drainedMs = Util::MillisecondsNow();
+    AddAtomic(_gameWaitMs, drainedMs - startMs);
+    AddOurWait(drainedMs - startMs);
 
-    const auto result = PresentOn(queue, *info, RemainingMs(kBlockMs, Util::MillisecondsNow() - startMs));
+    const auto result = PresentOn(queue, *info, RemainingMs(kBlockMs, drainedMs - startMs));
+
+    // The swapchain lock and the driver's block (FIFO with a full queue) are the game thread's wait too
+    AddOurWait(Util::MillisecondsNow() - drainedMs);
 
     if (meterBatch > 1)
         NoteMeterFeedback(result, meterInfo.presentConfigFeedback);
@@ -997,7 +1164,14 @@ VkResult F5Low_Vk::AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, u
     if (_gateEnabled && swapchain == _swapchain && !GateAcquire(device, swapchain, timeout))
         return VK_NOT_READY;
 
-    return AcquireLoop(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    // The polling and the swapchain lock of the game's acquire are our wait (the worker holds the lock for presents)
+    const double acquireStartMs = Util::MillisecondsNow();
+    const auto acquired = AcquireLoop(device, swapchain, timeout, semaphore, fence, pImageIndex);
+
+    if (swapchain == _swapchain)
+        AddOurWait(Util::MillisecondsNow() - acquireStartMs);
+
+    return acquired;
 }
 
 VkResult F5Low_Vk::AcquireLoop(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
@@ -1198,7 +1372,7 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     // With the latency bound the spare images cost the game no queue depth: ask for the most the session may generate
     // (no recreate for a multiplier change). Without it only what the multiplier needs, and a recreate for a raise.
     const bool gateWanted = _presentWaitOn && Config::Instance()->F5LowVulkanLatencyGate.value_or_default() &&
-                            GateUsable(LatencyBound(pCreateInfo->minImageCount));
+                            GateUsable(F5LowVk::LatencyBound(pCreateInfo->minImageCount, 1, false));
 
     VkSwapchainCreateInfoKHR info = *pCreateInfo;
     info.minImageCount = RequestedMinImageCount(
@@ -1260,7 +1434,8 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     // VK_EXT_swapchain_maintenance1 would clash with fences the game chains itself)
     _presentMode = static_cast<int>(pCreateInfo->presentMode);
     _gameMinImages = pCreateInfo->minImageCount;
-    _gateBound = LatencyBound(pCreateInfo->minImageCount);
+    _gateCount = 1;
+    _gateBound = F5LowVk::LatencyBound(pCreateInfo->minImageCount, 1, VsyncPaces(_presentMode));
 
     {
         std::lock_guard gateLock(_gateMutex);
@@ -1412,29 +1587,25 @@ bool F5Low_Vk::Present()
 
 VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
-    // The time between two game presents. The game thread is not held by our pacing (the worker paces), so this is the
-    // game's own cadence.
+    // The time between two game presents. The pacer gets the real arrival time (as on D3D12); our own interval is the
+    // game's own frame time, the time between two presents without what our waits added to it.
     const double entryMs = Util::MillisecondsNow();
-    const int64_t realTicks = _impl->pacerNowTicks != nullptr ? _impl->pacerNowTicks() : 0;
+    _arriveTicks = _impl->pacerNowTicks != nullptr ? _impl->pacerNowTicks() : 0;
     const double ourWaitMs = _ourWaitMs.exchange(0.0);
 
-    // The game's own frame time, without what our waits added to it; the interval and the pacer's arrival ticks follow
-    // it
     if (_lastEntryMs > 0.0)
     {
         const double own = Unthrottled(entryMs - _lastEntryMs, ourWaitMs);
         _intervalMs = NextInterval(_intervalMs, own);
         _statWaitMs += ourWaitMs;
-
-        if (own >= 2.0 && own <= 100.0)
-        {
-            _statUnthrottledSum += own;
-            ++_statUnthrottledN;
-        }
     }
 
-    _synthTicks = NextSyntheticTick(_synthTicks, realTicks, _intervalMs, _impl->ticksPerSecond);
-    _arriveTicks = _synthTicks;
+    // The stats window starts at the first present after the last line
+    if (_statEntries == 0)
+        _statFirstEntryMs = entryMs;
+
+    _statLastEntryMs = entryMs;
+    ++_statEntries;
 
     _lastEntryMs = entryMs;
 
@@ -1506,9 +1677,11 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
 
     VkPresentInfoKHR finalInfo = *pPresentInfo;
 
-    const double generateStartMs = Util::MillisecondsNow();
+    // Generate counts its own blocking waits (slot, fences, inline presents), not its CPU work
     const auto outcome = Generate(queue, pPresentInfo, pending, finalInfo);
-    AddOurWait(Util::MillisecondsNow() - generateStartMs);
+
+    if (_generationOff)
+        ++_statOffFrames;
 
     if (outcome == Outcome::Queued)
         return AskRecreateIfRaised(static_cast<VkResult>(_impl->lastResult.load()));
@@ -1536,6 +1709,25 @@ VkResult F5Low_Vk::AskRecreateIfRaised(VkResult result)
 
         if (!_generationOff)
             LogStats();
+        else
+        {
+            // Not generating at the boundary: no line, and the window starts over (no half old, half new numbers)
+            _statEntries = 0;
+            _statOffFrames = 0;
+            _statWaitMs = 0.0;
+            _statShown = 0;
+
+            {
+                std::lock_guard lock(_statMutex);
+                _spacing = {};
+                _statGenerated = 0;
+                _statBatches = 0;
+            }
+
+            std::lock_guard lock(_gateMutex);
+            _gateWaits = 0;
+            _gateWaitTotalMs = 0.0;
+        }
     }
 
     if (result != VK_SUCCESS)
@@ -2044,7 +2236,7 @@ void F5Low_Vk::PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dro
     F5LowPacerPresented what {};
     what.structSize = sizeof(what);
     what.presentTicks = now;
-    what.gpuDoneTicks = pc.readyTicks;
+    what.gpuDoneTicks = pc.doneTicks;
     what.flags = dropped ? F5LOW_PACER_PRESENT_DROPPED : 0;
     s.pacerPresented(s.pacer, &pc.batch, k, &what);
 
@@ -2071,6 +2263,50 @@ void F5Low_Vk::PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dro
     }
 }
 
+// FixedPacing for the pacer (it reads XEFG_CUDA_FIXEDPACING, then f5low.ini, when it is made). The player's own choice
+// (an environment value of theirs, or anything but auto in f5low.ini) stays; on auto: gate on = display, gate off = left
+// as auto (timer). The value we put in the environment is taken out again when the next swapchain has no gate.
+void F5Low_Vk::SetFixedPacing(bool gateOn)
+{
+    static bool ours = false; // the environment value is ours
+
+    char value[64] {};
+    const bool inEnv = GetEnvironmentVariableA("XEFG_CUDA_FIXEDPACING", value, sizeof(value)) != 0;
+
+    if (inEnv && !ours)
+    {
+        LOG_INFO("F5Low (Vulkan): FixedPacing={} (set in the environment)", value);
+        return;
+    }
+
+    std::error_code ec;
+    const auto ini = std::filesystem::absolute(F5Low::LibraryPath(), ec).parent_path() / L"f5low.ini";
+    wchar_t wide[64] {};
+    GetPrivateProfileStringW(L"f5low", L"FixedPacing", L"auto", wide, 64, ini.c_str());
+    const std::wstring text(wide);
+
+    if (!text.empty() && _wcsicmp(text.c_str(), L"auto") != 0)
+    {
+        LOG_INFO("F5Low (Vulkan): FixedPacing={} (set in f5low.ini)", std::string(text.begin(), text.end()));
+        return;
+    }
+
+    if (gateOn)
+    {
+        SetEnvironmentVariableA("XEFG_CUDA_FIXEDPACING", "display");
+        ours = true;
+    }
+    else if (ours)
+    {
+        SetEnvironmentVariableA("XEFG_CUDA_FIXEDPACING", nullptr);
+        ours = false;
+    }
+
+    LOG_INFO("F5Low (Vulkan): FixedPacing auto: {}",
+             gateOn ? "display (the latency gate is on: V-Sync / FIFO batches go back to back, the display spaces them)"
+                    : "timer (no latency gate: the pacer times V-Sync / FIFO batches)");
+}
+
 // f5low's pacer is made once the generator's context is (its GPU gives the pacer the metering rules); the host says it
 // can meter only with VK_NV_present_metering on the device, and never that it can burst
 void F5Low_Vk::EnsurePacer()
@@ -2094,6 +2330,11 @@ void F5Low_Vk::EnsurePacer()
     }
 
     _hostMeter = HostCanMeter(Config::Instance()->F5LowVulkanFlipMetering.value_or_default(), _meteringAvailable);
+
+    // Who spaces a V-Sync / FIFO batch, as on D3D12 (pace_sched.h FixedTimer): with the latency gate on the display does
+    // (the batch goes to the driver back to back, the gate paces by itself), without it the pacer's timer does (auto).
+    // MAILBOX / IMMEDIATE batches are timed either way. The pacer reads the setting at creation.
+    SetFixedPacing(_gateEnabled.load());
 
     F5LowPacerCreateInfo info {};
     info.apiVersion = F5LOW_PACER_API_VERSION;
@@ -2150,27 +2391,36 @@ void F5Low_Vk::LogStats()
         _gateWaitTotalMs = 0.0;
     }
 
-    // Everything below is for this window of kStatsEvery game frames
-    const double nowMs = Util::MillisecondsNow();
-    const double windowS = _statStartMs > 0.0 ? (nowMs - _statStartMs) / 1000.0 : 0.0;
-    const double unthrottled = _statUnthrottledN > 0 ? _statUnthrottledSum / _statUnthrottledN : 0.0;
-    const double waitPerFrame = _statWaitMs / kStatsEvery;
-    const double shownFps = windowS > 0.0 ? static_cast<double>(generated + batches) / windowS : 0.0;
-    _statStartMs = nowMs;
+    // Everything below is for this window: the game presents since the last line
+    const double spanMs = _statLastEntryMs - _statFirstEntryMs;
+    const uint32_t entries = _statEntries;
+    const uint32_t offFrames = _statOffFrames;
+    const double waitMs = _statWaitMs;
+    const uint64_t shown = _statShown.exchange(0);
+    _statEntries = 0;
+    _statOffFrames = 0;
     _statWaitMs = 0.0;
-    _statUnthrottledSum = 0.0;
-    _statUnthrottledN = 0;
+
+    // The real game rate from the real arrival times (entries - 1 intervals); every image we presented in the window,
+    // over the same span (the images presented while the window's last frame was still being shown count in the next
+    // window, so the span runs from the first to the last game present)
+    const bool measured = entries >= 2 && spanMs > 0.0;
+    const double gameFps = measured ? (entries - 1) * 1000.0 / spanMs : 0.0;
+    const double shownFps = measured ? static_cast<double>(shown) * 1000.0 / spanMs : 0.0;
+    const double otherWaitMs = std::max(0.0, waitMs - gateMs);
 
     LOG_INFO(
-        "F5Low (Vulkan) stats (per {} frames): game {:.1f} fps unthrottled (interval {:.2f} ms), shown {:.1f} fps, "
-        "generated {:.2f}/frame, our waits {:.2f} ms/frame, pacing {} (mode {}, active {}), metering {} (feedback "
-        "0x{:X}, "
-        "refused {}), present spacing mean {:.2f} sd {:.2f} max {:.2f} ms, late {}, gate waits {} ({:.1f} ms)",
-        kStatsEvery, unthrottled > 0.0 ? 1000.0 / unthrottled : 0.0, _intervalMs, shownFps,
-        batches > 0 ? static_cast<double>(generated) / static_cast<double>(batches) : 0.0, waitPerFrame,
-        s.pacer != nullptr ? "f5low pacer" : "plain", haveInfo ? info.pacingMode : -1, haveInfo ? info.pacingActive : 0,
+        "F5Low (Vulkan) stats ({} game frames, {} not generated): game {:.1f} fps, shown {:.1f} fps, generated "
+        "{:.2f}/frame, our waits {:.2f} ms/frame (gate {:.2f}, other {:.2f}), interval {:.2f} ms, pacing {} (mode {}, "
+        "active {}), metering {} (feedback 0x{:X}, refused {}), present spacing mean {:.2f} sd {:.2f} max {:.2f} ms, "
+        "late {}, gate waits {}",
+        entries, offFrames, gameFps, shownFps,
+        batches > 0 ? static_cast<double>(generated) / static_cast<double>(batches) : 0.0,
+        entries > 0 ? waitMs / entries : 0.0, entries > 0 ? gateMs / entries : 0.0,
+        entries > 0 ? otherWaitMs / entries : 0.0, _intervalMs.load(), s.pacer != nullptr ? "f5low pacer" : "plain",
+        haveInfo ? info.pacingMode : -1, haveInfo ? info.pacingActive : 0,
         _meteringOn.load() || _meterWasOn.load() ? "on" : "off", _lastFeedback.load(),
-        haveInfo ? info.meteringRefused : 0, spacing.mean, spacing.Sd(), spacing.max, spacing.late, gateWaits, gateMs);
+        haveInfo ? info.meteringRefused : 0, spacing.mean, spacing.Sd(), spacing.max, spacing.late, gateWaits);
 }
 
 uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)
@@ -2179,7 +2429,7 @@ uint32_t F5Low_Vk::RunGenerated(const Job& job, bool paced, PacerCtx* pacer)
     auto& slot = s.slots[job.slot];
     uint32_t presentedGenerated = 0;
     // No CPU spacing when V-Sync / FIFO paces the display; else the batch fits the game's own interval
-    const double spacingMs = BatchSpacingMs(job.intervalMs, job.generated, VsyncPaces(_presentMode));
+    const double spacingMs = BatchSpacingMs(job.intervalMs, job.generated, VsyncPaces(EffectiveMode(job)));
     const double baseMs = Util::MillisecondsNow();
     bool complete = true;
 
@@ -2311,6 +2561,15 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     // What this thread may wait for in one present, in all
     const auto leftMs = [&] { return RemainingMs(kBlockMs, Util::MillisecondsNow() - startMs); };
 
+    // Our blocking waits on this thread, counted into the game's own frame time
+    const auto timed = [&](auto&& wait)
+    {
+        const double waitStartMs = Util::MillisecondsNow();
+        const auto result = wait();
+        AddOurWait(Util::MillisecondsNow() - waitStartMs);
+        return result;
+    };
+
     // Assumed off until a frame really was generated: the cap and the status follow what happens
     _generationOff = true;
 
@@ -2380,7 +2639,9 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     {
         std::unique_lock lock(s.jobMutex);
 
-        if (!s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()), [&] { return !s.slotBusy[slotIndex]; }))
+        if (!timed([&] {
+                return s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()), [&] { return !s.slotBusy[slotIndex]; });
+            }))
         {
             LatchOff("The present worker did not finish a frame in time, frame generation is off");
             return Outcome::Direct;
@@ -2399,8 +2660,10 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
 
         if (waitCount > 0)
         {
-            if (vkWaitForFences(_device, waitCount, waits, VK_TRUE, static_cast<uint64_t>(leftMs()) * 1'000'000ull) !=
-                VK_SUCCESS)
+            if (timed([&] {
+                    return vkWaitForFences(_device, waitCount, waits, VK_TRUE,
+                                           static_cast<uint64_t>(leftMs()) * 1'000'000ull);
+                }) != VK_SUCCESS)
             {
                 LatchOff("The GPU did not finish a frame's copies in time, frame generation is off");
                 return Outcome::Direct;
@@ -2499,8 +2762,8 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     {
         auto* allocator = s.allocators[slotIndex].Get();
 
-        if (!WaitFence12(s.depthDone.Get(), s.allocatorValue[slotIndex], leftMs()) || FAILED(allocator->Reset()) ||
-            FAILED(s.list->Reset(allocator, nullptr)))
+        if (!timed([&] { return WaitFence12(s.depthDone.Get(), s.allocatorValue[slotIndex], leftMs()); }) ||
+            FAILED(allocator->Reset()) || FAILED(s.list->Reset(allocator, nullptr)))
         {
             SetReason("The D3D12 depth copy could not be recorded");
             _failures++;
@@ -2534,6 +2797,10 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
         readyFence = s.depthDone.Get();
     }
 
+    // When the game's frame is finished on the GPU, for the pacer
+    if (count > 0)
+        WatchPush(s, readyFence, readyValue, slotIndex, false);
+
     // The job two frames back (the last one to write this set of output images) is done with them before f5low writes
     // them again
     if (count > 0 && s.setSlot[set] >= 0)
@@ -2542,7 +2809,10 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
         {
             std::unique_lock lock(s.jobMutex);
 
-            if (!s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()), [&] { return !s.slotBusy[previous]; }))
+            if (!timed([&] {
+                    return s.jobCv.wait_for(lock, std::chrono::milliseconds(leftMs()),
+                                            [&] { return !s.slotBusy[previous]; });
+                }))
             {
                 LatchOff("The present worker did not finish a frame in time, frame generation is off");
                 return Outcome::Direct;
@@ -2558,8 +2828,10 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
                 waits[waitCount++] = s.slots[previous].fences[1 + i];
         }
 
-        if (waitCount > 0 && vkWaitForFences(_device, waitCount, waits, VK_TRUE,
-                                             static_cast<uint64_t>(leftMs()) * 1'000'000ull) != VK_SUCCESS)
+        if (waitCount > 0 && timed([&] {
+                return vkWaitForFences(_device, waitCount, waits, VK_TRUE,
+                                       static_cast<uint64_t>(leftMs()) * 1'000'000ull);
+            }) != VK_SUCCESS)
         {
             LatchOff("The GPU did not finish the last generated frames in time, frame generation is off");
             return Outcome::Direct;
@@ -2602,6 +2874,10 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
 
     output.doneFence = s.done.Fence12();
     output.doneValue = s.done.Value() + 1;
+
+    // f5low signals the done fence for every answer, so the stamp always comes
+    if (count > 0)
+        WatchPush(s, output.doneFence, output.doneValue, slotIndex, true);
 
     const auto result = s.generate(s.context, &input, &output);
 
@@ -2651,16 +2927,18 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     {
         _loggedGenerating = true;
         LOG_INFO("F5Low (Vulkan): generating {} frame(s) per game frame, frame interval {:.2f} ms", generated,
-                 _intervalMs);
+                 _intervalMs.load());
     }
 
     job.slot = slotIndex;
     job.set = set;
     job.generated = generated;
     job.doneValue = output.doneValue;
+    job.readyValue = readyValue;
     job.realIndex = imageIndex;
     job.realWait = slot.inDone;
     job.intervalMs = _intervalMs;
+    _gateCount = generated;
     job.metered = _meteringOn;
     job.arriveTicks = _arriveTicks;
 
@@ -2688,7 +2966,9 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
 
     // No present queue of our own: the presents and their pacing run here, the real image goes out after (in the same
     // metered batch)
+    const double inlineStartMs = Util::MillisecondsNow();
     const uint32_t presentedInline = RunGenerated(job, PacedOnCpu(job.metered));
+    AddOurWait(Util::MillisecondsNow() - inlineStartMs); // the game thread is held for all of it
     _inlineGenerated = presentedInline;
     _inlineBatch = job.metered ? presentedInline + 1 : 0;
     _meterWasOn = job.metered;
@@ -2792,6 +3072,7 @@ bool F5Low_Vk::GateAcquire(VkDevice device, VkSwapchainKHR swapchain, uint64_t t
         if (!_gate.on)
             return true;
 
+        _gateBound = GateBound();
         const uint64_t number = GateWaitNumber(_issuedCount, _gateBound);
 
         if (number == 0 || _issuedCount - number >= kGateRing)
@@ -2806,7 +3087,7 @@ bool F5Low_Vk::GateAcquire(VkDevice device, VkSwapchainKHR swapchain, uint64_t t
     const uint64_t waitNs = timeoutNs == 0 ? 0 : std::min<uint64_t>(timeoutNs, 100'000'000ull);
     const double waitStartMs = Util::MillisecondsNow();
     const auto result = WaitForPresent(device, swapchain, id, waitNs);
-    _gameWaitMs.store(_gameWaitMs.load() + (Util::MillisecondsNow() - waitStartMs));
+    AddAtomic(_gameWaitMs, Util::MillisecondsNow() - waitStartMs);
     AddOurWait(Util::MillisecondsNow() - waitStartMs);
 
     {

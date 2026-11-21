@@ -66,22 +66,10 @@ inline double NextInterval(double previousMs, double sampleMs)
     return previousMs * 0.8 + sampleMs * 0.2;
 }
 
-// The game's own frame time: the time between two present arrivals minus what its thread spent inside our blocking
-// waits in between (gate, drain, N-2 job, inline presents). Without that subtraction our waits lengthen the interval,
-// which widens the spacing, which lengthens the waits.
+// The game's own frame time: the time between two present arrivals minus what its thread spent in our blocking waits
+// in between (the gate, the slot and fence waits, the inline presents, the swapchain lock, the game's acquire polling).
+// Without that subtraction our waits lengthen the interval, which widens the spacing, which lengthens the waits.
 inline double Unthrottled(double deltaMs, double ourWaitMs) { return deltaMs - (ourWaitMs > 0.0 ? ourWaitMs : 0.0); }
-
-// Synthetic arrival tick for the pacer: the previous one plus the game's own interval (the pacer then sees the
-// unthrottled cadence); back on the real tick when none yet or it drifted more than 200 ms from it
-inline int64_t NextSyntheticTick(int64_t previous, int64_t real, double intervalMs, int64_t ticksPerSecond)
-{
-    if (previous == 0 || intervalMs <= 0.0 || ticksPerSecond <= 0)
-        return real;
-
-    const int64_t next = previous + static_cast<int64_t>(intervalMs * static_cast<double>(ticksPerSecond) / 1000.0);
-    const int64_t drift = next > real ? next - real : real - next;
-    return drift > ticksPerSecond / 5 ? real : next;
-}
 
 // Space between the generated frames' presents on the CPU: none when the display paces (V-Sync / FIFO: present back to
 // back, the queue holds the order), else the interval less a margin, shared by the batch; a batch never outlasts the
@@ -233,12 +221,16 @@ inline uint32_t SpareImagesToAsk(bool bounded, int maxInterpolations, int wanted
 }
 
 // The game's latency bound: how many of its presents may be unshown at once. Without us it had gameMinImages images,
-// one on screen and the rest in flight; never below 2, a bound of 1 would serialise a game that is not generating.
+// one on screen and the rest in flight; never below 2 (a bound of 1 would serialise a game that is not generating), and
+// 3 when one frame is generated (a batch of 2 images is shown in two refreshes: the game must be a batch ahead or the
+// display waits for it) and 3 when the batch is timed on the CPU (MAILBOX / IMMEDIATE: the batch takes about a whole
+// interval, so the game must be a whole batch ahead; closed-loop test: bound 2 holds a 60 fps game at 6X to 53 fps).
 inline constexpr uint32_t kGateRing = 8; // present ids remembered
-inline uint32_t LatencyBound(uint32_t gameMinImages)
+inline uint32_t LatencyBound(uint32_t gameMinImages, uint32_t generated, bool displayPaced)
 {
     const uint32_t bound = gameMinImages > 1 ? gameMinImages - 1 : 1;
-    return bound < 2 ? 2 : bound;
+    const uint32_t floor = generated == 1 || !displayPaced ? 3u : 2u;
+    return bound < floor ? floor : bound;
 }
 inline bool GateUsable(uint32_t bound) { return bound >= 1 && bound < kGateRing; }
 

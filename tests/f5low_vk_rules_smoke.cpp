@@ -152,10 +152,15 @@ int main()
     CHECK(SpareImagesToAsk(true, 5, 2) == 5);  // bounded: the most
     CHECK(SpareImagesToAsk(false, 5, 2) == 2); // no bound: what the multiplier needs
     CHECK(SpareImagesToAsk(false, 3, 5) == 3);
-    CHECK(LatencyBound(4) == 3);
-    CHECK(LatencyBound(3) == 2);
-    CHECK(LatencyBound(2) == 2); // never below 2
-    CHECK(LatencyBound(1) == 2);
+    CHECK(LatencyBound(4, 3, true) == 3);
+    CHECK(LatencyBound(3, 3, true) == 2);
+    CHECK(LatencyBound(2, 3, true) == 2); // never below 2
+    CHECK(LatencyBound(1, 3, true) == 2);
+    CHECK(LatencyBound(3, 1, true) == 3); // 2X: a batch of two images needs the game one batch ahead
+    CHECK(LatencyBound(2, 1, true) == 3);
+    CHECK(LatencyBound(5, 1, true) == 4); // the game's own bound when it is higher
+    CHECK(LatencyBound(3, 2, true) == 2 && LatencyBound(3, 5, true) == 2);
+    CHECK(LatencyBound(3, 5, false) == 3 && LatencyBound(6, 4, false) == 5); // a timed batch: a whole batch ahead
     CHECK(GateUsable(3));
     CHECK(!GateUsable(kGateRing));
     CHECK(GateWaitNumber(0, 3) == 0); // nothing issued: no wait
@@ -315,7 +320,6 @@ int main()
     for (int n = 1; n <= 3; ++n)
     {
         double interval = 0.0, lastEntry = 0.0, now = 0.0, wait = 0.0;
-        int64_t synth = 0;
         const double ownMs = 16.7;
 
         for (int frame = 0; frame < 600; ++frame)
@@ -326,7 +330,6 @@ int main()
                 interval = NextInterval(interval, Unthrottled(now - lastEntry, wait));
 
             lastEntry = now;
-            synth = NextSyntheticTick(synth, static_cast<int64_t>(now * 1000.0), interval, 1000000);
 
             // Our waits next frame: 3 ms of gate/drain, plus any CPU spacing (none under FIFO)
             wait = 3.0 + BatchSpacingMs(interval, static_cast<uint32_t>(n), true) * n;
@@ -338,9 +341,6 @@ int main()
         CHECK(BatchSpacingMs(16.7, static_cast<uint32_t>(n), true) == 0.0);
     }
     CHECK(Unthrottled(20.0, 5.0) == 15.0 && Unthrottled(10.0, 30.0) < 0.0);
-    CHECK(NextSyntheticTick(0, 5000, 16.7, 1000000) == 5000);
-    CHECK(NextSyntheticTick(1000, 900000, 16.0, 1000000) == 900000); // drifted: resync
-    CHECK(NextSyntheticTick(1000, 17000, 16.0, 1000000) == 17000);
 
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);

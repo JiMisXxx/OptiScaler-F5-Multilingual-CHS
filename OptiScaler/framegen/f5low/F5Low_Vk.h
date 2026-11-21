@@ -49,7 +49,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
         std::optional<VkFGResource> depth, velocity, hudless;
     } _pending;
 
-    double _intervalMs = 0.0;
+    std::atomic<double> _intervalMs { 0.0 }; // the game's own frame time (the game thread writes, the worker reads)
     double _lastEntryMs = 0.0;
     uint64_t _generatedFrames = 0;
     int _failures = 0;
@@ -74,6 +74,14 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     std::atomic<double> _gameWaitMs {
         0.0
     }; // waits of the game thread in our present and acquire (the gate, the drain)
+    static void AddAtomic(std::atomic<double>& total, double ms)
+    {
+        double seen = total.load();
+
+        while (!total.compare_exchange_weak(seen, seen + ms))
+        {
+        }
+    }
     bool _dynamicActive = false;
     bool _dynamicDrain = true;
     bool _dynamicUnfocused = false;
@@ -98,15 +106,16 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     uint32_t _statFrames = 0;
     uint64_t _gateWaits = 0;
     double _gateWaitTotalMs = 0.0;
-    int64_t _arriveTicks = 0;
-    int64_t _synthTicks = 0;
+    int64_t _arriveTicks = 0; // the real QPC of the game's present call (as on D3D12)
     std::atomic<double> _ourWaitMs { 0.0 }; // our blocking waits on the game thread since the last arrival
     // Stats window (reset every line)
-    double _statStartMs = 0.0;
-    double _statWaitMs = 0.0;
-    double _statUnthrottledSum = 0.0;
-    uint32_t _statUnthrottledN = 0;
-    void AddOurWait(double ms) { _ourWaitMs.store(_ourWaitMs.load() + ms); }
+    std::atomic<uint64_t> _statShown { 0 }; // every image we presented (worker, direct, inline), counted in PresentOn
+    double _statFirstEntryMs = 0.0;
+    double _statLastEntryMs = 0.0;
+    uint32_t _statEntries = 0;  // game presents seen in the window
+    uint32_t _statOffFrames = 0; // of them, frames that went out without generating
+    double _statWaitMs = 0.0;   // our waits on the game thread in the window
+    void AddOurWait(double ms) { AddAtomic(_ourWaitMs, ms); }
 
     // Device extensions this output enabled (or found enabled): present id + present wait bound how far the game runs
     // ahead, present metering lets the RTX 50 display hardware space the flips of a batch
@@ -116,6 +125,8 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     std::atomic<bool> _meterWasOn { false }; // the last batch was metered: the next present that is not closes it
     std::atomic<bool> _gateEnabled { false };
     uint32_t _gateBound = 0;
+    std::atomic<uint32_t> _gateCount { 1 }; // generated frames per game frame the bound is for (1 = 2X)
+    uint32_t GateBound() const { return F5LowVk::LatencyBound(_gameMinImages, _gateCount.load(), F5LowVk::VsyncPaces(_presentMode)); }
     int _presentMode = 0;
     std::mutex _gateMutex; // _gate, the ids, _meterHealth
     F5LowVk::GateState _gate;
@@ -169,6 +180,8 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     void PacerPresented(PacerCtx& pc, const Job& job, uint32_t k, bool dropped, VkResult result, uint32_t feedback);
     bool NextGameFrameDone();
     void EnsurePacer();
+    void SetFixedPacing(bool gateOn);
+    int EffectiveMode(const Job& job) const;
     void LogStats();
     bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);
     VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD lockTimeoutMs);

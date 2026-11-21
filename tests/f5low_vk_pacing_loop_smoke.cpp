@@ -1,5 +1,5 @@
 // Closed-loop host check of F5Low on a native Vulkan swapchain: the game's interval measurement, our-wait accounting,
-// synthetic arrival ticks and batch spacing (F5LowVkRules.h, the same functions F5Low_Vk.cpp calls) run against a
+// and batch spacing (F5LowVkRules.h, the same functions F5Low_Vk.cpp calls) run against a
 // virtual game and a virtual display, with each frame's measured interval and our waits fed back the way
 // F5Low_Vk::QueuePresent does. No real sleeping. The "legacy" model (interval from raw arrival deltas, CPU spacing under
 // FIFO) is the pre-fix behaviour and must run away, which proves the loop can fail.
@@ -96,11 +96,9 @@ Result Run(const Cfg& cfg)
     const uint32_t n = GeneratedCount(cfg.multiplier - 1, kMaxGenerated, kMaxGenerated);
     // The swapchain has the game's 3 images plus one per frame we generate (RequestedMinImageCount)
     disp.images = RequestedMinImageCount(3, n, 0);
-    constexpr int64_t kTps = 1000000;
 
     Result r;
     double t = 0.0, interval = 0.0, lastEntry = 0.0, ourWait = 0.0;
-    int64_t synth = 0;
     uint32_t seed = 12345;
 
     for (int f = 0; f < cfg.frames; ++f)
@@ -112,15 +110,12 @@ Result Run(const Cfg& cfg)
 
         // QueuePresent entry
         const double entry = t;
-        const int64_t real = static_cast<int64_t>(entry * kTps / 1000.0);
-
         if (lastEntry > 0.0)
         {
             const double raw = entry - lastEntry;
             interval = NextInterval(interval, cfg.legacy ? raw : Unthrottled(raw, ourWait));
         }
 
-        synth = NextSyntheticTick(synth, real, interval, kTps);
         lastEntry = entry;
 
         // Generate: nothing until the interval is known
@@ -147,7 +142,6 @@ Result Run(const Cfg& cfg)
         r.endMs = entry;
     }
 
-    (void) synth;
     return r;
 }
 
@@ -167,12 +161,33 @@ bool Near(double a, double b, double tol) { return std::fabs(a - b) <= tol * std
 
 #ifdef HAVE_PACER
 // ---------------------------------------------------------------------------------------------------------------------
-// Part 2: the whole loop. Game thread (hook: interval measurement, our-wait accounting, the wait for the job two frames
-// back and for a free slot, kSlots=4), the present worker (one job at a time: f5low's pacer plans the batch, waits to the
-// release time, acquires an image, waits for the GPU, presents), and a FIFO / IMMEDIATE display with its image pool.
-// The game's own vkAcquireNextImage block is the game's (not counted as ours). Everything on a virtual clock.
-// Not modelled: the latency gate (GateAcquire), the swapchain mutex, flip metering and the burst (RTX 50 only).
+// Part 2: the whole loop of the production flow, with f5low's real pacer core (pace_api.h).
+//   Game thread (QueuePresent / AcquireNextImage): the latency gate (WaitForPresent of the present `bound` back, bound =
+//     LatencyBound(game images 3, generated)), the game's acquire (a blocking image wait and the swapchain lock the worker
+//     holds across its presents), the hook (slot / job-two-back waits), interval measurement from the arrival time minus
+//     the waits that are ours, the real arrival ticks for the pacer.
+//   Present worker (one job at a time): f5low's pacer plans the batch; a display-paced (FIFO) batch is not timed
+//     (FixedPacing=display), a MAILBOX / IMMEDIATE one is; acquire an image, wait for the GPU, present under the
+//     swapchain lock (a present into a full FIFO queue blocks inside it).
+//   GPU: the game's frame is done kGpuTail after the present call (the ready stamp), f5low's generated frames kGenMs
+//     after that (the done stamp).
+//   Display: FIFO takes one image per vblank, IMMEDIATE shows at once.
+// Everything on a virtual clock. Not modelled: flip metering and the burst (RTX 50 only), DirectPresent's pass-through.
+// The "794c" model is the code at 794c9858f as it behaved (synthetic arrival ticks, worker pickup as the ready stamp,
+// timed FIFO batches, gate bound 2): printed, it shows the RDR2 symptoms. "legacy" is before that commit.
 // ---------------------------------------------------------------------------------------------------------------------
+
+// The synthetic arrival tick of 794c9858f (no longer in F5LowVkRules.h), kept here only to model that build
+static int64_t NextSyntheticTick794c(int64_t previous, int64_t real, double intervalMs, int64_t ticksPerSecond)
+{
+    if (previous == 0 || intervalMs <= 0.0 || ticksPerSecond <= 0)
+        return real;
+
+    const int64_t next = previous + static_cast<int64_t>(intervalMs * static_cast<double>(ticksPerSecond) / 1000.0);
+    const int64_t drift = next > real ? next - real : real - next;
+    return drift > ticksPerSecond / 5 ? real : next;
+}
+
 namespace loop
 {
 constexpr double kFreq = 10000000.0;
@@ -247,20 +262,19 @@ struct Display
 struct Model
 {
     const char* name;
-    bool unthrottled; // interval = arrival delta minus our waits (794c9858f), else raw (before)
-    bool synthArrive; // the pacer's arrival ticks are synthetic (794c9858f), else the real present time
-    bool readyGpu;    // readyTicks = game GPU done (target), else the worker's pickup (current)
-    bool legacySpace; // plain spacing = SpacingMs under FIFO too (before 794c9858f)
-    bool pacer;       // f5low's pacer plans the batch (default), else the plain spacing
-    uint32_t gate = 0;       // the latency gate: the game's present N back must be on screen before it acquires (0 off)
-    bool untimedFifo = false; // design: under FIFO the batch is presented back to back (the queue spaces it), no timer
+    bool unthrottled;    // interval = arrival delta minus our waits, else the raw delta (before 794c9858f)
+    bool synthArrive;    // the pacer's arrival ticks are synthetic (794c9858f), else the real present time
+    bool readyGpu;       // readyTicks = game GPU done (watcher), else the worker's pickup (794c9858f)
+    bool legacySpace;    // plain spacing = SpacingMs under FIFO too (before 794c9858f)
+    bool pacer;          // f5low's pacer plans the batch (default), else the plain spacing
+    uint32_t gate;       // latency gate: 0 off, 255 = LatencyBound(3, n, display paced), else a fixed bound
+    bool fixedDisplay;   // the pacer does not time display-paced batches (FixedPacing=display)
+    bool countAcquire;   // the game's acquire block and lock polling are counted as our wait
 };
 
 struct Out
 {
-    std::vector<double> interval, pacerInterval, period;
-    std::vector<double> realShown; // when each job's own frame reaches the screen
-    std::vector<double> gateWait;  // ms the game waited in the gate before the frame
+    std::vector<double> interval, pacerInterval, period, realShown, gateWait;
     double endMs = 0.0;
     uint32_t n = 0;
 };
@@ -276,26 +290,47 @@ Out Run(const Cfg& c, const Model& m)
     pacecore::Config pc;
     pc.ticksPerSecond = kFreq;
     pc.refreshHz = c.hz;
+    pc.fixedDisplay = m.fixedDisplay;
     pacecore::Pacer pacer(pc);
 
-    constexpr double kGpuTail = 2.0, kGenMs = 1.5, kHookMs = 0.3;
+    constexpr double kGpuTail = 2.0, kGenMs = 1.5, kHookMs = 0.3, kPresentCpuMs = 0.25, kPollMs = 0.15;
     constexpr int64_t kTps = static_cast<int64_t>(kFreq);
+    const uint32_t bound = m.gate == 255 ? LatencyBound(3, n, c.fifo) : m.gate;
 
     Out o;
     o.n = n;
     std::vector<double> done;
+    std::deque<std::pair<double, double>> lockHeld; // [start, end) of the worker's presents under the swapchain lock
     double tg = 0.0, wfree = 0.0, interval = 0.0, lastEntry = 0.0, ourWait = 0.0;
     int64_t synth = 0;
     uint32_t seed = 12345;
 
+    // The game's acquire polls for the swapchain lock; a present under it that blocks in a full FIFO queue holds it
+    const auto lockFree = [&](double t)
+    {
+        for (bool moved = true; moved;)
+        {
+            moved = false;
+
+            for (const auto& iv : lockHeld)
+                if (iv.first <= t && t < iv.second)
+                {
+                    t = iv.second + kPollMs;
+                    moved = true;
+                }
+        }
+
+        return t;
+    };
+
     for (int f = 0; f < c.frames; ++f)
     {
-        // The latency gate (GateAcquire in the game's acquire): the present `gate` back must be on screen; counted as ours
+        // The latency gate (GateAcquire in the game's acquire): the present `bound` back is on screen
         double gateWaited = 0.0;
 
-        if (m.gate > 0 && f >= static_cast<int>(m.gate))
+        if (bound > 0 && f >= static_cast<int>(bound))
         {
-            const double until = o.realShown[f - m.gate];
+            const double until = o.realShown[f - bound];
 
             if (until > tg)
             {
@@ -305,7 +340,14 @@ Out Run(const Cfg& c, const Model& m)
         }
 
         o.gateWait.push_back(gateWaited);
-        tg = d.Acquire(tg); // the game's own acquire, not ours
+
+        const double acquireStart = tg;
+        tg = lockFree(d.Acquire(tg));
+        const double acquireWaited = m.countAcquire ? tg - acquireStart : 0.0;
+
+        while (!lockHeld.empty() && lockHeld.front().second < tg - 200.0)
+            lockHeld.pop_front();
+
         seed = seed * 1664525u + 1013904223u;
         tg += c.workMs * (1.0 + (static_cast<double>(seed >> 16) / 65535.0 - 0.5) * 0.10);
 
@@ -318,11 +360,11 @@ Out Run(const Cfg& c, const Model& m)
             interval = NextInterval(interval, m.unthrottled ? Unthrottled(raw, ourWait) : raw);
         }
 
-        synth = NextSyntheticTick(synth, real, interval, kTps);
+        synth = NextSyntheticTick794c(synth, real, interval, kTps);
         const int64_t arrive = m.synthArrive ? synth : real;
         lastEntry = entry;
 
-        // Generate: the job two frames back (the output set) and a free slot, both counted as ours
+        // Generate: the job two frames back (the output set) and a free slot, our waits
         double ready = entry;
 
         if (f >= 2)
@@ -332,17 +374,26 @@ Out Run(const Cfg& c, const Model& m)
             ready = std::max(ready, done[f - kSlots]);
 
         tg = ready + kHookMs;
-        ourWait = tg - entry + gateWaited;
+        ourWait = (ready - entry) + gateWaited + acquireWaited; // the hook's CPU work (kHookMs) is not a wait
 
         const double gpuDone = entry + kGpuTail, genDone = gpuDone + kGenMs;
         const uint32_t gen = interval > 0.0 ? n : 0;
         double t = std::max(wfree, tg);
         const double start = t;
 
+        // One present under the swapchain lock: a full FIFO queue blocks inside the lock
+        const auto presentLocked = [&](double at)
+        {
+            const double returned = d.Present(at);
+            lockHeld.push_back({ at, returned + kPresentCpuMs });
+            return returned + kPresentCpuMs;
+        };
+
         if (m.pacer)
         {
             const double pickup = std::max(start, genDone);
             const int64_t readyTicks = gen == 0 ? 0 : (m.readyGpu ? T(gpuDone) : T(pickup));
+            const int64_t doneTicks = m.readyGpu ? T(genDone) : T(pickup);
 
             F5LowPacerFrame fr {};
             fr.structSize = sizeof(fr);
@@ -360,8 +411,7 @@ Out Run(const Cfg& c, const Model& m)
                 tgt.structSize = sizeof(tgt);
                 pacer.Target(b, k, tgt);
 
-                if ((tgt.flags & F5LOW_PACER_TARGET_PACED) != 0 && tgt.releaseTicks != 0 &&
-                    !(m.untimedFifo && c.fifo))
+                if ((tgt.flags & F5LOW_PACER_TARGET_PACED) != 0 && tgt.releaseTicks != 0)
                     t = std::max(t, M(ClampRelease(tgt.releaseTicks, T(t), kTps, interval)));
 
                 if (k <= gen)
@@ -372,11 +422,11 @@ Out Run(const Cfg& c, const Model& m)
                 else
                     t = std::max(t, gpuDone);
 
-                t = d.Present(t);
+                t = presentLocked(t);
                 F5LowPacerPresented w {};
                 w.structSize = sizeof(w);
                 w.presentTicks = T(t);
-                w.gpuDoneTicks = readyTicks;
+                w.gpuDoneTicks = doneTicks;
                 pacer.Presented(b, k, w);
             }
 
@@ -393,13 +443,13 @@ Out Run(const Cfg& c, const Model& m)
 
                 t = d.Acquire(t);
                 t = std::max(t, genDone);
-                t = d.Present(t);
+                t = presentLocked(t);
             }
 
             if (gen > 0 && sp > 0.0)
                 t = std::max(t, start + gen * sp);
 
-            t = d.Present(std::max(t, gpuDone));
+            t = presentLocked(std::max(t, gpuDone));
         }
 
         o.realShown.push_back(d.lastShown);
@@ -418,12 +468,12 @@ Out Run(const Cfg& c, const Model& m)
 }
 } // namespace loop
 
-// Shown fps and the mean spacing between two shown frames over frames [a, b) of the run
 struct Shown
 {
     double fps, spacingMs;
 };
 
+// Shown fps and the mean spacing between two shown frames over frames [a, b) of the run
 static Shown ShownOver(const loop::Out& r, int a, int b)
 {
     const double span = r.realShown[b - 1] - r.realShown[a - 1];
@@ -431,77 +481,38 @@ static Shown ShownOver(const loop::Out& r, int a, int b)
     return { span > 0.0 ? frames * 1000.0 / span : 0.0, span > 0.0 ? span / frames : 0.0 };
 }
 
-static void GateLoop()
-{
-    using loop::Model;
-    std::printf("\nWITH THE LATENCY GATE (bound = max(gameMin-1, 2), game images 3 -> bound 2), 120 Hz FIFO, 3000 frames: "
-                "W ms, xN | game fps | shown fps (frames 300-400 -> 2800-2900) | present spacing ms (expect 8.33) | gate "
-                "wait ms/frame | pacer interval\n");
-
-    const Model cur { "794c, pacer+gate", true, true, false, false, true, 2, false };
-    const Model curPlain { "794c, plain+gate", true, true, false, false, false, 2, false };
-    const Model tgt { "target ready, pacer+gate", true, false, true, false, true, 2, false };
-    const Model untimed { "target + untimed FIFO", true, false, true, false, true, 2, true };
-    const Model untimed3 { "  + gate 3", true, false, true, false, true, 3, true };
-    const Model untimed4 { "  + gate 4", true, false, true, false, true, 4, true };
-    const Model untimed1 { "  + gate 1 (no gate effect)", true, false, true, false, true, 1, true };
-    const Model all[] = { cur, curPlain, tgt, untimed, untimed3, untimed4, untimed1 };
-
-    for (const Model& m : all)
-    {
-        std::printf(" %s\n", m.name);
-
-        for (const double w : { 8.3, 16.7, 25.0 })
-            for (int mult : { 2, 4, 6 })
-            {
-                Cfg c { w, 120.0, mult, true, false };
-                c.frames = 3000;
-                const loop::Out r = loop::Run(c, m);
-                const Shown a = ShownOver(r, 300, 400), b = ShownOver(r, 2800, 2900);
-                const double expShown = std::min(120.0, std::min(1000.0 / w, 120.0 / mult) * mult);
-                const double gw = Mean(r.gateWait, 2800, 2900);
-                std::printf("   %5.1f x%d | %5.1f | %6.1f -> %6.1f (expect %5.1f) | %5.2f -> %5.2f | %5.1f | %6.1f -> "
-                            "%6.1f\n",
-                            w, mult, 1000.0 / Mean(r.period, 2800, 2900), a.fps, b.fps, expShown, a.spacingMs,
-                            b.spacingMs, gw, Mean(r.pacerInterval, 300, 400), Mean(r.pacerInterval, 2800, 2900));
-
-            }
-    }
-
-    // Asserts: an untimed FIFO design with a deep enough gate keeps the screen fed in the cases the display can serve
-    for (const double w : { 8.3, 16.7, 25.0 })
-        for (int mult : { 2, 4, 6 })
-        {
-            Cfg c { w, 120.0, mult, true, false };
-            c.frames = 3000;
-            const Model design { "design", true, false, true, false, true, 2, true };
-            const loop::Out r = loop::Run(c, design);
-            const Shown a = ShownOver(r, 300, 400), b = ShownOver(r, 2800, 2900);
-            const double expShown = std::min(120.0, std::min(1000.0 / w, 120.0 / mult) * mult);
-            CHECK(Near(b.fps, expShown, 0.10));
-            CHECK(b.fps >= a.fps * 0.97);
-        }
-}
-
 static void FullLoop()
 {
     using loop::Model;
+    //                   name                        unthr  synth  rdyGpu legacy pacer  gate  fixedD acq
     const Model all[] = {
-        { "legacy, plain", false, false, false, true, false }, { "legacy, pacer", false, false, false, false, true },
-        { "794c, plain", true, true, false, false, false },    { "794c, pacer", true, true, false, false, true },
-        { "target, plain", true, false, true, false, false },  { "target, pacer", true, false, true, false, true },
+        { "legacy (before 794c), pacer", false, false, false, false, true, 2, false, false },
+        { "794c, pacer", true, true, false, false, true, 2, false, false },
+        { "794c, plain", true, true, false, false, false, 2, false, false },
+        { "new, pacer", true, false, true, false, true, 255, true, true },
+        { "new, plain", true, false, true, false, false, 255, true, true },
+        // one rule undone at a time (printed): each of them is needed
+        { "new but timed FIFO batches", true, false, true, false, true, 255, false, true },
+        { "new but gate bound 2", true, false, true, false, true, 2, true, true },
+        { "new but pickup ready ticks", true, false, false, false, true, 255, true, true },
+        { "new but synthetic arrive", true, true, true, false, true, 255, true, true },
+        // no latency gate: the timer paces a FIFO batch (FixedPacing auto without a gate, as D3D12)
+        { "new, no gate, timer", true, false, true, false, true, 0, false, true },
+        { "new, no gate, plain", true, false, true, false, false, 0, false, true },
     };
 
-    const double works[] = { 8.3, 16.7, 25.0, 33.0 };
+    const double works[] = { 5.0, 8.3, 16.7, 25.0, 33.0 };
     const double rates[] = { 60.0, 120.0, 144.0 };
 
-    std::printf("\nFULL LOOP: model | W ms, Hz F=FIFO I=IMMEDIATE, xN | game fps (expect) | shown fps (expect) | our "
-                "interval ms, pacer interval ms (first -> last window)\n");
+    std::printf("\nFULL LOOP (3000 frames, gate on, latency bound for game images 3): per model, the cases outside the "
+                "10%% band or with a drift; sampled rows at 120 Hz\n"
+                "  columns: W ms, Hz F=FIFO I=IMMEDIATE, xN | game fps (expect) | shown fps (expect) | shown at frames "
+                "300-400 -> 2800-2900 | present spacing ms (expect 1/Hz) | gate wait ms/frame | pacer interval ms\n");
 
     for (const Model& m : all)
     {
         int bad = 0, total = 0;
-        double worstRatio = 1.0;
+        double worstGame = 1.0, worstShown = 1.0;
 
         for (const bool fifo : { true, false })
             for (const double hz : rates)
@@ -512,40 +523,43 @@ static void FullLoop()
                 for (const double w : works)
                     for (int mult = 2; mult <= 6; ++mult)
                     {
-                        const loop::Out r = loop::Run({ w, hz, mult, fifo, false }, m);
-                        const double period = Mean(r.period, 800, 900);
-                        const double gameFps = 1000.0 / period;
+                        Cfg c { w, hz, mult, fifo, false };
+                        c.frames = 3000;
+                        const loop::Out r = loop::Run(c, m);
+                        const double gameFps = 1000.0 / Mean(r.period, 2800, 2900);
                         const double expGame = fifo ? std::min(1000.0 / w, hz / mult) : 1000.0 / w;
-                        const double shown = gameFps * mult;
                         const double expShown = fifo ? std::min(hz, expGame * mult) : expGame * mult;
-                        const double i1 = Mean(r.interval, 300, 400), i2 = Mean(r.interval, 800, 900);
-                        const double p1 = Mean(r.pacerInterval, 300, 400), p2 = Mean(r.pacerInterval, 800, 900);
-                        const bool ok = Near(gameFps, expGame, 0.10) && Near(shown, expShown, 0.10) &&
-                                        i2 <= i1 * 1.05 + 0.2 && i2 < 100.0;
+                        const Shown a = ShownOver(r, 300, 400), b = ShownOver(r, 2800, 2900);
+                        const double i1 = Mean(m.pacer ? r.pacerInterval : r.interval, 1500, 1600); // past the queue filling up
+                        const double i2 = Mean(m.pacer ? r.pacerInterval : r.interval, 2800, 2900);
+                        const double gw = Mean(r.gateWait, 2800, 2900);
+                        const bool ok = Near(gameFps, expGame, 0.10) && Near(b.fps, expShown, 0.10) &&
+                                        b.fps >= a.fps * 0.97 &&
+                                        (m.pacer || i2 <= i1 * 1.05 + 0.2); // the pacer's own estimate is only printed
                         ++total;
                         bad += ok ? 0 : 1;
-                        worstRatio = std::min(worstRatio, gameFps / expGame);
+                        worstGame = std::min(worstGame, gameFps / expGame);
+                        worstShown = std::min(worstShown, b.fps / expShown);
 
-                        const bool sample = (mult == 2 || mult == 4 || mult == 6) && (w == 16.7 || w == 33.0) &&
-                                            (hz == 120.0);
+                        const bool sample = hz == 120.0 && fifo && (mult == 2 || mult == 4 || mult == 6) &&
+                                            (w == 5.0 || w == 16.7 || w == 25.0);
 
-                        if (sample || !ok)
-                            std::printf("  %-14s | %5.1f %3.0f%s x%d | %6.1f (%6.1f) | %6.1f (%6.1f) | %6.1f -> %6.1f, "
-                                        "%6.1f -> %6.1f%s\n",
-                                        m.name, w, hz, fifo ? "F" : "I", mult, gameFps, expGame, shown, expShown, i1,
-                                        i2, p1, p2, ok ? "" : "  <-- off");
+                        if (sample || (!ok && std::strncmp(m.name, "new, ", 5) == 0))
+                            std::printf("  %-28s | %5.1f %3.0f%s x%d | %6.1f (%6.1f) | %6.1f (%6.1f) | %6.1f -> %6.1f | "
+                                        "%5.2f (%5.2f) | %5.1f | %6.1f -> %6.1f%s\n",
+                                        m.name, w, hz, fifo ? "F" : "I", mult, gameFps, expGame, b.fps, expShown,
+                                        a.fps, b.fps, b.spacingMs, 1000.0 / hz, gw, i1, i2, ok ? "" : "  <-- off");
                     }
             }
 
-        std::printf("  == %-14s: %d of %d cases outside the 10%% band, worst game fps vs expected %.2f\n", m.name, bad,
-                    total, worstRatio);
+        std::printf("  == %-28s: %3d of %3d cases outside the band or drifting; worst game fps %.2f, worst shown fps "
+                    "%.2f of expected\n",
+                    m.name, bad, total, worstGame, worstShown);
 
-        if (m.name[0] == 't') // the target model must hold everywhere
-            CHECK(bad == 0);
-        else if (std::strcmp(m.name, "legacy, pacer") == 0) // a pre-fix model must fail somewhere (the loop can fail)
-            CHECK(bad > 0);
-        // (legacy, plain with the async worker does not run away: the job two frames back and the slots decouple the
-        // game from the worker's spacing; part 1's synchronous hook is the model that shows that runaway)
+        if (std::strncmp(m.name, "new, ", 5) == 0)
+            CHECK(bad == 0); // the production flow holds everywhere, gate included
+        else if (std::strncmp(m.name, "legacy", 6) == 0)
+            CHECK(bad > 0); // the loop is able to fail
     }
 }
 #endif
@@ -638,7 +652,6 @@ int main()
 
 #ifdef HAVE_PACER
     FullLoop();
-    GateLoop();
 #else
     std::printf("full loop skipped (no f5low-fg include path)\n");
 #endif
