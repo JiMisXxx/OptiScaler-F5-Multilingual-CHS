@@ -10,12 +10,15 @@
 #include <hooks/Vulkan_Hooks.h>
 #include <native/NativeDriverVk.h>
 #include <native/SharedFrameVk.h>
+#include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr_VkExtensions.h>
 
 #include <magic_enum.hpp>
 
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -28,6 +31,9 @@ namespace
 constexpr VkImageUsageFlags kCopyUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 constexpr uint64_t kWaitFenceNs = 1'000'000'000ull;
 constexpr double kAcquireMs = 100.0;
+// VK_NV_present_metering's structure types are only in the headers' beta section
+constexpr VkStructureType kStructSetPresentConfigNV = static_cast<VkStructureType>(1000613000);
+constexpr VkStructureType kStructMeteringFeaturesNV = static_cast<VkStructureType>(1000613001);
 constexpr DWORD kWorkerLockMs = kWorkerLockMsRule;
 constexpr double kBlockMs = kBlockMsRule;
 
@@ -224,6 +230,7 @@ struct F5Low_Vk::Job
     VkFence presentFence = VK_NULL_HANDLE;
     bool hasMode = false;
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    bool metered = false;  // the batch is spaced by the driver (VK_NV_present_metering), no CPU spacing
     bool hasGroup = false; // a single-device VkDeviceGroupPresentInfoKHR
     uint32_t groupCount = 0;
     uint32_t groupMask = 0;
@@ -570,7 +577,7 @@ void F5Low_Vk::WorkerLoop()
             s.busy = true;
         }
 
-        RunGenerated(job, true);
+        RunGenerated(job, PacedOnCpu(job.metered));
 
         // The game's own image after the generated ones, with what the game chained to its present
         VkPresentIdKHR presentId { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
@@ -590,7 +597,16 @@ void F5Low_Vk::WorkerLoop()
         groupInfo.pDeviceMasks = &job.groupMask;
         groupInfo.mode = static_cast<VkDeviceGroupPresentModeFlagBitsKHR>(job.groupMode);
 
+        VkSetPresentConfigNV meterConfig { kStructSetPresentConfigNV };
+        meterConfig.numFramesPerBatch = job.generated + 1;
+
         const void* chain = nullptr;
+
+        if (job.metered)
+        {
+            meterConfig.pNext = chain;
+            chain = &meterConfig;
+        }
 
         if (job.hasGroup)
         {
@@ -654,9 +670,37 @@ VkResult F5Low_Vk::PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD 
 
 // The real present on the game's thread: after the worker's jobs (a short wait), so the order of the images holds.
 // Never longer than the game thread's budget in all.
-VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info)
+VkResult F5Low_Vk::DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, uint64_t ownId, uint32_t meterBatch)
 {
     const double startMs = Util::MillisecondsNow();
+
+    // Our present id (the game chained none) and the metering batch go in front of the game's chain
+    VkPresentInfoKHR copy = *info;
+    VkPresentIdKHR idInfo { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
+    VkSetPresentConfigNV meterInfo { kStructSetPresentConfigNV };
+
+    if (ownId != 0 || meterBatch != 0)
+    {
+        const void* chain = info->pNext;
+
+        if (ownId != 0)
+        {
+            idInfo.swapchainCount = 1;
+            idInfo.pPresentIds = &ownId;
+            idInfo.pNext = chain;
+            chain = &idInfo;
+        }
+
+        if (meterBatch != 0)
+        {
+            meterInfo.numFramesPerBatch = meterBatch;
+            meterInfo.pNext = chain;
+            chain = &meterInfo;
+        }
+
+        copy.pNext = chain;
+        info = &copy;
+    }
 
     if (!DrainWorker(kBlockMs))
         LOG_DEBUG("F5Low (Vulkan): the worker was still busy, presenting the game's image anyway");
@@ -692,6 +736,10 @@ VkResult F5Low_Vk::AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, u
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
     }
+
+    // The game does not run further ahead of what is shown than it would without our spare images
+    if (_gateOn && swapchain == _swapchain)
+        GateAcquire(device, swapchain);
 
     return AcquireLoop(device, swapchain, timeout, semaphore, fence, pImageIndex);
 }
@@ -889,8 +937,9 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     // Spare images for the frames we generate (one per generated frame of the multiplier). The game's pNext chain (the
     // latency mode among it) stays as it came.
     VkSwapchainCreateInfoKHR info = *pCreateInfo;
-    info.minImageCount =
-        RequestedMinImageCount(pCreateInfo->minImageCount, static_cast<uint32_t>(_wanted), caps.maxImageCount);
+    info.minImageCount = RequestedMinImageCount(pCreateInfo->minImageCount, SpareImagesUpFront(_maxInterpolationCount),
+                                                caps.maxImageCount);
+    _gameMinImages = pCreateInfo->minImageCount;
 
     VkResult result;
 
@@ -940,7 +989,26 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _generationOff = true;
     _loggedBehind = false;
     _loggedGenerating = false;
-    _createdWanted = _wanted;
+
+    // The latency bound: present wait with present ids when the device has them (a fence per present through
+    // VK_EXT_swapchain_maintenance1 would clash with fences the game chains itself)
+    _issuedCount = 0;
+    std::fill(std::begin(_issuedIds), std::end(_issuedIds), 0ull);
+    _gateTimeouts = 0;
+    _gateBound = LatencyBound(pCreateInfo->minImageCount);
+    _gateOn = _presentWaitOn && GateUsable(_gateBound) &&
+              SwapchainFunction<PFN_vkWaitForPresentKHR>("vkWaitForPresentKHR", nullptr) != nullptr;
+    LOG_INFO("F5Low (Vulkan): latency bound {}",
+             _gateOn ? std::format("on, the game runs at most {} present(s) ahead of "
+                                   "what is shown (present wait)",
+                                   _gateBound)
+                     : std::string("off: ") + (_presentWaitOn ? "no usable bound"
+                                                              : "the device has no present id / present wait, the "
+                                                                "spare images add queue depth while not generating"));
+    _meteringOn = DecideMetering();
+    // The swapchain was made with spare images for the most this session generates: a recreate for a raise has nothing
+    // more to ask for, so the escalation stays dormant
+    _createdWanted = _maxInterpolationCount;
     {
         std::lock_guard askLock(_askMutex);
         _ask = {};
@@ -1084,12 +1152,43 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
         _pending = {};
     }
 
+    // The id this present is known by for the latency bound: the game's own present id, else ours (the present wait
+    // needs one on every real present)
+    _frameOwnId = 0;
+    _inlineBatch = 0;
+
+    if (_gateOn && pPresentInfo->swapchainCount == 1 && pPresentInfo->pSwapchains[0] == _swapchain)
+    {
+        uint64_t id = 0;
+        bool gameHasId = false;
+
+        for (auto* node = static_cast<const VkBaseInStructure*>(pPresentInfo->pNext); node != nullptr;
+             node = node->pNext)
+        {
+            if (node->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR)
+            {
+                const auto* ids = reinterpret_cast<const VkPresentIdKHR*>(node);
+
+                if (ids->swapchainCount >= 1 && ids->pPresentIds != nullptr)
+                {
+                    id = ids->pPresentIds[0];
+                    gameHasId = true;
+                }
+            }
+        }
+
+        if (!gameHasId)
+            id = _frameOwnId = ++_ownPresentId;
+
+        NoteIssued(id);
+    }
+
     // No spare image: nothing to copy, nothing to ask of f5low
     if (!pending.valid || !_blocked.empty() || pPresentInfo->swapchainCount != 1 ||
         pPresentInfo->pSwapchains[0] != _swapchain || _failures >= 3 || _headroom == 0)
     {
         _generationOff = true;
-        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo));
+        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo, _frameOwnId));
     }
 
     if (queue != _gameQueue)
@@ -1101,7 +1200,7 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
         }
 
         _generationOff = true;
-        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo));
+        return AskRecreateIfRaised(DirectPresent(queue, pPresentInfo, _frameOwnId));
     }
 
     VkPresentInfoKHR finalInfo = *pPresentInfo;
@@ -1109,7 +1208,7 @@ VkResult F5Low_Vk::QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentI
     if (Generate(queue, pPresentInfo, pending, finalInfo) == Outcome::Queued)
         return AskRecreateIfRaised(static_cast<VkResult>(_impl->lastResult.load()));
 
-    return AskRecreateIfRaised(DirectPresent(queue, &finalInfo));
+    return AskRecreateIfRaised(DirectPresent(queue, &finalInfo, _frameOwnId, _inlineBatch));
 }
 
 // The multiplier was raised past the spare images of this swapchain: the game is told its swapchain is suboptimal once,
@@ -1601,8 +1700,12 @@ void F5Low_Vk::RunGenerated(const Job& job, bool paced)
         groupInfo.pDeviceMasks = &job.groupMask;
         groupInfo.mode = static_cast<VkDeviceGroupPresentModeFlagBitsKHR>(job.groupMode);
 
+        VkSetPresentConfigNV meterConfig { kStructSetPresentConfigNV };
+        meterConfig.numFramesPerBatch = job.generated + 1;
+        meterConfig.pNext = job.hasGroup ? &groupInfo : nullptr;
+
         VkPresentInfoKHR shown { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-        shown.pNext = job.hasGroup ? &groupInfo : nullptr;
+        shown.pNext = job.metered ? static_cast<const void*>(&meterConfig) : (job.hasGroup ? &groupInfo : nullptr);
         shown.waitSemaphoreCount = 1;
         shown.swapchainCount = 1;
         shown.pSwapchains = &_swapchain;
@@ -1994,6 +2097,14 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
     job.realIndex = imageIndex;
     job.realWait = slot.inDone;
     job.intervalMs = _intervalMs;
+    job.metered = _meteringOn;
+
+    // The present wait needs an id on the real present: the game's (carried) or ours
+    if (!job.hasPresentId && _frameOwnId != 0)
+    {
+        job.hasPresentId = true;
+        job.presentId = _frameOwnId;
+    }
 
     s.setSlot[set] = static_cast<int>(slotIndex);
     s.nextSet ^= 1;
@@ -2010,9 +2121,227 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
         return Outcome::Queued;
     }
 
-    // No present queue of our own: the presents and their pacing run here, the real image goes out after
-    RunGenerated(job, true);
+    // No present queue of our own: the presents and their pacing run here, the real image goes out after (in the same
+    // metered batch)
+    _inlineBatch = job.metered ? generated + 1 : 0;
+    RunGenerated(job, PacedOnCpu(job.metered));
     return Outcome::Direct;
+}
+
+// Where f5low's pacer export (Story 3) may answer the metering question; until then the rule is f5low's own on D3D12
+// (src/oob_driver.h): FlipMetering= from XEFG_CUDA_FLIPMETERING or f5low.ini, auto = RTX 50 and newer.
+bool F5Low_Vk::DecideMetering()
+{
+    std::string setting = "auto";
+
+    if (char value[64] {}; GetEnvironmentVariableA("XEFG_CUDA_FLIPMETERING", value, sizeof(value)) != 0)
+    {
+        setting = value;
+    }
+    else
+    {
+        std::error_code ec;
+        const auto ini = std::filesystem::absolute(F5Low::LibraryPath(), ec).parent_path() / L"f5low.ini";
+        wchar_t wide[64] {};
+        GetPrivateProfileStringW(L"f5low", L"FlipMetering", L"auto", wide, 64, ini.c_str());
+        setting.clear();
+
+        for (const wchar_t c : wide)
+        {
+            if (c == 0)
+                break;
+
+            setting += static_cast<char>(c);
+        }
+    }
+
+    const int forced = FlipMeteringForced(setting.c_str());
+    const auto gpu = IdentifyGpu::getPrimaryGpu();
+    const bool rtx50 =
+        gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_GB200;
+    const bool on = MeteringOn(forced, rtx50, _meteringAvailable);
+
+    static bool logged = false;
+
+    if (!logged)
+    {
+        logged = true;
+        LOG_INFO("F5Low (Vulkan): flip metering {} (FlipMetering={}, {}, VK_NV_present_metering {})", on ? "on" : "off",
+                 setting, rtx50 ? "RTX 50 or newer" : "older GPU",
+                 _meteringAvailable ? "enabled" : "not on the device");
+    }
+
+    return on;
+}
+
+void F5Low_Vk::NoteIssued(uint64_t id)
+{
+    _issuedIds[_issuedCount % F5LowVk::kGateRing] = id;
+    ++_issuedCount;
+}
+
+// Waits (bounded) for the present `bound` frames back to be on screen before the game acquires for the next one
+void F5Low_Vk::GateAcquire(VkDevice device, VkSwapchainKHR swapchain)
+{
+    const uint64_t number = GateWaitNumber(_issuedCount, _gateBound);
+
+    if (number == 0 || _issuedCount - number >= kGateRing)
+        return;
+
+    const uint64_t id = _issuedIds[(number - 1) % kGateRing];
+
+    if (id == 0)
+        return;
+
+    if (WaitForPresent(device, swapchain, id, 100'000'000ull) == VK_TIMEOUT)
+    {
+        if (++_gateTimeouts >= kGateGiveUp)
+        {
+            _gateOn = false;
+            LOG_WARN("F5Low (Vulkan): the present wait timed out {} times in a row, the latency bound stands aside",
+                     kGateGiveUp);
+        }
+    }
+    else
+    {
+        _gateTimeouts = 0;
+    }
+}
+
+// Present id + present wait (the latency bound) and present metering (RTX 50 flip metering) are added to the game's
+// device when it offers them; what the game already enabled is used as it is.
+void F5Low_Vk::PrepareDevice(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo& createInfo)
+{
+    IFGFeature_Vk::PrepareDevice(physicalDevice, createInfo);
+
+    uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> available(count);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, available.data());
+
+    const auto has = [&](const char* name)
+    {
+        return std::ranges::any_of(available,
+                                   [&](const VkExtensionProperties& e) { return strcmp(e.extensionName, name) == 0; });
+    };
+
+    const bool idExt = has(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+    const bool waitExt = has(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    const bool meterExt = has(VK_NV_PRESENT_METERING_EXTENSION_NAME);
+
+    VkPhysicalDevicePresentIdFeaturesKHR idSupported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR };
+    VkPhysicalDevicePresentWaitFeaturesKHR waitSupported {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR
+    };
+    VkPhysicalDevicePresentMeteringFeaturesNV meterSupported { kStructMeteringFeaturesNV };
+
+    void* chain = nullptr;
+
+    if (meterExt)
+    {
+        meterSupported.pNext = chain;
+        chain = &meterSupported;
+    }
+
+    if (waitExt)
+    {
+        waitSupported.pNext = chain;
+        chain = &waitSupported;
+    }
+
+    if (idExt)
+    {
+        idSupported.pNext = chain;
+        chain = &idSupported;
+    }
+
+    VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain };
+
+    if (chain != nullptr)
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &supported);
+
+    // A feature the game's own chain lists is switched on there (when its memory allows), else ours is chained
+    const auto switchOn = [&](VkStructureType type, size_t flagOffset, void* oursStruct, VkBool32* oursFlag)
+    {
+        for (auto* node = (VkBaseOutStructure*) createInfo.pNext; node != nullptr; node = node->pNext)
+        {
+            if (node->sType != type)
+                continue;
+
+            auto* flag = reinterpret_cast<VkBool32*>(reinterpret_cast<char*>(node) + flagOffset);
+
+            if (*flag == VK_TRUE)
+                return true;
+
+            if (!DlssNr::VkExt::IsWritable(flag))
+                return false;
+
+            *flag = VK_TRUE;
+            return true;
+        }
+
+        *oursFlag = VK_TRUE;
+        static_cast<VkBaseOutStructure*>(oursStruct)->pNext = (VkBaseOutStructure*) createInfo.pNext;
+        createInfo.pNext = oursStruct;
+        return true;
+    };
+
+    const size_t flagOffset = offsetof(VkPhysicalDevicePresentIdFeaturesKHR, presentId);
+    static_assert(offsetof(VkPhysicalDevicePresentWaitFeaturesKHR, presentWait) ==
+                  offsetof(VkPhysicalDevicePresentIdFeaturesKHR, presentId));
+    static_assert(offsetof(VkPhysicalDevicePresentMeteringFeaturesNV, presentMetering) ==
+                  offsetof(VkPhysicalDevicePresentIdFeaturesKHR, presentId));
+
+    _presentIdFeature = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR };
+    _presentWaitFeature = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR };
+    _meteringFeature = { kStructMeteringFeaturesNV };
+
+    const bool wantWait = idExt && waitExt && idSupported.presentId && waitSupported.presentWait;
+    const bool wantMeter = meterExt && meterSupported.presentMetering;
+
+    _presentWaitOn = wantWait &&
+                     switchOn(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, flagOffset, &_presentIdFeature,
+                              &_presentIdFeature.presentId) &&
+                     switchOn(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, flagOffset,
+                              &_presentWaitFeature, &_presentWaitFeature.presentWait);
+    _meteringAvailable = wantMeter && switchOn(kStructMeteringFeaturesNV, flagOffset, &_meteringFeature,
+                                               &_meteringFeature.presentMetering);
+
+    _deviceExtensions.assign(createInfo.ppEnabledExtensionNames,
+                             createInfo.ppEnabledExtensionNames + createInfo.enabledExtensionCount);
+
+    const auto addExtension = [&](const char* name)
+    {
+        if (std::ranges::none_of(_deviceExtensions, [&](const char* enabled) { return strcmp(enabled, name) == 0; }))
+            _deviceExtensions.push_back(name);
+    };
+
+    if (_presentWaitOn)
+    {
+        addExtension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        addExtension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    }
+
+    if (_meteringAvailable)
+        addExtension(VK_NV_PRESENT_METERING_EXTENSION_NAME);
+
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(_deviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = _deviceExtensions.data();
+
+    LOG_INFO("F5Low (Vulkan): device extras: present wait {}, present metering {}", _presentWaitOn ? "on" : "off",
+             _meteringAvailable ? "on" : "off");
+}
+
+void F5Low_Vk::OnDeviceCreated(VkDevice device)
+{
+    IFGFeature_Vk::OnDeviceCreated(device);
+
+    // The device may have been made without them after all (another layer, a refused feature)
+    if (_presentWaitOn && vkGetDeviceProcAddr(device, "vkWaitForPresentKHR") == nullptr)
+    {
+        _presentWaitOn = false;
+        LOG_WARN("F5Low (Vulkan): the device has no vkWaitForPresentKHR, no latency bound");
+    }
 }
 
 void F5Low_Vk::ReleaseAll(const char* why)

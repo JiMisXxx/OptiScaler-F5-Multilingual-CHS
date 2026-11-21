@@ -143,6 +143,42 @@ int main()
     CHECK(!DeviceGroupCarryable(1, 4, 1)); // SUM mode
     CHECK(!DeviceGroupCarryable(2, 1, 1)); // two swapchains
 
+    // spare images up front, the latency bound and its gate
+    CHECK(SpareImagesUpFront(5) == 5);
+    CHECK(SpareImagesUpFront(3) == 3);
+    CHECK(SpareImagesUpFront(0) == 1);
+    CHECK(SpareImagesUpFront(9) == 5);
+    CHECK(LatencyBound(4) == 3);
+    CHECK(LatencyBound(2) == 1);
+    CHECK(LatencyBound(1) == 1);
+    CHECK(GateUsable(3));
+    CHECK(!GateUsable(kGateRing));
+    CHECK(GateWaitNumber(0, 3) == 0); // nothing issued: no wait
+    CHECK(GateWaitNumber(2, 3) == 0); // third present may go out
+    CHECK(GateWaitNumber(3, 3) == 1); // the fourth needs the first on screen
+    CHECK(GateWaitNumber(10, 3) == 8);
+
+    // flip metering: f5low's words, auto = RTX 50, needs the device feature
+    CHECK(FlipMeteringForced("auto") == -1);
+    CHECK(FlipMeteringForced("") == -1);
+    CHECK(FlipMeteringForced(nullptr) == -1);
+    CHECK(FlipMeteringForced("0") == 0);
+    CHECK(FlipMeteringForced(" Off ") == 0);
+    CHECK(FlipMeteringForced("FALSE") == 0);
+    CHECK(FlipMeteringForced("no") == 0);
+    CHECK(FlipMeteringForced("1") == 1);
+    CHECK(FlipMeteringForced("On") == 1);
+    CHECK(FlipMeteringForced("yes") == 1);
+    CHECK(FlipMeteringForced("sometimes") == -1);
+    CHECK(FlipMeteringForced("averyverylongword") == -1);
+    CHECK(MeteringOn(-1, true, true));
+    CHECK(!MeteringOn(-1, false, true));  // auto on an older GPU
+    CHECK(MeteringOn(1, false, true));    // forced on
+    CHECK(!MeteringOn(0, true, true));    // forced off
+    CHECK(!MeteringOn(1, true, false));   // no extension on the device
+    CHECK(PacedOnCpu(false));
+    CHECK(!PacedOnCpu(true));
+
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);
     CHECK(RemainingMs(50.0, 20.5) == 29);

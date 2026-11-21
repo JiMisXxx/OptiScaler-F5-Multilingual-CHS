@@ -61,6 +61,28 @@ class F5Low_Vk : public virtual IFGFeature_Vk
                          VkFence fence, uint32_t* pImageIndex);
     VkResult AskRecreateIfRaised(VkResult result);
     bool _loggedBehind = false;
+
+    // Device extensions this output enabled (or found enabled): present id + present wait bound how far the game runs
+    // ahead, present metering lets the RTX 50 display hardware space the flips of a batch
+    bool _presentWaitOn = false;
+    bool _meteringAvailable = false;
+    bool _meteringOn = false;
+    bool _gateOn = false;
+    uint32_t _gateBound = 0;
+    uint32_t _gateTimeouts = 0;
+    uint64_t _ownPresentId = 0;
+    uint64_t _issuedIds[F5LowVk::kGateRing] {};
+    uint64_t _issuedCount = 0;
+    uint64_t _frameOwnId = 0;  // the id this frame's present carries when the game chained none
+    uint32_t _inlineBatch = 0; // generated + 1 of a frame whose generated frames ran inline (no worker)
+    uint32_t _gameMinImages = 0;
+    std::vector<const char*> _deviceExtensions;
+    VkPhysicalDevicePresentIdFeaturesKHR _presentIdFeature {};
+    VkPhysicalDevicePresentWaitFeaturesKHR _presentWaitFeature {};
+    VkPhysicalDevicePresentMeteringFeaturesNV _meteringFeature {};
+    bool DecideMetering();
+    void NoteIssued(uint64_t id);
+    void GateAcquire(VkDevice device, VkSwapchainKHR swapchain);
     bool _loggedGenerating = false; // the first generated frame of this swapchain was logged
 
     void SetReason(const std::string& reason);
@@ -85,7 +107,7 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     void RunGenerated(const Job& job, bool paced);
     bool AcquireImage(VkSemaphore semaphore, uint32_t* index, double timeoutMs);
     VkResult PresentOn(VkQueue queue, const VkPresentInfoKHR& info, DWORD lockTimeoutMs);
-    VkResult DirectPresent(VkQueue queue, const VkPresentInfoKHR* info);
+    VkResult DirectPresent(VkQueue queue, const VkPresentInfoKHR* info, uint64_t ownId = 0, uint32_t meterBatch = 0);
 
     enum class Outcome
     {
@@ -111,6 +133,8 @@ class F5Low_Vk : public virtual IFGFeature_Vk
     bool HasDriverSwapchain() const override final { return true; }
     bool WantsLatencyMode() const override final { return true; }
     void OnDeviceDestroying(VkDevice device) override final;
+    void PrepareDevice(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo& createInfo) override final;
+    void OnDeviceCreated(VkDevice device) override final;
     bool RetiredOldSwapchain() const override final { return _retiredOld; }
     VkResult WaitForPresent(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId,
                             uint64_t timeout) override final;

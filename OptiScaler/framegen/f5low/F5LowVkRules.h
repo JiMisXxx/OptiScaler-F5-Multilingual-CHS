@@ -189,6 +189,84 @@ inline bool OnAcquireRecreate(RecreateAsk& ask, double nowMs)
     return true;
 }
 
+// Spare images asked for up front: the most frames this session may generate, so the multiplier never needs a new
+// swapchain. (RequestedMinImageCount caps it by the surface.)
+inline uint32_t SpareImagesUpFront(int maxInterpolations)
+{
+    return static_cast<uint32_t>(std::clamp(maxInterpolations, 1, static_cast<int>(kMaxGenerated)));
+}
+
+// The game's latency bound: how many of its presents may be unshown at once. Without us it had gameMinImages images,
+// one on screen and the rest in flight. The extra images must not add depth to that, whatever the multiplier.
+inline constexpr uint32_t kGateRing = 8; // present ids remembered
+inline uint32_t LatencyBound(uint32_t gameMinImages) { return gameMinImages > 1 ? gameMinImages - 1 : 1; }
+inline bool GateUsable(uint32_t bound) { return bound >= 1 && bound < kGateRing; }
+
+// Before the game acquires for its next present (number issued + 1): the number (1-based) of the present that has to be
+// on screen already, 0 when none yet.
+inline uint64_t GateWaitNumber(uint64_t issued, uint32_t bound)
+{
+    const uint64_t next = issued + 1;
+    return next > bound ? next - bound : 0;
+}
+
+// The gate gives up (stands aside, logged) after this many waits in a row that ran into their limit
+inline constexpr uint32_t kGateGiveUp = 5;
+
+// FlipMetering= as f5low reads it (src/oob_driver.h): -1 auto, 0 off ("0", "off", "false", "no"), 1 on ("1", "on",
+// "true", "yes"), case and surrounding spaces ignored, anything else counts as auto.
+inline int FlipMeteringForced(const char* setting)
+{
+    char v[8] = {};
+    size_t n = 0;
+
+    if (setting == nullptr)
+        return -1;
+
+    while (*setting == ' ' || *setting == '\t')
+        ++setting;
+
+    for (; *setting != 0; ++setting)
+    {
+        if (n + 1 >= sizeof(v))
+            return -1;
+
+        v[n++] = (*setting >= 'A' && *setting <= 'Z') ? static_cast<char>(*setting - 'A' + 'a') : *setting;
+    }
+
+    while (n > 0 && (v[n - 1] == ' ' || v[n - 1] == '\t' || v[n - 1] == '\r' || v[n - 1] == '\n'))
+        v[--n] = 0;
+
+    const auto is = [&](const char* word)
+    {
+        size_t i = 0;
+        while (word[i] != 0 && v[i] == word[i])
+            ++i;
+        return word[i] == 0 && v[i] == 0;
+    };
+
+    if (is("0") || is("off") || is("false") || is("no"))
+        return 0;
+
+    if (is("1") || is("on") || is("true") || is("yes"))
+        return 1;
+
+    return -1;
+}
+
+// Hardware flip metering (VK_NV_present_metering): needs the extension and its feature on the device; auto = RTX 50 and
+// newer (the display hardware spaces the flips there, on older GPUs nothing does), a forced 1 / 0 wins.
+inline bool MeteringOn(int forced, bool rtx50OrNewer, bool deviceHasIt)
+{
+    if (!deviceHasIt)
+        return false;
+
+    return forced >= 0 ? forced == 1 : rtx50OrNewer;
+}
+
+// Whether the generated frames of a batch are spaced on the CPU: not when the driver meters them
+inline bool PacedOnCpu(bool metered) { return !metered; }
+
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.
 inline bool CanPace(double intervalMs, uint32_t count) { return intervalMs > 0.0 && count > 0; }
 } // namespace F5LowVk
