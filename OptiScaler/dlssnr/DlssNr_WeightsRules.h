@@ -1,7 +1,7 @@
 #pragma once
-// Neural Rendering model weights, one set per model: [DlssNr] WeightsSetA (Preset A, Model A, WEIGHTS_HT.*) and
-// WeightsSetB (Preset B or Default, Model B, WEIGHTS_CC_SMALL_FP8.*). Plain rules, no config and no ImGui, so
-// tests/nr_weights_per_model_smoke.cpp runs them.
+// Neural Rendering model weights, one set per model: [DlssNr] WeightsSetA (Preset A, Model A, WEIGHTS_HT.* or
+// WEIGHTS_PL.*) and WeightsSetB (Preset B or Default, Model B, WEIGHTS_CC_SMALL_FP8.*). Plain rules, no config and no
+// ImGui, so tests/nr_weights_per_model_smoke.cpp runs them.
 
 #include <algorithm>
 #include <cctype>
@@ -12,6 +12,7 @@
 namespace DlssNr::WeightsRules
 {
 inline constexpr std::string_view kResourceA = "WEIGHTS_HT";
+inline constexpr std::string_view kResourceAAlt = "WEIGHTS_PL"; // some modified DLSS-NR DLLs name Model A this way
 inline constexpr std::string_view kResourceB = "WEIGHTS_CC_SMALL_FP8";
 
 // Which model's weights a set folder holds, from its file names (<RESOURCE>.<CRC>.bin)
@@ -28,10 +29,11 @@ inline bool StartsWithNoCase(std::string_view text, std::string_view prefix)
 }
 
 // A set folder's files are <RESOURCE>.<CRC32>.bin, where RESOURCE is the model DLL's resource name exactly:
-// WEIGHTS_HT (Model A) or WEIGHTS_CC_SMALL_FP8 (Model B). The forwarder matches the resource name exactly too.
+// WEIGHTS_HT or WEIGHTS_PL (some modified DLSS-NR DLLs) = Model A, WEIGHTS_CC_SMALL_FP8 = Model B. The forwarder
+// matches the resource name exactly too.
 inline void NoteFile(Models& m, std::string_view file)
 {
-    if (StartsWithNoCase(file, "WEIGHTS_HT."))
+    if (StartsWithNoCase(file, "WEIGHTS_HT.") || StartsWithNoCase(file, "WEIGHTS_PL."))
         m.a = true;
     else if (StartsWithNoCase(file, "WEIGHTS_CC_SMALL_FP8."))
         m.b = true;

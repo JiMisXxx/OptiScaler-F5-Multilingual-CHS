@@ -35,7 +35,7 @@ namespace nrweights
 {
 
 std::mutex g_mutex;
-std::wstring g_dirA;   // Model A (WEIGHTS_HT*), empty = stock
+std::wstring g_dirA;   // Model A (WEIGHTS_HT or WEIGHTS_PL), empty = stock
 std::wstring g_dirB;   // Model B (WEIGHTS_CC_SMALL_FP8*), empty = stock
 std::string g_log;     // taken by the host (dlssnr_weights_take_log)
 std::unordered_set<HMODULE> g_patched;
@@ -144,7 +144,8 @@ HRSRC WINAPI hkFindResourceA(HMODULE module, LPCSTR name, LPCSTR type)
     HGLOBAL handle = LoadResource(module, resource); // the same handle the model's own LoadResource gets
     g_served.erase(handle);
     // The resource name exactly (a set's files are <name>.<CRC32>.bin, which is what OptiScaler lists them by)
-    const bool isA = strcmp(name, "WEIGHTS_HT") == 0;
+    // WEIGHTS_PL is Model A under that name in some modified DLSS-NR DLLs
+    const bool isA = strcmp(name, "WEIGHTS_HT") == 0 || strcmp(name, "WEIGHTS_PL") == 0;
     const bool isB = strcmp(name, "WEIGHTS_CC_SMALL_FP8") == 0;
     const std::wstring& setDir = isA ? g_dirA : g_dirB;
     if (!isA && !isB) // a resource that belongs to neither model: always the DLL's own
@@ -1226,8 +1227,8 @@ __declspec(dllexport) void dlssnr_call_release(void *feature) {
 }
 
 // Model weights selector: the folders the next feature creates read their weights from, one per model
-// (dirA = Model A, WEIGHTS_HT*; dirB = Model B, WEIGHTS_CC_SMALL_FP8*; null or empty = the model DLL's own).
-// Takes effect at the next create; features already built keep what they were built with.
+// (dirA = Model A, WEIGHTS_HT or WEIGHTS_PL; dirB = Model B, WEIGHTS_CC_SMALL_FP8*; null or empty = the model DLL's
+// own). Takes effect at the next create; features already built keep what they were built with.
 __declspec(dllexport) void dlssnr_weights_select2(const wchar_t* dirA, const wchar_t* dirB)
 {
     std::lock_guard<std::mutex> lock(nrweights::g_mutex);

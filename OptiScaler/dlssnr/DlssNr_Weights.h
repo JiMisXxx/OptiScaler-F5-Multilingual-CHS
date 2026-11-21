@@ -39,14 +39,16 @@ struct Exports
     bool Available() const { return select2 != nullptr || select != nullptr; }
 };
 
+// Set by Select: the chosen sets cannot be served (old forwarder, or none); the menu says so
+inline std::atomic<bool> g_needsNewForwarder { false };
+
 inline void Load(Exports& exports, HMODULE forwarder)
 {
     exports.select2 = (Select2Fn) GetProcAddress(forwarder, "dlssnr_weights_select2");
     exports.select = (SelectFn) GetProcAddress(forwarder, "dlssnr_weights_select");
+    if (!exports.Available()) // no weights exports: a set chosen later cannot be served; the card says so at once
+        g_needsNewForwarder = true;
 }
-
-// Set by Select: the chosen sets cannot be served (old forwarder, or none); the menu says so
-inline std::atomic<bool> g_needsNewForwarder { false };
 
 inline std::wstring Dir(const std::string& set, const char* api)
 {
@@ -61,7 +63,7 @@ inline std::wstring Dir(const std::string& set, const char* api)
 // serve are not selected at all, both models run stock, and g_needsNewForwarder says so.
 inline void Select(const Exports& exports, const std::string& setA, const std::string& setB, const char* api)
 {
-    g_needsNewForwarder = false;
+    g_needsNewForwarder = !exports.Available(); // stays set without exports; the card shows it only with a set
     if (exports.select2 != nullptr)
     {
         const auto dirA = Dir(setA, api);
@@ -73,7 +75,6 @@ inline void Select(const Exports& exports, const std::string& setA, const std::s
     {
         if (!setA.empty() || !setB.empty())
         {
-            g_needsNewForwarder = true;
             LOG_WARN("DLSS-NR{}: Model weights need the forwarder from this release (nvngx.dll_dlssnr.dll); "
                      "the DLL's own weights are used",
                      api);

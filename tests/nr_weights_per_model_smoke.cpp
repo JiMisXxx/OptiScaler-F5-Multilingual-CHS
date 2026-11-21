@@ -28,6 +28,14 @@ int main()
     CHECK(!m.b);
     NoteFile(m, "weights_cc_small_fp8.00000001.bin");
     CHECK(m.a && m.b);
+    // Some modified DLSS-NR DLLs name Model A's resource WEIGHTS_PL
+    Models alt;
+    NoteFile(alt, "WEIGHTS_PL.0A0B0C0D.bin");
+    CHECK(alt.a && !alt.b);
+    NoteFile(alt, "WEIGHTS_PLX.0A0B0C0D.bin");
+    CHECK(!alt.b);
+    std::string altSet;
+    CHECK(OldForwarderCanServe("H", "", alt, altSet) && altSet == "H"); // only A, the folder has only A
     Models none;
     NoteFile(none, "readme.txt");
     NoteFile(none, "WEIGHTS_HT");

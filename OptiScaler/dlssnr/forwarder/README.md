@@ -27,7 +27,7 @@ the DLL it is read by, otherwise the DLL's own weights are used and a line is lo
 
 Exports:
 
-- `dlssnr_weights_select2(dirA, dirB)`: `WEIGHTS_HT*` (Model A, Preset A) is served from `dirA`,
+- `dlssnr_weights_select2(dirA, dirB)`: `WEIGHTS_HT` or `WEIGHTS_PL` (some modified DLSS-NR DLLs) = Model A, Preset A, is served from `dirA`,
   `WEIGHTS_CC_SMALL_FP8*` (Model B, Preset B / Default) from `dirB`. Null or empty = the DLL's own.
   The resource name is matched exactly. Any other `WEIGHTS_*` resource now always runs the DLL's own weights,
   even with a set chosen (one log line); before, one folder was served for every `WEIGHTS_*` resource.
