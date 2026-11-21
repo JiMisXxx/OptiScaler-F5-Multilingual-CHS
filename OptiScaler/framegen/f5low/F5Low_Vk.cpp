@@ -200,6 +200,10 @@ struct F5Low_Vk::Job
     VkFence presentFence = VK_NULL_HANDLE;
     bool hasMode = false;
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    bool hasGroup = false; // a single-device VkDeviceGroupPresentInfoKHR
+    uint32_t groupCount = 0;
+    uint32_t groupMask = 0;
+    uint32_t groupMode = 0;
 };
 
 struct F5Low_Vk::Impl
@@ -557,7 +561,18 @@ void F5Low_Vk::WorkerLoop()
         modeInfo.swapchainCount = 1;
         modeInfo.pPresentModes = &job.presentMode;
 
+        VkDeviceGroupPresentInfoKHR groupInfo { VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR };
+        groupInfo.swapchainCount = job.groupCount;
+        groupInfo.pDeviceMasks = &job.groupMask;
+        groupInfo.mode = static_cast<VkDeviceGroupPresentModeFlagBitsKHR>(job.groupMode);
+
         const void* chain = nullptr;
+
+        if (job.hasGroup)
+        {
+            groupInfo.pNext = chain;
+            chain = &groupInfo;
+        }
 
         if (job.hasPresentId)
         {
@@ -746,6 +761,28 @@ bool F5Low_Vk::CarryPresentStructs(const VkPresentInfoKHR* present, Job& job)
             }
             break;
         }
+        case VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR:
+        {
+            const auto* group = reinterpret_cast<const VkDeviceGroupPresentInfoKHR*>(node);
+            const uint32_t mask =
+                group->swapchainCount >= 1 && group->pDeviceMasks != nullptr ? group->pDeviceMasks[0] : 0;
+
+            // One device only: its mask goes to every present of the frame
+            if (!DeviceGroupCarryable(group->swapchainCount, static_cast<uint32_t>(group->mode), mask))
+            {
+                if (_impl->unknownPNext.insert(static_cast<int>(node->sType)).second)
+                    LOG_INFO("F5Low (Vulkan): the game's device group present info is not a single device (swapchains "
+                             "{}, mode {}, mask {}), those frames pass through",
+                             group->swapchainCount, static_cast<uint32_t>(group->mode), mask);
+                return false;
+            }
+
+            job.hasGroup = true;
+            job.groupCount = group->swapchainCount;
+            job.groupMask = mask;
+            job.groupMode = static_cast<uint32_t>(group->mode);
+            break;
+        }
         default:
             if (_impl->unknownPNext.insert(static_cast<int>(node->sType)).second)
                 LOG_INFO("F5Low (Vulkan): the game chains a present struct of type {} that cannot be carried to the "
@@ -858,6 +895,7 @@ bool F5Low_Vk::CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* 
     _lastEntryMs = 0.0;
     _generationOff = true;
     _loggedBehind = false;
+    _loggedGenerating = false;
     s.nextSet = 0;
     s.setSlot[0] = s.setSlot[1] = -1;
 
@@ -1482,7 +1520,14 @@ void F5Low_Vk::RunGenerated(const Job& job, bool paced)
         const auto submitted = vkQueueSubmit(s.outQueue, 1, &submit, slot.fences[1 + k]);
         slot.used[1 + k] = submitted == VK_SUCCESS;
 
+        // The game's device group present info (one device) goes with every present of the frame
+        VkDeviceGroupPresentInfoKHR groupInfo { VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR };
+        groupInfo.swapchainCount = job.groupCount;
+        groupInfo.pDeviceMasks = &job.groupMask;
+        groupInfo.mode = static_cast<VkDeviceGroupPresentModeFlagBitsKHR>(job.groupMode);
+
         VkPresentInfoKHR shown { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        shown.pNext = job.hasGroup ? &groupInfo : nullptr;
         shown.waitSemaphoreCount = 1;
         shown.swapchainCount = 1;
         shown.pSwapchains = &_swapchain;
@@ -1859,6 +1904,13 @@ F5Low_Vk::Outcome F5Low_Vk::Generate(VkQueue queue, const VkPresentInfoKHR* pres
         return Outcome::Direct;
 
     _generationOff = false;
+
+    if (!_loggedGenerating)
+    {
+        _loggedGenerating = true;
+        LOG_INFO("F5Low (Vulkan): generating {} frame(s) per game frame, frame interval {:.2f} ms", generated,
+                 _intervalMs);
+    }
 
     job.slot = slotIndex;
     job.set = set;

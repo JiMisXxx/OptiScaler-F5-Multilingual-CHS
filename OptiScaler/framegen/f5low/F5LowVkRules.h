@@ -101,6 +101,22 @@ inline uint32_t GeneratedAfter(int result, uint32_t reported, uint32_t asked)
     return result == 0 && reported >= asked ? asked : 0;
 }
 
+// A VkDeviceGroupPresentInfoKHR (RDR2 chains one) the real and the generated presents may carry: one device only.
+// mode is its VkDeviceGroupPresentModeFlagsKHR (1 = LOCAL); with swapchainCount 1 the swapchain's device mask has one
+// bit, with 0 the default applies.
+inline bool SingleDeviceMask(uint32_t mask) { return mask != 0 && (mask & (mask - 1)) == 0; }
+
+inline bool DeviceGroupCarryable(uint32_t swapchainCount, uint32_t mode, uint32_t mask0)
+{
+    if (mode != 1)
+        return false;
+
+    if (swapchainCount == 0)
+        return true;
+
+    return swapchainCount == 1 && SingleDeviceMask(mask0);
+}
+
 // Whether the frame may be generated at all: the interval is known and the generator has a count to make.
 inline bool CanPace(double intervalMs, uint32_t count) { return intervalMs > 0.0 && count > 0; }
 } // namespace F5LowVk

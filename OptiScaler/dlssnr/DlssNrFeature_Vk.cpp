@@ -1582,10 +1582,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (feature)
             continue;
         const auto tuning = Profiles::PassTuning(cfg, pass);
-        feature = g_vk.create((void*) cmdBuffer, g_vk.capabilityParams, modelWidth, modelHeight,
-                             (int) Profiles::PassPreset(cfg, pass), tuning.intensity,
-                             (int) Profiles::PassStyle(cfg, pass), tuning.structure, tuning.tone,
-                             tuning.skin, tuning.autoMask ? 1 : 0, 1);
+        feature =
+            g_vk.create((void*) cmdBuffer, g_vk.capabilityParams, modelWidth, modelHeight,
+                        (int) Profiles::PassPreset(cfg, pass), tuning.intensity, (int) Profiles::PassStyle(cfg, pass),
+                        tuning.structure, tuning.tone, tuning.skin, tuning.autoMask ? 1 : 0, 1);
         if (!feature)
         {
             Fail("the model would not build a feature on this device");

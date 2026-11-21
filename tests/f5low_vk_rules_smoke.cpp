@@ -101,6 +101,17 @@ int main()
     CHECK(GeneratedAfter(1, 3, 3) == 0);
     CHECK(GeneratedAfter(-2, 3, 3) == 0);
 
+    // device group present info: one device only
+    CHECK(SingleDeviceMask(1));
+    CHECK(SingleDeviceMask(4));
+    CHECK(!SingleDeviceMask(0));
+    CHECK(!SingleDeviceMask(3));
+    CHECK(DeviceGroupCarryable(1, 1, 1));
+    CHECK(DeviceGroupCarryable(0, 1, 0));
+    CHECK(!DeviceGroupCarryable(1, 1, 3)); // two devices
+    CHECK(!DeviceGroupCarryable(1, 4, 1)); // SUM mode
+    CHECK(!DeviceGroupCarryable(2, 1, 1)); // two swapchains
+
     // the game thread's budget
     CHECK(RemainingMs(50.0, 0.0) == 50);
     CHECK(RemainingMs(50.0, 20.5) == 29);

@@ -4569,6 +4569,14 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
         in.paused = fg->IsPaused();
         in.generationOff = fg->GenerationOff();
         in.generating = fg->IsGenerating();
+
+        // F5Low on a native Vulkan swapchain has no Dynamic MFG: the reason it passes frames through is its own
+        static std::string vkOffReason;
+        if (state.activeFgOutput == FGOutput::F5Low && state.currentVkFG != nullptr)
+        {
+            vkOffReason = state.currentVkFG->StatusLine();
+            in.offReason = vkOffReason.empty() ? "passing frames through (nothing generated yet)" : vkOffReason.c_str();
+        }
         in.interpolated = static_cast<int>(fg->GetInterpolatedFrameCount());
 
         if (UsesXeFGApi(state.activeFgOutput))
@@ -4594,7 +4602,7 @@ void MenuCommon::RenderFgStatusLine(RenderMenuContext& ctx)
     // F5Low on a native Vulkan swapchain says why it is not generating
     if (auto* vkFg = state.currentVkFG; vkFg != nullptr && state.activeFgOutput == FGOutput::F5Low)
     {
-        if (const auto line = vkFg->StatusLine(); !line.empty())
+        if (const auto line = vkFg->StatusLine(); !line.empty() && !vkFg->GenerationOff())
             ImGui::TextColored(toneMapColor({ 1.0f, 0.75f, 0.25f, 1.0f }), "%s", line.c_str());
     }
 }
